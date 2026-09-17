@@ -1,0 +1,239 @@
+.shell {
+  display: grid;
+  min-width: 1100px;
+  min-height: 700px;
+  height: 100%;
+  grid-template-columns: 238px 1fr;
+  background: var(--app-bg);
+}
+
+.sidebar {
+  display: flex;
+  min-height: 0;
+  padding: 24px 14px 18px;
+  flex-direction: column;
+  background: var(--navy);
+  color: #fff;
+}
+
+.brand {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  padding: 0 10px 28px;
+}
+
+.brandMark {
+  display: grid;
+  width: 37px;
+  height: 37px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: var(--primary);
+  place-items: center;
+  box-shadow: 0 8px 18px rgba(28, 107, 228, 0.3);
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand strong {
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.brand span {
+  margin-top: 2px;
+  color: #aebbd0;
+  font-size: 12px;
+}
+
+.navigation {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.navLabel {
+  padding: 0 13px 9px;
+  color: #7586a2;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.navItem {
+  display: flex;
+  width: 100%;
+  gap: 11px;
+  align-items: center;
+  padding: 11px 13px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #aebbd0;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  transition: 140ms ease;
+}
+
+.navItem:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+
+.navItem.active {
+  background: rgba(42, 119, 232, 0.18);
+  color: #fff;
+  box-shadow: inset 3px 0 0 #4d94ff;
+}
+
+.sidebarFooter {
+  display: flex;
+  margin-top: auto;
+  padding: 0 10px;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.security {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #aebbd0;
+  font-size: 11px;
+}
+
+.version {
+  color: #62748f;
+  font-size: 10px;
+}
+
+.content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  height: 78px;
+  flex: 0 0 78px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--topbar-bg);
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-subtle);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.topbar h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+.topbarRight {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+}
+
+.appStatus {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  color: var(--text-subtle);
+}
+
+.appStatus > svg { color: var(--primary); }
+
+.appStatus span,
+.appStatus strong {
+  display: block;
+}
+
+.appStatus span {
+  margin-bottom: 2px;
+  font-size: 9px;
+}
+
+.appStatus strong {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.appStatus i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.appStatus i.pulse {
+  background: var(--primary);
+  animation: pulse 1.2s infinite;
+}
+
+.profile {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  font: inherit;
+  text-align: left;
+}
+
+.avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #e7effc;
+  color: var(--primary-dark);
+  font-size: 11px;
+  font-weight: 800;
+  place-items: center;
+}
+
+.profile strong,
+.profile div > span { display: block; }
+.profile strong { color: var(--text); font-size: 11px; }
+.profile div > span { margin-top: 2px; font-size: 9px; }
+
+.main {
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 28px 34px;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(27, 105, 219, 0.2); }
+  50% { box-shadow: 0 0 0 5px rgba(27, 105, 219, 0); }
+}

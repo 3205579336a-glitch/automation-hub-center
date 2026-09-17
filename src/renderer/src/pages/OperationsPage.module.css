@@ -1,0 +1,55 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.card {
+  position: relative;
+  display: flex;
+  min-height: 230px;
+  padding: 20px;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.activeCard { border-color: #bcd2f2; box-shadow: 0 7px 22px rgba(27, 105, 219, .09); }
+.disabledCard { background: var(--surface-muted); }
+
+.icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 16px;
+  border-radius: 11px;
+  place-items: center;
+}
+
+.purple { background: #f2edff; color: #7457c6; }
+.blue { background: #eaf2ff; color: var(--primary); }
+.green { background: #eaf8f2; color: var(--success); }
+.orange { background: #fff2e8; color: #c35f13; }
+.gray { background: #eef1f5; color: #7c899b; }
+
+.cardTop {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+}
+
+.cardTop > span {
+  color: var(--text-subtle);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+
+.card h3 { margin: 0 0 7px; color: var(--text-strong); font-size: 15px; }
+.card p { max-width: 540px; margin: 0 0 20px; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
+.card > .button { margin-top: auto; }
+.actions { display: flex; width: 100%; margin-top: auto; flex-wrap: wrap; gap: 8px; }

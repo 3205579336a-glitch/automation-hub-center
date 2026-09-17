@@ -1,0 +1,22 @@
+.backdrop { position: fixed; z-index: 120; inset: 0; display: grid; padding: 30px; background: rgba(5, 12, 24, .76); place-items: center; }
+.dialog { width: min(820px, calc(100vw - 60px)); padding: 22px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 24px 70px rgba(0,0,0,.28); }
+.header { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+.titleIcon { display: grid; width: 42px; height: 42px; border-radius: 11px; background: var(--primary-soft); color: var(--primary); place-items: center; }
+.header span { color: var(--text-subtle); font-size: 9px; font-weight: 800; letter-spacing: .08em; }
+.header h3 { margin: 3px 0 0; color: var(--text-strong); }
+.close { display: grid; width: 34px; height: 34px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); color: var(--text-muted); place-items: center; }
+.description { margin: 18px 0; color: var(--text-muted); line-height: 1.55; }
+.demo { display: flex; min-height: 150px; align-items: stretch; justify-content: center; padding: 22px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
+.stepGroup { display: flex; min-width: 0; align-items: center; }
+.step { display: flex; width: 190px; min-height: 104px; padding: 15px; border: 1px solid var(--border-strong); border-radius: 10px; flex-direction: column; background: var(--surface); color: var(--text-muted); box-shadow: var(--shadow); }
+.step > span { color: var(--primary); font-size: 10px; font-weight: 800; }
+.step strong { margin: 9px 0 auto; color: var(--text-strong); line-height: 1.4; }
+.step svg { align-self: flex-end; color: var(--success); opacity: .45; }
+.arrow { flex: none; margin: 0 8px; color: var(--text-subtle); }
+.comingSoon { margin: 13px 0 0; padding: 10px; border-radius: 8px; background: var(--warning-soft); color: var(--warning-text); }
+.dialog footer { display: flex; justify-content: flex-end; margin-top: 18px; }
+
+@keyframes guide-pulse {
+  0%, 28%, 100% { border-color: var(--border-strong); transform: translateY(0); }
+  8%, 20% { border-color: var(--primary); transform: translateY(-5px); box-shadow: 0 12px 26px rgba(27,105,219,.18); }
+}

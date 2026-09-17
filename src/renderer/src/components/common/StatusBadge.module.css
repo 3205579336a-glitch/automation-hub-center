@@ -1,0 +1,36 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.success, .active {
+  background: #eaf8f0;
+  color: #18794e;
+}
+
+.partial {
+  background: #fff6df;
+  color: #a56614;
+}
+
+.running {
+  background: #eaf2ff;
+  color: var(--primary);
+}
+
+.failed {
+  background: #fff0f0;
+  color: #c53434;
+}
+
+.cancelled, .comingsoon {
+  background: #f0f2f6;
+  color: #68758a;
+}

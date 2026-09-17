@@ -1,0 +1,78 @@
+{
+  "name": "sap-automation-toolbox",
+  "version": "0.2.3",
+  "description": "A secure Windows desktop foundation for SAP WebGUI automation.",
+  "main": "./out/main/index.js",
+  "type": "module",
+  "author": "SAP Automation Toolbox",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . --max-warnings=0",
+    "smoke": "npm run build && node scripts/smoke-test.mjs",
+    "test:apqp": "py -3 scripts/test-apqp-plan-closure.py",
+    "test:me52n": "py -3 scripts/test-me52n-project-ref.py",
+    "smoke:apqp": "npm run build && node scripts/apqp-smoke-test.mjs",
+    "build:engine": "powershell -ExecutionPolicy Bypass -File scripts/build-automation-engine.ps1",
+    "package:win": "npm run build:engine && npm run build && electron-builder --win nsis",
+    "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "lucide-react": "^0.468.0",
+    "playwright-core": "^1.49.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "eslint": "^9.16.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vite": "^5.4.11"
+  },
+  "build": {
+    "appId": "com.sapautomation.toolbox",
+    "productName": "SAP Automation Toolbox",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/templates",
+        "to": "templates"
+      },
+      {
+        "from": "resources/rpa-engine/automation-engine",
+        "to": "rpa-engine/automation-engine"
+      }
+    ],
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
