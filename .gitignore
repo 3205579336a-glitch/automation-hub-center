@@ -11,6 +11,7 @@ outputs/
 __pycache__/
 *.py[cod]
 *.tsbuildinfo
+*.xlsx.inspect.ndjson
 .env
 .env.*
 !.env.example

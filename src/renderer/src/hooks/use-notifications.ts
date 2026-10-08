@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import type { AppNotification, Notify } from '../types/notifications'
+import { playNotificationSound } from './notification-sound'
 
 const NOTIFICATION_DURATION_MS = 5_000
 
@@ -18,6 +19,7 @@ export function useNotifications(): {
   const notify = useCallback<Notify>(
     (notification) => {
       const id = nextId.current++
+      playNotificationSound(notification.kind)
       setNotifications((current) => [...current.slice(-3), { ...notification, id }])
       window.setTimeout(() => dismiss(id), NOTIFICATION_DURATION_MS)
     },

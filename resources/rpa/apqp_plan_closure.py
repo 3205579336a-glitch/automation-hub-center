@@ -61,6 +61,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pythoncom
 import win32com.client
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hub_user_interaction import HubStopped, HubUserInteraction
+
 
 # ============================================================================
 # 1. 配置区
@@ -219,7 +222,7 @@ def parse_sap_date(value: str) -> Optional[dt.date]:
     for fmt in formats:
         try:
             return dt.datetime.strptime(text, fmt).date()
-        except ValueError:
+        except (ValueError, RuntimeError):
             continue
 
     return None
@@ -916,6 +919,8 @@ def write_result_to_excel(ws, result: Result) -> None:
 
 PRINT_LOCK = threading.Lock()
 STOP_EVENT = threading.Event()
+HUB_UNSAFE_EVENT = threading.Event()
+HUB_MODE = bool(os.environ.get("HUB_RUN_ID"))
 
 
 def worker_loop(
@@ -935,7 +940,7 @@ def worker_loop(
             f"{session_ref.system}/{session_ref.client}"
         )
 
-        while not STOP_EVENT.is_set():
+        while not STOP_EVENT.is_set() and not (HUB_MODE and HUB_UNSAFE_EVENT.is_set()):
             try:
                 task = task_queue.get_nowait()
             except queue.Empty:
@@ -953,6 +958,8 @@ def worker_loop(
                 else:
                     result = query_one(session, task, worker_id)
                 result_queue.put(result)
+                if HUB_MODE and result.status not in {"SUCCESS", "NO_RESULT", "NO_DATE"}:
+                    HUB_UNSAFE_EVENT.set()
 
                 icon = "✅" if result.status == "SUCCESS" else "⚠️"
                 safe_print(
@@ -967,6 +974,8 @@ def worker_loop(
                 task_queue.task_done()
 
     except Exception as exc:
+        if HUB_MODE:
+            HUB_UNSAFE_EVENT.set()
         safe_print(f"[W{worker_id}] 💥 Worker级错误：{exc}")
 
     finally:
@@ -988,11 +997,23 @@ def emit(event: str, **payload) -> None:
 def select_worksheet(wb, name: str):
     if name:
         return wb.Worksheets(name)
+    try:
+        sheet = wb.Worksheets("APQP_Input")
+        validate_headers(sheet)
+        return sheet
+    except Exception:
+        pass
+    candidates = []
     for index in range(1, wb.Worksheets.Count + 1):
         sheet = wb.Worksheets(index)
-        if sheet.Name.lower() == "apqp_input":
-            return sheet
-    return wb.Worksheets(1)
+        try:
+            validate_headers(sheet)
+            candidates.append(sheet)
+        except ValueError:
+            continue
+    if len(candidates) != 1:
+        raise ValueError("Keep exactly one APQP input worksheet with the template headers.")
+    return candidates[0]
 
 
 def validate_headers(ws) -> None:
@@ -1052,6 +1073,9 @@ def main() -> None:
     owns_excel = False
     threads = []
     log_file = None
+    hub = HubUserInteraction("APQP", emit, STOP_EVENT) if os.environ.get("HUB_RUN_ID") else None
+    tasks = []
+    skipped = 0
     try:
         excel, wb, ws, owns_excel = get_or_open_excel_workbook(excel_path, SHEET_NAME)
         validate_headers(ws)
@@ -1066,8 +1090,27 @@ def main() -> None:
                  skipped=skipped, failed=invalid, workers=0, cancelled=False,
                  resultPath=str(excel_path), backupPath="", logPath="")
             return
-        threading.Thread(target=listen_for_cancel, daemon=True).start()
+        if hub:
+            hub.start_listener()
+        else:
+            threading.Thread(target=listen_for_cancel, daemon=True).start()
         emit("preparing", message="Checking the SAP environment and available idle sessions.")
+        if hub:
+            try:
+                discover_sap_sessions()
+            except Exception:
+                # Launch only when SAP GUI is absent; never create/guess a company connection.
+                try:
+                    get_sap_application()
+                except Exception:
+                    try:
+                        from me01_source_list import launch_sap_logon
+                        launch_sap_logon()
+                    except Exception:
+                        pass
+                hub.wait("SIGN_IN",
+                    "Sign in to SAP, return idle windows to SAP home, and keep one environment open.",
+                    "请登录 SAP，把空闲窗口返回 SAP 首页，并只保留一个环境。", discover_sap_sessions)
         session_refs = prepare_sessions(len(tasks))
         if STOP_EVENT.is_set():
             emit("complete", message="Cancelled before querying.", total=len(tasks), processed=0,
@@ -1119,12 +1162,24 @@ def main() -> None:
         for thread in threads:
             thread.join()
         wb.Save()
+        if hub and HUB_UNSAFE_EVENT.is_set() and not STOP_EVENT.is_set():
+            # All query workers have stopped and Excel/logs are flushed before publishing a pause.
+            try:
+                hub.wait("UNVERIFIED_STATE",
+                    "A SAP query could not be safely verified. Partial results were saved; stop and review details.",
+                    "有一条 SAP 查询无法安全验证。已保存部分结果，请停止并查看详情。")
+            except HubStopped:
+                STOP_EVENT.set()
         unprocessed = len(tasks) - completed
         failed += invalid + (0 if STOP_EVENT.is_set() else unprocessed)
         emit("complete", message=f"APQP: {succeeded} dates written, {no_data + skipped} skipped, {failed} failed; {unprocessed} not processed.",
              total=len(tasks), processed=completed, succeeded=succeeded, skipped=no_data + skipped,
              failed=failed, workers=len(session_refs), cancelled=STOP_EVENT.is_set(),
              resultPath=str(excel_path), backupPath=str(backup_path), logPath=str(log_path))
+    except HubStopped:
+        emit("complete", message="APQP stopped before querying.", total=len(tasks), processed=0,
+             succeeded=0, skipped=skipped, failed=0, workers=0, cancelled=True,
+             resultPath=str(excel_path), backupPath="", logPath="")
     finally:
         STOP_EVENT.set()
         for thread in threads:

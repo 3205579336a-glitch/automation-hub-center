@@ -1,10 +1,10 @@
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { app, BrowserWindow, shell } from 'electron'
 import { BrowserManager } from './automation/browser-manager'
 import { Me12BatchRunner } from './automation/me12-batch-runner'
 import { RfqNativeRunner } from './automation/rfq-native-runner'
 import { Me01NativeRunner } from './automation/me01-native-runner'
-import { Me52nNativeRunner } from './automation/me52n-native-runner'
 import { BrowserSlotManager } from './automation/browser-slot-manager'
 import { registerAutomationHandlers } from './ipc/automation-handlers'
 import { registerDiagnosticHandlers } from './ipc/diagnostic-handlers'
@@ -13,7 +13,6 @@ import { registerMe12Handlers } from './ipc/me12-handlers'
 import { registerHistoryHandlers } from './ipc/history-handlers'
 import { registerRfqHandlers } from './ipc/rfq-handlers'
 import { registerMe01Handlers } from './ipc/me01-handlers'
-import { registerMe52nHandlers } from './ipc/me52n-handlers'
 import { DiagnosticLogger } from './services/diagnostic-logger'
 import { LocalStoragePaths } from './services/local-storage-paths'
 import { SettingsService } from './services/settings-service'
@@ -21,7 +20,7 @@ import { Me12ExcelService } from './services/me12-excel-service'
 import { ExecutionHistoryService } from './services/execution-history-service'
 import { RfqExcelService } from './services/rfq-excel-service'
 import { Me01ExcelService } from './services/me01-excel-service'
-import { Me52nExcelService } from './services/me52n-excel-service'
+import { GuidedAutomationService } from './services/guided-automation-service'
 import { ApqpRunner } from './automation/apqp-runner'
 import { registerApqpHandlers } from './ipc/apqp-handlers'
 
@@ -91,13 +90,13 @@ app.whenReady().then(async () => {
   )
   const resourceRoot = app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources')
   const sharedEngine = join(resourceRoot, 'rpa-engine', 'automation-engine', 'automation-engine.exe')
-  const rfqExcelService = new RfqExcelService()
   const rfqRunner = new RfqNativeRunner({
     executable: sharedEngine,
     executableArgs: ['rfq'],
     script: join(resourceRoot, 'rpa', 'rfq_engine.py'),
     preferScript: !app.isPackaged
-  })
+  }, join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'SAP Automation Toolbox', 'runs'), app.getVersion())
+  const rfqExcelService = new RfqExcelService(rfqRunner)
   const me01ExcelService = new Me01ExcelService()
   const me01Runner = new Me01NativeRunner({
     executable: sharedEngine,
@@ -105,13 +104,7 @@ app.whenReady().then(async () => {
     script: join(resourceRoot, 'rpa', 'me01_source_list.py'),
     preferScript: !app.isPackaged
   })
-  const me52nExcelService = new Me52nExcelService()
-  const me52nRunner = new Me52nNativeRunner({
-    executable: sharedEngine,
-    executableArgs: ['me52n'],
-    script: join(resourceRoot, 'rpa', 'me52n_project_ref.py'),
-    preferScript: !app.isPackaged
-  })
+  const guided = new GuidedAutomationService(join(storagePaths.dataDirectory, 'interactions'), () => rfqRunner.isRunning())
   registerSettingsHandlers(settingsService, logger)
   registerAutomationHandlers(browserManager, logger, history)
   registerDiagnosticHandlers(logger, storagePaths)
@@ -121,7 +114,8 @@ app.whenReady().then(async () => {
     logger,
     history,
     join(resourceRoot, 'templates', 'ME12_Supplier_Lead_Time_Template.xlsx'),
-    settingsService
+    settingsService,
+    guided
   )
   registerRfqHandlers(
     rfqExcelService,
@@ -129,7 +123,8 @@ app.whenReady().then(async () => {
     logger,
     history,
     join(resourceRoot, 'templates', 'Create_RFQ_Template.xlsx'),
-    settingsService
+    settingsService,
+    guided
   )
   registerMe01Handlers(
     me01ExcelService,
@@ -137,16 +132,16 @@ app.whenReady().then(async () => {
     logger,
     history,
     join(resourceRoot, 'templates', 'ME01_Source_List_Template.xlsx'),
-    settingsService
+    settingsService,
+    guided
   )
-  registerMe52nHandlers(me52nExcelService, me52nRunner, logger, history)
   const apqpRunner = new ApqpRunner({
     executable: sharedEngine,
     executableArgs: ['apqp'],
     script: join(resourceRoot, 'rpa', 'apqp_plan_closure.py'),
     preferScript: !app.isPackaged
   })
-  registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'))
+  registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'), guided)
   registerHistoryHandlers(history)
   await logger.info({
     category: 'application',
@@ -170,7 +165,22 @@ app.whenReady().then(async () => {
     }
   })
 
-  app.on('before-quit', () => {
+  let waitingForRfq = false
+  app.on('before-quit', (event) => {
+    if (rfqRunner.isRunning() || guided.isRunning()) {
+      event.preventDefault()
+      void rfqRunner.cancel()
+      me12Runner.cancel()
+      me01Runner.cancel()
+      apqpRunner.cancel()
+      if (!waitingForRfq) {
+        waitingForRfq = true
+        const timer = setInterval(() => {
+          if (!rfqRunner.isRunning() && !guided.isRunning()) { clearInterval(timer); app.quit() }
+        }, 1000)
+      }
+      return
+    }
     apqpRunner.cancel()
     void logger.info({
       category: 'application',

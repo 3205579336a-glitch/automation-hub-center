@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 """
-SAP GUI RPA v14: NPL -> Buyer Receipt -> RFQ
+SAP GUI RPA v32: NPL -> Buyer Receipt -> RFQ (Auto Date Normalize + Parma Group)
 
 Based on the SAP GUI Scripting recording supplied by the user.
 
 Main design:
 1. Read Excel by header name.
-2. Group rows for batch/multi-selection.
-3. Query ZMFM050072 by Plant + MPP Project No.
+2. Automatically group rows by Parma + compatible RFQ header fields.
+3. Query ZMFM050072 by Plant + MPP Project No. + exact Material set (single or multi-select).
 4. Match Excel Material against the actual NPL grid (not fixed row numbers).
 5. Select one or many matched NPL rows and create Buyer Receipt.
 6. Re-map Material in the Buyer Receipt grid, fill row-level data, save, and verify.
@@ -18,12 +18,10 @@ Main design:
 10. Validate PPAP Target Date only after entering the Buyer Receipt screen.
     When it is blank or earlier than today, use a valid Excel PPAP Date if supplied; otherwise mark
     the row as INPUT_REQUIRED_PPAP_DATE and continue with the next Excel row.
-11. Default to ROW mode: one Excel material per SAP run unit. Existing-RFQ and
-    PPAP-date messages are acknowledged with Continue and the next row starts.
-12. Reuse ZMFM050072 between rows: return to its selection screen with Back
-    instead of restarting the transaction for every material.
-13. Optional BATCH mode remains available for multi-selection.
-14. Write status/error details back to Excel after every group.
+11. Default to PARMA grouping: compatible rows with the same Supplier Parma are created in one RFQ.
+12. For a multi-material Parma group, use SAP Material multiple-selection + clipboard upload so SAP filters the exact material set server-side.
+13. Existing-RFQ / PPAP / known master-data errors remain non-fatal and are written back to Excel.
+14. Write the same created RFQ Number back to every successful material row in the group.
 
 This script uses native SAP GUI Scripting (pywin32), not Playwright/WebGUI.
 It can launch SAP Logon automatically and open the configured QA/Production entry.
@@ -45,22 +43,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-# Electron reads the frozen engine through pipes. Force UTF-8 so Chinese status
-# messages and symbols never fail on Windows machines using a GBK console codepage.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
-
 import openpyxl
 from openpyxl import Workbook
+from openpyxl.utils.datetime import from_excel as openpyxl_from_excel
 
-try:
-    from dotenv import load_dotenv
+from rfq_runtime import initialize, run_hub
 
-    load_dotenv()
-except Exception:
-    # .env support is optional. Environment variables and defaults still work.
-    pass
+SCRIPT_DIR = Path(__file__).resolve().parent
+ENV_PATH = SCRIPT_DIR / ".env"
+HUB_ARGS = initialize(ENV_PATH)
 
 
 # =============================================================================
@@ -70,11 +61,17 @@ except Exception:
 EXCEL_PATH = Path(
     os.getenv(
         "EXCEL_PATH",
-        r"C:\Users\A533700\Downloads\Buyer_Receipt_RFQ_Input.xlsx",
+        "",
     )
 )
 SHEET_NAME = os.getenv("SHEET_NAME", "RPA_Input").strip()
 DATA_START_ROW = max(2, int(os.getenv("DATA_START_ROW", "2")))
+
+# Production RFQ header inputs are read from fixed Excel columns:
+# E = Supplier Email, F = RFQ / Quotation Due Date.
+# openpyxl uses 1-based column indexes: E=5, F=6.
+SUPPLIER_EMAIL_EXCEL_COL = max(1, int(os.getenv("SUPPLIER_EMAIL_EXCEL_COL", "5")))
+RFQ_DUE_DATE_EXCEL_COL = max(1, int(os.getenv("RFQ_DUE_DATE_EXCEL_COL", "6")))
 
 SAP_CONNECTION_INDEX = max(0, int(os.getenv("SAP_CONNECTION_INDEX", "0")))
 SAP_SESSION_INDEX = max(0, int(os.getenv("SAP_SESSION_INDEX", "0")))
@@ -118,6 +115,22 @@ if SAP_TARGET_ENV not in SAP_TARGET_ALIASES:
         f"当前值={SAP_TARGET_ENV!r}"
     )
 SAP_TARGET_ENV = SAP_TARGET_ALIASES[SAP_TARGET_ENV]
+
+# Production flow differs from QA after Buyer Receipt save. In PROD the current
+# CUSTOMER1 grid already exposes LIFNRx_CB and can go directly to btn[19]
+# (Detailed RFQ), matching the user's production recording. QA keeps the old
+# btn[2] -> CUSTOMER2 -> btn[9] intermediate path.
+PROD_DIRECT_RFQ_AFTER_BUYER_RECEIPT = os.getenv(
+    "PROD_DIRECT_RFQ_AFTER_BUYER_RECEIPT",
+    "true" if SAP_TARGET_ENV == "PROD" else "false",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+# In PROD, set the due date text as DD.MM.YYYY and also use the calendar popup
+# when available, matching the recorded date-selection flow.
+PROD_USE_RFQ_CALENDAR_PICKER = os.getenv(
+    "PROD_USE_RFQ_CALENDAR_PICKER",
+    "true",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
 SAP_TARGET_CONNECTION_NAME = (
     SAP_PROD_CONNECTION_NAME if SAP_TARGET_ENV == "PROD" else SAP_QA_CONNECTION_NAME
 )
@@ -171,6 +184,22 @@ DRY_RUN = os.getenv("DRY_RUN", "true").strip().lower() in {
 TEST_GROUP_LIMIT = max(0, int(os.getenv("TEST_GROUP_LIMIT", "1")))
 MAX_MATERIALS_PER_GROUP = max(1, int(os.getenv("MAX_MATERIALS_PER_GROUP", "50")))
 
+# v30 default behavior: rows with the same Parma are grouped into one RFQ,
+# as long as the RFQ header-level fields are compatible.
+GROUP_RFQ_BY_PARMA = os.getenv(
+    "GROUP_RFQ_BY_PARMA",
+    "true",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+# For grouped RFQs, do NOT load the whole Project result and scan it.
+# Use SAP's Material multiple-selection popup and upload the exact material list
+# from the Windows clipboard, matching the user's SAP GUI recording.
+NPL_MULTI_MATERIAL_QUERY = os.getenv(
+    "NPL_MULTI_MATERIAL_QUERY",
+    "true",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 # ROW is the safest mode and is now the default:
 # - one Excel row/material per SAP unit;
 # - an existing-RFQ popup is acknowledged and the next Excel row starts;
@@ -209,6 +238,21 @@ CONTINUE_AFTER_PPAP_DATE_ERROR = os.getenv(
     "CONTINUE_AFTER_PPAP_DATE_ERROR",
     "true",
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+# Buyer Receipt post-save recoverable master-data error handling.
+# Example from PROD:
+# "Sub commodity code needs to be created in Material Master."
+# Required recovery sequence from the SAP recording:
+# Continue -> Back -> Back -> next Excel row.
+CONTINUE_AFTER_BUYER_RECEIPT_MASTER_DATA_ERROR = os.getenv(
+    "CONTINUE_AFTER_BUYER_RECEIPT_MASTER_DATA_ERROR",
+    "true",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+BUYER_RECEIPT_ERROR_BACK_STEPS = max(
+    1,
+    int(os.getenv("BUYER_RECEIPT_ERROR_BACK_STEPS", "2")),
+)
 PPAP_MIN_DAYS_AHEAD = max(0, int(os.getenv("PPAP_MIN_DAYS_AHEAD", "0")))
 
 # Reuse ZMFM050072 between Excel rows.
@@ -239,6 +283,14 @@ NPL_BACK_POLL_SEC = max(0.1, float(os.getenv("NPL_BACK_POLL_SEC", "0.25")))
 # the Plant/Project selection screen and re-executing the same query.
 REUSE_SAME_PROJECT_NPL_RESULTS = os.getenv(
     "REUSE_SAME_PROJECT_NPL_RESULTS",
+    "true",
+).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+# Fast/stable NPL lookup for ROW mode:
+# query SAP server-side with Plant + Project + exact Material instead of loading
+# the whole GPN/Project result and scanning the ALV grid.
+NPL_EXACT_MATERIAL_QUERY = os.getenv(
+    "NPL_EXACT_MATERIAL_QUERY",
     "true",
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
 SAME_PROJECT_MAX_BACK_STEPS = max(1, int(os.getenv("SAME_PROJECT_MAX_BACK_STEPS", "1")))
@@ -364,11 +416,48 @@ SAP_LONG_WAIT_SEC = max(SAP_WAIT_SEC, float(os.getenv("SAP_LONG_WAIT_SEC", "60")
 SAP_POLL_SEC = max(0.1, float(os.getenv("SAP_POLL_SEC", "0.3")))
 SAP_STEP_PAUSE_SEC = max(0.0, float(os.getenv("SAP_STEP_PAUSE_SEC", "0.4")))
 
+# PROD final RFQ confirmation sequence from the user's recording:
+# BUTTON_1 -> BUTTON_1 -> BUTTON_2 -> Continue
+# i.e. YES -> YES -> NO -> CONTINUE.
+PROD_RFQ_POPUP_SEQUENCE = [
+    token.strip().upper()
+    for token in os.getenv(
+        "PROD_RFQ_POPUP_SEQUENCE",
+        "YES,YES,NO,CONTINUE",
+    ).split(",")
+    if token.strip()
+]
+PROD_RFQ_POPUP_STEP_TIMEOUT_SEC = max(
+    2.0,
+    float(os.getenv("PROD_RFQ_POPUP_STEP_TIMEOUT_SEC", "12")),
+)
+PROD_RFQ_POPUP_POST_CLICK_SEC = max(
+    0.3,
+    float(os.getenv("PROD_RFQ_POPUP_POST_CLICK_SEC", "1.2")),
+)
+PROD_RFQ_POPUP_CLICK_RETRIES = max(
+    1,
+    int(os.getenv("PROD_RFQ_POPUP_CLICK_RETRIES", "3")),
+)
+
+
+PROD_RFQ_NEXT_POPUP_WAIT_SEC = max(
+    2.0,
+    float(os.getenv("PROD_RFQ_NEXT_POPUP_WAIT_SEC", "12")),
+)
+
+
+RFQ_SUCCESS_BACK_STEPS = max(
+    1,
+    int(os.getenv("RFQ_SUCCESS_BACK_STEPS", "4")),
+)
+
 # Recorded control IDs
 TCODE_NPL = "ZMFM050072"
 ID_COMMAND = "wnd[0]/tbar[0]/okcd"
 ID_PLANT = "wnd[0]/usr/ctxtS_WERKS-LOW"
 ID_MATERIAL = "wnd[0]/usr/ctxtS_MATNR-LOW"
+ID_MATERIAL_MULTI = "wnd[0]/usr/btn%_S_MATNR_%_APP_%-VALU_PUSH"
 ID_PROJECT = "wnd[0]/usr/ctxtS_ZPSPID-LOW"
 ID_EXECUTE = "wnd[0]/tbar[1]/btn[8]"
 
@@ -655,34 +744,135 @@ def format_quantity(value: Any, default: str) -> str:
     return text
 
 
-def parse_date(value: Any, field_name: str, required: bool = False) -> str:
-    """Return YYYY-MM-DD for SAP text fields."""
-    if value is None or safe_text(value) == "":
-        if required:
-            raise ValueError(f"{field_name}不能为空")
-        return ""
+def normalize_excel_date_value(value: Any) -> Optional[dt.date]:
+    """Best-effort Excel/user date normalizer.
+
+    Accepted examples include:
+      2026-12-15
+      2026/12/15
+      2026.12.15
+      2026 12 15
+      2026年12月15日
+      20261215
+      15.12.2026
+      15/12/2026
+      12/15/2026
+      2026-12-15 00:00:00
+      native Excel datetime/date values
+      Excel serial date numbers
+
+    Internally everything is normalized to a Python date, then the RPA uses
+    YYYY-MM-DD for its own data model and DD.MM.YYYY when writing to SAP.
+    """
+    if value is None:
+        return None
 
     if isinstance(value, dt.datetime):
-        return value.date().isoformat()
+        return value.date()
+
     if isinstance(value, dt.date):
-        return value.isoformat()
+        return value
+
+    # Excel numeric serial date, e.g. 46371.
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            converted = openpyxl_from_excel(value)
+            if isinstance(converted, dt.datetime):
+                return converted.date()
+            if isinstance(converted, dt.date):
+                return converted
+        except Exception:
+            pass
 
     text = safe_text(value)
+    if not text:
+        return None
+
+    # Strip a common time suffix first.
+    text = re.sub(
+        r"\s+(?:[0-2]?\d):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?$",
+        "",
+        text,
+    ).strip()
+
+    # Chinese date text.
+    chinese_match = re.fullmatch(
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?",
+        text,
+    )
+    if chinese_match:
+        year, month, day = map(int, chinese_match.groups())
+        try:
+            return dt.date(year, month, day)
+        except ValueError:
+            return None
+
+    # Year-first variants. This directly fixes values such as 2026.12.15.
+    year_first = re.fullmatch(
+        r"(\d{4})\s*[-./\s]\s*(\d{1,2})\s*[-./\s]\s*(\d{1,2})",
+        text,
+    )
+    if year_first:
+        year, month, day = map(int, year_first.groups())
+        try:
+            return dt.date(year, month, day)
+        except ValueError:
+            return None
+
+    # Compact YYYYMMDD.
+    compact = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", text)
+    if compact:
+        year, month, day = map(int, compact.groups())
+        try:
+            return dt.date(year, month, day)
+        except ValueError:
+            return None
+
+    # Day-first dot format commonly displayed by SAP.
+    day_first_dot = re.fullmatch(
+        r"(\d{1,2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{4})",
+        text,
+    )
+    if day_first_dot:
+        day, month, year = map(int, day_first_dot.groups())
+        try:
+            return dt.date(year, month, day)
+        except ValueError:
+            return None
+
+    # Slash variants: preserve the old parser's compatibility.
     formats = [
-        "%Y-%m-%d",
-        "%Y/%m/%d",
-        "%Y%m%d",
-        "%d.%m.%Y",
         "%m/%d/%Y",
         "%d/%m/%Y",
     ]
     for fmt in formats:
         try:
-            return dt.datetime.strptime(text, fmt).date().isoformat()
+            return dt.datetime.strptime(text, fmt).date()
         except ValueError:
             continue
 
-    raise ValueError(f"{field_name}日期格式无法识别：{text!r}")
+    # ISO timestamps such as 2026-12-15T00:00:00.
+    try:
+        return dt.datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except Exception:
+        return None
+
+
+def parse_date(value: Any, field_name: str, required: bool = False) -> str:
+    """Normalize user/Excel date input to YYYY-MM-DD."""
+    if value is None or safe_text(value) == "":
+        if required:
+            raise ValueError(f"{field_name}不能为空")
+        return ""
+
+    parsed = normalize_excel_date_value(value)
+    if parsed is None:
+        raise ValueError(
+            f"{field_name}日期格式无法识别：{safe_text(value)!r}。"
+            "支持例如 2026-12-15 / 2026.12.15 / 15.12.2026 / Excel日期单元格"
+        )
+
+    return parsed.isoformat()
 
 
 def yyyymmdd(date_text: str) -> str:
@@ -692,32 +882,8 @@ def yyyymmdd(date_text: str) -> str:
 
 
 def parse_date_value(value: Any) -> Optional[dt.date]:
-    """Best-effort parser for Excel/SAP date values."""
-    if value is None:
-        return None
-    if isinstance(value, dt.datetime):
-        return value.date()
-    if isinstance(value, dt.date):
-        return value
-
-    text = safe_text(value)
-    if not text:
-        return None
-
-    formats = [
-        "%Y-%m-%d",
-        "%Y/%m/%d",
-        "%Y%m%d",
-        "%d.%m.%Y",
-        "%d/%m/%Y",
-        "%m/%d/%Y",
-    ]
-    for fmt in formats:
-        try:
-            return dt.datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
+    """Best-effort parser shared by Excel input and SAP date validation."""
+    return normalize_excel_date_value(value)
 
 
 def sap_display_date(value: dt.date) -> str:
@@ -774,7 +940,7 @@ class ExcelStore:
             )
             shutil.copy2(path, self.backup_path)
 
-        self.workbook = openpyxl.load_workbook(path)
+        self.workbook = openpyxl.load_workbook(path, keep_vba=path.suffix.lower() == ".xlsm")
         self.worksheet = self._select_input_worksheet(sheet_name)
         print(
             f"📄 实际读取Sheet: {self.worksheet.title} | "
@@ -808,7 +974,6 @@ class ExcelStore:
             "plant",
             "project",
             "material",
-            "quotation_due_date",
             "vendor1",
         ]
 
@@ -840,7 +1005,7 @@ class ExcelStore:
                 return worksheet
 
         candidate_summary = "; ".join(
-            f"{title}: 命中{score}/5"
+            f"{title}: 命中{score}/4"
             for score, title, _, _ in sorted(candidates, reverse=True)
         )
         available = ", ".join(self.workbook.sheetnames)
@@ -1083,7 +1248,7 @@ class ExcelStore:
             self.workbook.close()
 
     def load_tasks(self) -> list[MaterialTask]:
-        required = ["plant", "project", "material", "quotation_due_date", "vendor1"]
+        required = ["plant", "project", "material", "vendor1"]
         missing = [name for name in required if not self.logical_columns.get(name)]
         if missing:
             readable = ", ".join(missing)
@@ -1096,8 +1261,8 @@ class ExcelStore:
                 "Excel缺少必要表头："
                 f"{readable}。实际读取Sheet='{self.worksheet.title}'；"
                 f"第1行检测到的表头={detected_headers}。"
-                "请至少提供 Plant、Project No.、Material No.、"
-                "Quotation Due Date、Intended Supplier。"
+                "请至少提供 Plant、MPP Project No.、Material No.、"
+                "Quotation Due Date、Supplier Parma。"
             )
 
         tasks: list[MaterialTask] = []
@@ -1144,6 +1309,17 @@ class ExcelStore:
                             raise ValueError(f"Email格式错误：{email}")
                     emails.append(vendor_emails)
 
+                # Production mapping: Supplier Email is Excel E.
+                supplier_email_from_e = safe_text(
+                    self.worksheet.cell(row, SUPPLIER_EMAIL_EXCEL_COL).value
+                )
+                if supplier_email_from_e:
+                    if not valid_email(supplier_email_from_e):
+                        raise ValueError(
+                            f"F列Supplier Email格式错误：{supplier_email_from_e}"
+                        )
+                    emails[0][0] = supplier_email_from_e
+
                 rfq_comment = safe_text(self.value(row, "rfq_comment"))
                 if len(rfq_comment) > 200:
                     raise ValueError("RFQ Comment超过200字符")
@@ -1154,16 +1330,44 @@ class ExcelStore:
                         "当前录制代码没有附件上传路径，Attach File只能填写No/False"
                     )
 
+                raw_ppap_date = self.value(row, "ppap_date")
+                raw_rfq_due_date = self.worksheet.cell(
+                    row,
+                    RFQ_DUE_DATE_EXCEL_COL,
+                ).value
+
+                normalized_ppap_date = parse_date(
+                    raw_ppap_date,
+                    "PPAP Target Date",
+                    required=False,
+                )
+                normalized_rfq_due_date = parse_date(
+                    raw_rfq_due_date,
+                    "Quotation Due Date (Excel F列)",
+                    required=True,
+                )
+
+                if raw_ppap_date not in (None, ""):
+                    raw_ppap_text = safe_text(raw_ppap_date)
+                    if raw_ppap_text and raw_ppap_text != normalized_ppap_date:
+                        print(
+                            f"📅 Excel行{row} PPAP Date自动转换："
+                            f"{raw_ppap_text} -> {normalized_ppap_date}"
+                        )
+
+                raw_due_text = safe_text(raw_rfq_due_date)
+                if raw_due_text and raw_due_text != normalized_rfq_due_date:
+                    print(
+                        f"📅 Excel行{row} RFQ Due Date自动转换："
+                        f"{raw_due_text} -> {normalized_rfq_due_date}"
+                    )
+
                 task = MaterialTask(
                     excel_row=row,
                     material=material,
                     plant=normalize_identifier(self.value(row, "plant")).upper(),
                     project=normalize_identifier(self.value(row, "project")),
-                    ppap_date=parse_date(
-                        self.value(row, "ppap_date"),
-                        "PPAP Target Date",
-                        required=False,
-                    ),
+                    ppap_date=normalized_ppap_date,
                     tech_user=safe_text(self.value(row, "tech_user")),
                     qty_12mr=format_quantity(
                         self.value(row, "qty_12mr"),
@@ -1183,11 +1387,7 @@ class ExcelStore:
                     ),
                     vendors=vendors,
                     cost_breakdown=cost_breakdown,
-                    quotation_due_date=parse_date(
-                        self.value(row, "quotation_due_date"),
-                        "Quotation Due Date",
-                        required=True,
-                    ),
+                    quotation_due_date=normalized_rfq_due_date,
                     emails=emails,
                     allow_without_preferred=parse_bool(
                         self.value(row, "allow_without_preferred"),
@@ -1201,9 +1401,9 @@ class ExcelStore:
                 if not task.plant:
                     raise ValueError("Plant不能为空")
                 if not task.project:
-                    raise ValueError("Project No.不能为空")
+                    raise ValueError("MPP Project No.不能为空")
                 if not task.vendors[0]:
-                    raise ValueError("Intended Supplier不能为空")
+                    raise ValueError("Supplier Parma不能为空")
                 if not task.emails[0][0]:
                     raise ValueError("Supplier Email不能为空")
 
@@ -1228,88 +1428,177 @@ class ExcelStore:
 # =============================================================================
 
 
-def automatic_group_signature(task: MaterialTask) -> tuple[Any, ...]:
+def parma_group_key(task: MaterialTask) -> tuple[str, str, str]:
+    """True RFQ grouping key for v32.
+
+    One RFQ group = same Plant + same Project + same Supplier Parma.
+    Email / Due Date / other header values no longer split the group.
+    """
     return (
         task.plant,
         task.project,
-        task.quotation_due_date,
-        tuple(task.vendors),
-        tuple(task.cost_breakdown),
-        tuple(tuple(v) for v in task.emails),
-        task.allow_without_preferred,
-        task.attach_file,
-        task.rfq_comment,
+        task.vendors[0],
     )
+
+
+def _group_shared_value_warnings(tasks: list[MaterialTask], key: str) -> None:
+    if len(tasks) <= 1:
+        return
+
+    comparisons = {
+        "Quotation Due Date": [task.quotation_due_date for task in tasks],
+        "Supplier Email": [task.emails[0][0] for task in tasks],
+        "Allow Without Preferred Supplier": [
+            str(task.allow_without_preferred) for task in tasks
+        ],
+        "Attach File": [str(task.attach_file) for task in tasks],
+        "RFQ Comment": [task.rfq_comment for task in tasks],
+    }
+
+    for field_name, values in comparisons.items():
+        unique = list(dict.fromkeys(values))
+        if len(unique) > 1:
+            print(
+                f"   ⚠️ Group={key} 内 {field_name} 不一致：{unique}；"
+                f"本RFQ统一使用Excel首行值={values[0]!r}"
+            )
 
 
 def validate_group_consistency(tasks: list[MaterialTask], key: str) -> None:
     if not tasks:
         return
 
-    first_signature = automatic_group_signature(tasks[0])
+    expected = parma_group_key(tasks[0])
     for task in tasks[1:]:
-        if automatic_group_signature(task) != first_signature:
+        if parma_group_key(task) != expected:
             raise ValueError(
-                f"Batch Group={key!r}中存在不同的Plant/Project/Vendor/Email/"
-                "Due Date/选项。一个RFQ Group的Header级信息必须一致。"
+                f"RFQ Group={key!r}内部Plant/Project/Parma不一致，"
+                "不能创建在同一个RFQ。"
             )
+
+    _group_shared_value_warnings(tasks, key)
 
 
 def build_groups(tasks: list[MaterialTask]) -> list[TaskGroup]:
-    """Build processing units according to PROCESS_MODE.
+    """Build actual Parma RFQ groups.
 
-    ROW (default): every Excel row becomes an independent SAP unit. This is
-    deliberately conservative: when row 1 already has an RFQ, the RPA clicks
-    Continue, completes that unit as ALREADY_EXISTS, and then starts row 2.
-
-    BATCH: preserve the original grouping/multi-selection behavior.
+    GROUP_RFQ_BY_PARMA=true:
+      same Plant + same Project + same Supplier Parma -> ONE RFQ group.
     """
-    if PROCESS_MODE == "ROW":
+    if GROUP_RFQ_BY_PARMA:
+        buckets: dict[tuple[str, str, str], list[MaterialTask]] = defaultdict(list)
+        order: list[tuple[str, str, str]] = []
+
+        for task in tasks:
+            key = parma_group_key(task)
+            if key not in buckets:
+                order.append(key)
+            buckets[key].append(task)
+
         groups: list[TaskGroup] = []
-        for position, task in enumerate(tasks, start=1):
-            prefix = task.batch_group or "ROW"
-            key = f"{prefix}-E{task.excel_row}-M{task.material}"
-            groups.append(TaskGroup(key=key, tasks=[task]))
+
+        for group_index, bucket_key in enumerate(order, start=1):
+            group_tasks = buckets[bucket_key]
+            plant, project, parma = bucket_key
+
+            validate_group_consistency(
+                group_tasks,
+                f"PARMA-{parma}-{plant}-PRJ{project}",
+            )
+
+            for part_number, part in enumerate(
+                chunked(group_tasks, MAX_MATERIALS_PER_GROUP),
+                start=1,
+            ):
+                suffix = (
+                    f"-P{part_number}"
+                    if len(group_tasks) > MAX_MATERIALS_PER_GROUP
+                    else ""
+                )
+                group_key = (
+                    f"PARMA-{parma}"
+                    f"-{plant}"
+                    f"-PRJ{project}"
+                    f"-G{group_index:03d}"
+                    f"{suffix}"
+                )
+                groups.append(TaskGroup(key=group_key, tasks=list(part)))
+
         return groups
 
-    explicit: dict[str, list[MaterialTask]] = defaultdict(list)
-    automatic: dict[tuple[Any, ...], list[MaterialTask]] = defaultdict(list)
+    # Legacy modes only when Parma grouping is disabled.
+    if PROCESS_MODE == "ROW":
+        return [
+            TaskGroup(
+                key=f"{task.batch_group or 'ROW'}-E{task.excel_row}-M{task.material}",
+                tasks=[task],
+            )
+            for task in tasks
+        ]
 
+    automatic: dict[tuple[str, str, str], list[MaterialTask]] = defaultdict(list)
     for task in tasks:
-        if task.batch_group:
-            explicit[task.batch_group].append(task)
-        else:
-            automatic[automatic_group_signature(task)].append(task)
+        automatic[parma_group_key(task)].append(task)
 
     groups: list[TaskGroup] = []
-
-    for key, group_tasks in explicit.items():
-        validate_group_consistency(group_tasks, key)
-        for part_number, part in enumerate(
-            chunked(group_tasks, MAX_MATERIALS_PER_GROUP),
-            start=1,
-        ):
-            suffix = f"-P{part_number}" if len(group_tasks) > MAX_MATERIALS_PER_GROUP else ""
-            groups.append(TaskGroup(key=f"{key}{suffix}", tasks=list(part)))
-
     for auto_index, group_tasks in enumerate(automatic.values(), start=1):
+        validate_group_consistency(
+            group_tasks,
+            f"AUTO-PARMA-{group_tasks[0].vendors[0]}-{auto_index:03d}",
+        )
         for part_number, part in enumerate(
             chunked(group_tasks, MAX_MATERIALS_PER_GROUP),
             start=1,
         ):
             groups.append(
                 TaskGroup(
-                    key=f"AUTO-{auto_index:03d}-P{part_number}",
+                    key=(
+                        f"AUTO-PARMA-{group_tasks[0].vendors[0]}"
+                        f"-{auto_index:03d}-P{part_number}"
+                    ),
                     tasks=list(part),
                 )
             )
-
     return groups
 
 
 # =============================================================================
 # 7. SAP GUI helpers
 # =============================================================================
+
+
+
+def set_windows_clipboard_text(text_value: str) -> None:
+    """Put Unicode text on the Windows clipboard with short lock retries."""
+    try:
+        import win32clipboard  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError(
+            "GROUP RFQ需要Windows剪贴板支持，请确认pywin32已安装：pip install pywin32"
+        ) from exc
+
+    last_error: Optional[Exception] = None
+    for _ in range(10):
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(
+                    str(text_value),
+                    win32clipboard.CF_UNICODETEXT,
+                )
+            finally:
+                win32clipboard.CloseClipboard()
+            return
+        except Exception as exc:
+            last_error = exc
+            try:
+                win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+            time.sleep(0.15)
+
+    raise RuntimeError(f"无法写入Windows剪贴板：{last_error}")
 
 
 class SapRpaError(RuntimeError):
@@ -1350,7 +1639,7 @@ class SapSession:
         # Tracks the Plant + MPP Project currently loaded in the NPL result list.
         # This is populated after this RPA executes the NPL query. It lets later
         # rows with the same query reuse the result list after exactly one Back.
-        self._active_npl_query: Optional[tuple[str, str]] = None
+        self._active_npl_query: Optional[tuple[str, str, str]] = None
 
         print(
             "🔐 已连接SAP环境 | "
@@ -1890,31 +2179,211 @@ class SapSession:
             time.sleep(NPL_BACK_POLL_SEC)
         return self._npl_result_grid_contains_tasks(tasks)
 
+    def set_material_multiple_selection(
+        self,
+        materials: Sequence[str],
+    ) -> None:
+        """Replace, never append to, the SAP Material multiple-selection list.
+
+        This follows the user's recorded PROD sequence:
+          Material multiple-selection
+          -> Delete all selections (btn[16])
+          -> Upload from Clipboard (btn[24])
+          -> Enter/accept (btn[0])
+          -> Transfer/confirm (btn[8])
+
+        Only functional controls are retained. Recorded UI-only operations such
+        as caretPosition, selectColumn, firstVisibleColumn and setFocus are not
+        reproduced.
+        """
+        material_list = [normalize_material(m) for m in materials if normalize_material(m)]
+        material_list = list(dict.fromkeys(material_list))
+        if not material_list:
+            raise SapRpaError(
+                "NPL_MULTI_MATERIAL",
+                "Parma Group没有可上传的Material",
+            )
+        self._replace_material_multiple_selection(material_list)
+
+    def _replace_material_multiple_selection(self, materials: Sequence[str]) -> None:
+        """Reset only query criteria, including hidden ranges/exclusions.
+
+        An empty list clears previous multi-selection before a single-material
+        or project query. No Buyer Receipt/RFQ or source data is deleted.
+        """
+        material_list = list(materials)
+
+        if material_list:
+            set_windows_clipboard_text("\r\n".join(material_list))
+
+        print(
+            "   🧹 清空上一组Material全部选择条件"
+            + (f"，仅导入当前组{len(material_list)}颗料" if material_list
+               else "（包括隐藏的多重选择/区间）")
+        )
+
+        self.press(ID_MATERIAL_MULTI)
+
+        if not self.exists("wnd[1]") or not all(
+            self.exists(control_id) for control_id in
+            ("wnd[1]/tbar[0]/btn[24]", "wnd[1]/tbar[0]/btn[8]")
+        ):
+            raise SapRpaError(
+                "NPL_MULTI_MATERIAL",
+                "无法确认Material Multiple Selection弹窗；未清理旧条件，已停止",
+            )
+
+        # Emptying S_MATNR-LOW only removes the first visible criterion.
+        # Clipboard upload can otherwise append to SAP's retained select-options.
+        if not self.press_first_existing(["wnd[1]/tbar[0]/btn[16]"]):
+            raise SapRpaError(
+                "NPL_MATERIAL_RESET",
+                "Material Multiple Selection无法清空全部旧条件 (btn[16])；禁止继续创建Buyer Receipt",
+            )
+
+        # Exact recorded control: Upload from Clipboard.
+        if material_list and not self.press_first_existing(["wnd[1]/tbar[0]/btn[24]"]):
+            raise SapRpaError(
+                "NPL_MULTI_MATERIAL",
+                "Material Multiple Selection无法执行Upload from Clipboard (btn[24])",
+            )
+
+        # Keep the two functional confirmation actions from the recording, but
+        # only press them while the popup still exists.
+        if material_list and self.exists("wnd[1]") and self.exists("wnd[1]/tbar[0]/btn[0]"):
+            self.press("wnd[1]/tbar[0]/btn[0]")
+
+        if self.exists("wnd[1]") and self.exists("wnd[1]/tbar[0]/btn[8]"):
+            self.press("wnd[1]/tbar[0]/btn[8]")
+
+        # Some SAP GUI patch levels close after btn[0], others after btn[8].
+        deadline = time.time() + SAP_WAIT_SEC
+        while time.time() < deadline:
+            if not self.exists("wnd[1]"):
+                print(
+                    "   ✅ Material Multiple Selection已确认："
+                    + (", ".join(material_list) or "<旧物料已清空>")
+                )
+                return
+            time.sleep(SAP_POLL_SEC)
+
+        raise SapRpaError(
+            "NPL_MULTI_MATERIAL",
+            "Material Multiple Selection确认后弹窗未关闭",
+        )
+
     def _execute_npl_query(self, group: TaskGroup):
+        # Invalidate old context before reset; a failed reset must never reuse it.
+        self._active_npl_query = None
         self.set_text(ID_PLANT, group.plant)
         self.set_text(ID_MATERIAL, "")
+
+        materials = [task.material for task in group.tasks]
+        single_exact = (
+            NPL_EXACT_MATERIAL_QUERY
+            and len(materials) == 1
+        )
+        multi_exact = (
+            NPL_MULTI_MATERIAL_QUERY
+            and len(materials) > 1
+        )
+
+        if multi_exact:
+            self.set_material_multiple_selection(materials)
+        else:
+            # Multi -> single transitions also retain hidden select-options.
+            self._replace_material_multiple_selection([])
+            self.set_text(ID_MATERIAL, "")
+            high_id = "wnd[0]/usr/ctxtS_MATNR-HIGH"
+            if self.exists(high_id):
+                self.set_text(high_id, "")
+            if single_exact:
+                self.set_text(ID_MATERIAL, materials[0])
+
         self.set_text(ID_PROJECT, group.project)
+
+        if single_exact:
+            print(
+                f"   🔎 NPL单料精确查询：Plant={group.plant} | "
+                f"Project={group.project} | Material={materials[0]}"
+            )
+            query_signature = materials[0]
+        elif multi_exact:
+            print(
+                f"   🔎 NPL Parma Group精确查询：Plant={group.plant} | "
+                f"Project={group.project} | Parma={group.vendors[0]} | "
+                f"Materials={len(materials)}"
+            )
+            query_signature = "MULTI:" + ",".join(materials)
+        else:
+            print(
+                f"   🔎 NPL项目查询：Plant={group.plant} | "
+                f"Project={group.project} | Material=<blank>"
+            )
+            query_signature = ""
+
         self.press(ID_EXECUTE)
         grid = self.wait_grid_columns(
             ID_GRID_CUSTOMER1,
             [COL_MATERIAL],
             timeout=SAP_LONG_WAIT_SEC,
         )
-        self._active_npl_query = (group.plant, group.project)
+        if single_exact or multi_exact:
+            expected = {normalize_material(material) for material in materials}
+            actual = {normalize_material(self.get_cell(grid, row, COL_MATERIAL))
+                      for row in range(self.row_count(grid))}
+            unexpected = sorted(actual - expected - {""})
+            if unexpected:
+                raise SapRpaError(
+                    "NPL_MATERIAL_SCOPE",
+                    "NPL结果混入非当前Group物料：" + ", ".join(unexpected)
+                    + "；未创建Buyer Receipt，请检查SAP物料筛选条件",
+                )
+        self._active_npl_query = (
+            group.plant,
+            group.project,
+            query_signature,
+        )
         return grid
 
     def prepare_npl_grid_for_group(self, group: TaskGroup):
-        """Prepare the NPL result grid with a one-Back fast path.
+        """Prepare an exact NPL result grid for one Material or one Parma Group.
 
-        Consecutive rows with the same Plant + MPP Project do NOT return all the
-        way to the initial Plant/Project screen. From the completed Buyer Receipt
-        flow, press Back once and reuse the already-filtered NPL result list.
+        v30 does not scan a whole Project result for grouped RFQs. For every
+        group it returns to the ZMFM050072 selection screen and lets SAP filter
+        the exact Material set server-side.
         """
+        use_exact_server_filter = (
+            (len(group.tasks) == 1 and NPL_EXACT_MATERIAL_QUERY)
+            or (len(group.tasks) > 1 and NPL_MULTI_MATERIAL_QUERY)
+        )
+
+        if use_exact_server_filter:
+            if not self._npl_transaction_started or self._active_npl_query is None:
+                self.prepare_npl_selection_screen()
+            elif not self.is_npl_selection_screen():
+                print(
+                    "   ♻️ 精确Material Group模式：返回ZMFM050072选择界面，"
+                    "不扫描/复用旧Project结果Grid"
+                )
+                self.recover_npl_selection_screen()
+
+            if len(group.tasks) == 1:
+                print(
+                    f"   ⚡ SAP后端精确搜索 Material={group.tasks[0].material}"
+                )
+            else:
+                print(
+                    f"   ⚡ Parma={group.vendors[0]} Group："
+                    f"SAP后端精确搜索 {len(group.tasks)}颗Material"
+                )
+            return self._execute_npl_query(group)
+
         query_key = (group.plant, group.project)
 
         # Already on a usable result list (for example after an Existing-RFQ
         # Continue): do not press Back at all.
-        if REUSE_SAME_PROJECT_NPL_RESULTS and self._active_npl_query == query_key:
+        if REUSE_SAME_PROJECT_NPL_RESULTS and self._active_npl_query[:2] == query_key:
             current_grid = self._npl_result_grid_contains_tasks(group.tasks)
             if current_grid is not None:
                 print(
@@ -1928,7 +2397,7 @@ class SapSession:
             self.prepare_npl_selection_screen()
             return self._execute_npl_query(group)
 
-        same_query = self._active_npl_query == query_key
+        same_query = self._active_npl_query[:2] == query_key
         if REUSE_SAME_PROJECT_NPL_RESULTS and same_query:
             if self.exists("wnd[1]"):
                 if not self.dismiss_message_display():
@@ -1982,7 +2451,7 @@ class SapSession:
         # execute a new query.
         print(
             "   🔄 Plant/Project发生变化：返回选择界面并执行新的NPL查询 "
-            f"| {self._active_npl_query} -> {query_key}"
+            f"| {self._active_npl_query[:2]} -> {query_key}"
         )
         self.prepare_npl_selection_screen()
         return self._execute_npl_query(group)
@@ -2176,16 +2645,29 @@ class SapSession:
 
     @staticmethod
     def select_rows(grid, rows: Sequence[int]) -> None:
-        """Select SAP ALV rows with pywin32-safe fallbacks.
-
-        Some SAP GUI patch levels throw COM error 618 (Bad index type for
-        collection access) when a multi-row SelectedRows value is assigned.
-        ROW mode avoids that path. BATCH mode still tries the recorded syntax
-        and returns a clear SAP_SELECTION error rather than an opaque com_error.
-        """
+        """Select rows robustly; use native SelectAll for a true exact group."""
         normalized_rows = sorted({int(row) for row in rows})
         if not normalized_rows:
             raise SapRpaError("SAP_SELECTION", "没有可选择的SAP行")
+
+        row_count = SapSession.row_count(grid)
+        all_rows = list(range(row_count))
+
+        if (
+            len(normalized_rows) > 1
+            and row_count == len(normalized_rows)
+            and normalized_rows == all_rows
+        ):
+            for method_name in ("SelectAll", "selectAll"):
+                try:
+                    getattr(grid, method_name)()
+                    print(
+                        f"   ✅ SAP Grid使用SelectAll选择整个Group："
+                        f"{len(normalized_rows)}行"
+                    )
+                    return
+                except Exception:
+                    continue
 
         row_spec = ",".join(str(row) for row in normalized_rows)
 
@@ -2196,39 +2678,19 @@ class SapSession:
             except Exception:
                 continue
 
-        # Put focus on a real data cell first. A few GUI builds reject a
-        # SelectedRows write while the column header / row -1 owns focus.
-        try:
-            grid.SetCurrentCell(normalized_rows[0], COL_MATERIAL)
-        except Exception:
-            try:
-                grid.setCurrentCell(normalized_rows[0], COL_MATERIAL)
-            except Exception:
-                try:
-                    grid.CurrentCellRow = normalized_rows[0]
-                    grid.CurrentCellColumn = COL_MATERIAL
-                except Exception:
-                    pass
-
-        errors: list[str] = []
+        errors = []
         for attr_name in ("selectedRows", "SelectedRows"):
             try:
                 setattr(grid, attr_name, row_spec)
-                time.sleep(0.15)
                 return
             except Exception as exc:
                 errors.append(f"{attr_name}: {exc}")
 
-        mode_hint = (
-            "请把.env设置为 PROCESS_MODE=ROW；ROW模式会逐行处理并自动跳过已有RFQ。"
-            if len(normalized_rows) > 1
-            else "SAP当前Grid拒绝行选择，请确认该行仍显示在NPL结果中。"
-        )
         raise SapRpaError(
             "SAP_SELECTION",
-            f"无法选择SAP行 {row_spec}。{mode_hint} 原始错误："
-            + " | ".join(errors),
+            f"无法选择SAP行 {row_spec}。原始错误：" + " | ".join(errors),
         )
+
 
     @staticmethod
     def modify_cell(grid, row: int, column: str, value: Any) -> None:
@@ -2568,25 +3030,49 @@ class SapSession:
         return f"{yes_id}.Press()"
 
     def wait_and_confirm_buyer_receipt_save(self) -> bool:
-        """Wait for Buyer Receipt Save question and confirm with direct Press only.
+        """Wait for Buyer Receipt Save outcome.
 
-        The working command is the same as the third method observed in QA:
-        session.findById("wnd[1]/usr/btnBUTTON_1").press
-
-        If SAP does not consume the first event, reacquire the button and repeat
-        the exact same direct Press after a short delay.
+        PROD has two valid branches after pressing Save:
+        1) normal Save Yes/No confirmation -> click BUTTON_1 (Yes);
+        2) business Message Display appears immediately, with Continue but no
+           Save Yes/No question. In that case do NOT wait for timeout. Surface
+           BUYER_RECEIPT_SAVE_POPUP immediately so process_group can write the
+           business error to Excel and run Continue -> Back -> Back recovery.
         """
         deadline = time.time() + BUYER_SAVE_CONFIRM_TIMEOUT_SEC
         last_popup_text = ""
 
         while time.time() < deadline:
+            # Normal path: explicit Save Yes/No question.
             if self._buyer_save_confirmation_is_open():
                 break
+
             if self.exists("wnd[1]"):
+                has_continue = self.exists("wnd[1]/tbar[0]/btn[0]")
+                has_yes = self.exists("wnd[1]/usr/btnBUTTON_1")
+                has_no = self.exists("wnd[1]/usr/btnBUTTON_2")
+
+                # Critical PROD fix: some Buyer Receipt validation errors bypass
+                # the Save confirmation completely and open Message Display
+                # immediately. The previous version kept waiting 20 seconds for
+                # Yes/No and finally raised BUYER_RECEIPT_SAVE_CONFIRM.
+                if has_continue and not (has_yes and has_no):
+                    popup_message = extract_buyer_receipt_popup_business_message(self)
+                    print(
+                        "   ⚠️ Save后直接出现Message Display，"
+                        "跳过Yes/No等待并进入业务错误恢复："
+                        + safe_text(popup_message)[:500]
+                    )
+                    raise SapRpaError(
+                        "BUYER_RECEIPT_SAVE_POPUP",
+                        popup_message,
+                    )
+
                 try:
                     last_popup_text = self.window_text("wnd[1]")
                 except Exception:
                     last_popup_text = ""
+
             time.sleep(SAP_POLL_SEC)
         else:
             if not REQUIRE_BUYER_SAVE_CONFIRMATION:
@@ -2910,7 +3396,8 @@ def fill_buyer_receipt_rows(
             sap.modify_cell(grid, row, COL_TECH_USER, task.tech_user)
 
         sap.modify_cell(grid, row, COL_12MR_QTY, task.qty_12mr)
-        sap.modify_cell(grid, row, COL_RFQ_QTY_PROTOTYPE, task.rfq_qty_p)
+        if task.rfq_qty_p:
+            sap.modify_cell(grid, row, COL_RFQ_QTY_PROTOTYPE, task.rfq_qty_p)
         sap.modify_cell(grid, row, COL_RFQ_QTY_SERIAL, task.rfq_qty_s)
 
         for vendor_index, vendor in enumerate(task.vendors, start=1):
@@ -2964,6 +3451,137 @@ def green_status_debug(sap: SapSession, grid, row: int) -> tuple[bool, str]:
     return False, f"icon={icon or '<空>'}"
 
 
+
+def extract_buyer_receipt_popup_business_message(sap: SapSession) -> str:
+    """Extract the useful business error text from the Message Display popup."""
+    preferred_columns = {
+        "MESSAGE",
+        "MSGTEXT",
+        "MESSAGE_TEXT",
+        "MSGTX",
+        "MSGTXT",
+        "TEXT",
+    }
+
+    try:
+        rows = sap.popup_grid_rows("wnd[1]")
+    except Exception:
+        rows = []
+
+    # First choice: a recognized message-text column.
+    for row in rows:
+        for key, value in row.items():
+            if key == "__ROW_INDEX__":
+                continue
+            if safe_text(key).upper() in preferred_columns and safe_text(value):
+                return safe_text(value)
+
+    # Second choice: any cell that clearly looks like the observed business error.
+    for row in rows:
+        for key, value in row.items():
+            if key == "__ROW_INDEX__":
+                continue
+            candidate = safe_text(value)
+            lower = candidate.casefold()
+            if "sub commodity" in lower and "material master" in lower:
+                return candidate
+
+    # Third choice: probe the known Message Display grid directly. The exact
+    # technical column name can vary by SAP GUI patch, so try a broad but safe
+    # set of likely message-text fields.
+    direct_grid = sap.find(
+        "wnd[1]/usr/cntlCUSTOMER_200/shellcont/shell",
+        required=False,
+    )
+    if direct_grid is not None:
+        candidate_columns = [
+            "MESSAGE", "MSGTEXT", "MESSAGE_TEXT", "MSGTX", "MSGTXT",
+            "TEXT", "MSG", "MESSAGE1", "MESSAGETEXT",
+        ]
+        try:
+            row_count = sap.row_count(direct_grid)
+        except Exception:
+            row_count = 0
+
+        for row_index in range(row_count):
+            for column in candidate_columns:
+                try:
+                    candidate = safe_text(
+                        direct_grid.GetCellValue(row_index, column)
+                    )
+                except Exception:
+                    continue
+                if candidate:
+                    return candidate
+
+    # Fallback to the full popup text.
+    return (
+        sap.popup_message_text("wnd[1]")
+        or sap.window_text("wnd[1]")
+        or "<无法读取Message Display内容>"
+    )
+
+
+def is_recoverable_buyer_receipt_master_data_error(message: str) -> bool:
+    """Recognize the specific non-fatal master-data error from PROD."""
+    normalized = re.sub(r"\s+", " ", safe_text(message)).strip().casefold()
+    return (
+        "sub commodity" in normalized
+        and "material master" in normalized
+        and (
+            "needs to be created" in normalized
+            or "need to be created" in normalized
+            or "created in material master" in normalized
+        )
+    )
+
+
+def recover_after_buyer_receipt_master_data_error(
+    sap: SapSession,
+    *,
+    back_steps: int = 2,
+) -> None:
+    """Recorded recovery: Continue, then Back twice, then prepare next row."""
+    print(
+        "   🧹 Buyer Receipt主数据错误恢复："
+        f"Continue -> Back x{back_steps}"
+    )
+
+    # Exact Continue control from the user's recording:
+    # wnd[1]/tbar[0]/btn[0]
+    if sap.exists("wnd[1]"):
+        if not sap.dismiss_message_display():
+            raise SapRpaError(
+                "BUYER_RECEIPT_ERROR_RECOVERY",
+                "Buyer Receipt错误Message Display无法点击Continue",
+            )
+
+    for step in range(1, back_steps + 1):
+        sap.press_back_inside_npl_once(
+            step,
+            max_steps=back_steps,
+            target_label="下一笔Material准备界面",
+        )
+        time.sleep(max(0.5, SAP_STEP_PAUSE_SEC))
+
+    # After the recorded two Backs we expect the ZMFM050072 selection screen.
+    if not sap.wait_for_npl_selection_screen(NPL_BACK_SCREEN_WAIT_SEC):
+        raise SapRpaError(
+            "BUYER_RECEIPT_ERROR_RECOVERY",
+            f"已执行Continue + Back x{back_steps}，"
+            "但未回到ZMFM050072 Plant/Project选择界面；为避免错页操作已停止。",
+        )
+
+    # Clear previous exact-material query state so the next Excel row executes
+    # a fresh Plant + Project + Material server-side search.
+    sap._active_npl_query = None
+    sap._npl_transaction_started = True
+    print(
+        "   ✅ 已回到ZMFM050072选择界面；"
+        "下一Excel行将重新执行精确Material查询"
+    )
+
+
 def save_buyer_receipt(
     sap: SapSession,
     grid,
@@ -2976,6 +3594,16 @@ def save_buyer_receipt(
     sap.press(ID_SAVE)
     sap.wait_and_confirm_buyer_receipt_save()
     sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+
+    # A Message Display can appear immediately after the save-confirmation Yes.
+    # Handle it before trying to re-acquire/validate the green Buyer Receipt grid.
+    if sap.exists("wnd[1]"):
+        popup_message = extract_buyer_receipt_popup_business_message(sap)
+        raise SapRpaError(
+            "BUYER_RECEIPT_SAVE_POPUP",
+            popup_message,
+        )
+
     sap.raise_on_status_error("BUYER_RECEIPT_SAVE")
 
     # Re-acquire the Buyer Receipt grid after Save. Some SAP GUI patch levels
@@ -3027,11 +3655,10 @@ def save_buyer_receipt(
         # A post-save Message Display is an actual business error, not a green
         # status delay. Surface it immediately instead of silently polling.
         if sap.exists("wnd[1]"):
-            popup_text = sap.popup_message_text("wnd[1]") or sap.window_text("wnd[1]")
+            popup_text = extract_buyer_receipt_popup_business_message(sap)
             raise SapRpaError(
                 "BUYER_RECEIPT_SAVE_POPUP",
-                "Buyer Receipt确认保存后出现Message Display："
-                + (popup_text[:2500] or "<无法读取弹窗>"),
+                popup_text,
             )
 
         if time.time() >= deadline:
@@ -3154,6 +3781,272 @@ def open_rfq_creation_from_buyer_receipt(
     return wait_rfq_grid_or_terminal_success(sap)
 
 
+
+HUB_STAGING_RECOVERY = None  # Set only by the desktop adapter; standalone is unchanged.
+
+
+def prepare_prod_direct_rfq_rows(
+    sap: SapSession,
+    buyer_grid,
+    tasks: Sequence[MaterialTask],
+) -> tuple[Any, list[MaterialTask]]:
+    """PROD flow after Buyer Receipt save.
+
+    Correct PROD sequence:
+      saved Buyer Receipt CUSTOMER1
+      -> select saved Buyer Receipt row(s)
+      -> btn[2] Create RFQ
+      -> wait for RFQ staging CUSTOMER1 containing LIFNRx_CB
+      -> set Cost Breakdown checkbox(es)
+      -> return staging grid; caller will open Detailed RFQ from that screen.
+
+    v18 incorrectly pressed btn[19] while still on the saved Buyer Receipt screen.
+    In PROD that toolbar position is the attachment/upload function, which is why
+    the automation opened attachment instead of RFQ.
+    """
+    message_type, status_text = sap.status_bar()
+    print(
+        "   🏭 PROD RFQ path: saved Buyer Receipt "
+        "-> btn[2] Create RFQ -> RFQ staging CUSTOMER1 -> btn[19]"
+    )
+    print(f"   ℹ️ Buyer Receipt post-save status={message_type}:{status_text or '<blank>'}")
+
+    # Step A: select the successfully-saved Buyer Receipt rows and press the real
+    # "Create RFQ from Buyer Receipt" button first.
+    br_rows = [
+        int(task.buyer_receipt_row)
+        for task in tasks
+        if task.buyer_receipt_row is not None
+    ]
+    if not br_rows:
+        raise SapRpaError(
+            "PROD_CREATE_RFQ_FROM_BR",
+            "Buyer Receipt已保存，但没有可用于Create RFQ的Buyer Receipt行号",
+        )
+
+    sap.select_rows(buyer_grid, br_rows)
+    print(f"   ▶ Buyer Receipt选择行={br_rows}，点击 Create RFQ btn[2]")
+    sap.press(ID_CREATE_RFQ_FROM_BR)
+    sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+
+    # Do not blindly press a popup here. A business-error popup must be surfaced.
+    if sap.exists("wnd[1]"):
+        popup = sap.popup_message_text("wnd[1]") or sap.window_text("wnd[1]")
+        raise SapRpaError(
+            "PROD_CREATE_RFQ_FROM_BR_POPUP",
+            "点击Buyer Receipt Create RFQ(btn[2])后出现弹窗："
+            + (popup[:2500] or "<无法读取弹窗内容>"),
+        )
+
+    # Step B: wait until the RFQ staging CUSTOMER1 is actually ready.
+    # MATNR alone is not enough because the saved Buyer Receipt screen also has MATNR.
+    # Read-only readiness checks: never write a checkbox just to probe the screen.
+    # SAP GuiGridView GetCellType/GetCellChangeable do not alter the checkbox.
+    deadline = time.time() + SAP_LONG_WAIT_SEC
+    last_error = ""
+    staging_grid = None
+    staging_mapping = None
+
+    while time.time() < deadline:
+        candidate = sap.find(ID_GRID_CUSTOMER1, required=False)
+        if candidate is None:
+            time.sleep(SAP_POLL_SEC)
+            continue
+
+        try:
+            if not sap.column_exists(candidate, COL_MATERIAL):
+                time.sleep(SAP_POLL_SEC)
+                continue
+
+            mapping, _ = sap.map_material_rows(candidate, tasks)
+
+            # All tasks must map uniquely before we touch the staging grid.
+            mapped_rows: dict[str, int] = {}
+            mapping_ok = True
+            for task in tasks:
+                rows = mapping.get(task.material, [])
+                if len(rows) != 1:
+                    last_error = (f"Material={task.material}: expected one SAP row, found {len(rows)}; "
+                                  f"SAP rows={[row + 1 for row in rows]}")
+                    mapping_ok = False
+                    break
+                mapped_rows[task.material] = rows[0]
+
+            if not mapping_ok:
+                if HUB_STAGING_RECOVERY is not None and any(len(mapping.get(t.material, [])) > 1 for t in tasks):
+                    break  # A deterministic duplicate is not a loading delay.
+                time.sleep(SAP_POLL_SEC)
+                continue
+
+            # Confirm the staging checkbox is available without changing its state.
+            first_task = tasks[0]
+            first_row = mapped_rows[first_task.material]
+            if safe_text(candidate.GetCellType(first_row, "LIFNR1_CB")).casefold() != "checkbox":
+                last_error = "LIFNR1_CB is not a checkbox on the current screen"
+                time.sleep(SAP_POLL_SEC)
+                continue
+            if not first_task.cost_breakdown[0] and not candidate.GetCellChangeable(first_row, "LIFNR1_CB"):
+                last_error = "LIFNR1_CB is not changeable on the current screen"
+                time.sleep(SAP_POLL_SEC)
+                continue
+
+            staging_grid = candidate
+            staging_mapping = mapping
+            print(
+                "   ✅ 已进入PROD RFQ staging Grid："
+                f"LIFNR1_CB复选框可用 | Material={first_task.material} | SAP行={first_row}"
+            )
+            break
+
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(SAP_POLL_SEC)
+
+    if staging_grid is None or staging_mapping is None:
+        message_type, status_text = sap.status_bar()
+        issue = ("RFQ页面校验未通过；尚未修改Cost Breakdown。"
+                 f"{last_error or 'RFQ grid is missing or not ready'}; status={message_type}:{status_text}")
+        if HUB_STAGING_RECOVERY is None:
+            raise SapRpaError("PROD_RFQ_STAGING_TIMEOUT", issue)
+        # Resume inside Step B. Do not repeat Step A / Create RFQ from BR.
+        staging_grid, staging_mapping = HUB_STAGING_RECOVERY(sap, tasks, issue)
+
+    # Step C: now apply all Cost Breakdown checkboxes on the RFQ staging grid.
+    valid: list[MaterialTask] = []
+
+    for task in tasks:
+        rows = staging_mapping.get(task.material, [])
+        if len(rows) != 1:
+            print(
+                f"   ❌ PROD RFQ staging Material={task.material} "
+                f"行映射异常：{rows}"
+            )
+            continue
+
+        row = rows[0]
+        task.rfq_row = row
+
+        for vendor_index in range(1, 6):
+            cb_column = f"LIFNR{vendor_index}_CB"
+            requested_value = bool(task.cost_breakdown[vendor_index - 1])
+
+            # No/blank explicitly clears the configured supplier's checkbox.
+            # Yes preserves SAP's current state; never write True here.
+            if requested_value or not task.vendors[vendor_index - 1]:
+                continue
+
+            try:
+                staging_grid.ModifyCheckBox(row, cb_column, requested_value)
+                try:
+                    staging_grid.TriggerModified()
+                except Exception:
+                    pass
+
+                print(f"      ☑ {cb_column}={requested_value} | OK")
+
+            except Exception as exc:
+                raise SapRpaError(
+                    "PROD_COST_BREAKDOWN",
+                    f"RFQ staging已打开，但无法修改 "
+                    f"Material={task.material} {cb_column}={requested_value}: {exc}",
+                ) from exc
+
+        valid.append(task)
+        print(
+            f"   ✅ PROD RFQ staging准备完成 | SAP行={row} "
+            f"Material={task.material} | CB={task.cost_breakdown}"
+        )
+
+    return staging_grid, valid
+
+
+
+def press_prod_open_detailed_rfq(sap: SapSession) -> None:
+    """Press Detailed/Create RFQ only from the RFQ staging screen.
+
+    btn[19] is valid in the user's PROD RFQ staging recording, but the same numeric
+    toolbar position can represent Attachment on the Buyer Receipt screen.
+    Therefore log/guard the button meaning and, if needed, scan the toolbar for an
+    RFQ-labelled button instead of blindly pressing an attachment button.
+    """
+    toolbar = sap.find("wnd[0]/tbar[1]", required=False)
+    preferred = sap.find(ID_OPEN_DETAILED_RFQ, required=False)
+
+    def button_meta(button) -> str:
+        if button is None:
+            return ""
+        parts = []
+        for attr in ("Text", "Tooltip", "QuickInfo", "Name"):
+            try:
+                value = safe_text(getattr(button, attr, ""))
+                if value:
+                    parts.append(value)
+            except Exception:
+                pass
+        return " | ".join(parts)
+
+    preferred_meta = button_meta(preferred)
+    print(
+        "   🔎 PROD btn[19] metadata: "
+        + (preferred_meta or "<无Text/Tooltip>")
+    )
+
+    bad_tokens = ("attach", "attachment", "upload")
+    if preferred is not None:
+        lower = preferred_meta.casefold()
+        if not any(token in lower for token in bad_tokens):
+            try:
+                preferred.Press()
+                sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+                print("   ✅ 已点击RFQ staging btn[19]")
+                return
+            except Exception as exc:
+                print(f"   ⚠️ btn[19]点击失败，尝试按按钮文字动态查找RFQ：{exc}")
+
+    # Dynamic fallback: scan application toolbar buttons for something labelled RFQ.
+    matches = []
+    if toolbar is not None:
+        try:
+            children = toolbar.Children
+            for index in range(children.Count):
+                try:
+                    button = children(index)
+                except Exception:
+                    try:
+                        button = children.Item(index)
+                    except Exception:
+                        continue
+
+                meta = button_meta(button)
+                lower = meta.casefold()
+                if "rfq" in lower and not any(token in lower for token in bad_tokens):
+                    matches.append((button, meta))
+        except Exception:
+            pass
+
+    if len(matches) == 1:
+        button, meta = matches[0]
+        print(f"   ✅ 动态找到RFQ按钮：{meta}")
+        button.Press()
+        sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+        return
+
+    if preferred is not None and any(
+        token in preferred_meta.casefold() for token in bad_tokens
+    ):
+        raise SapRpaError(
+            "PROD_RFQ_BUTTON_GUARD",
+            "当前btn[19]仍然是附件/上传按钮，说明尚未处于RFQ staging页面；"
+            f"btn[19]={preferred_meta!r}。程序拒绝继续点击。",
+        )
+
+    raise SapRpaError(
+        "PROD_RFQ_BUTTON",
+        "无法唯一定位Detailed/Create RFQ按钮。"
+        f"btn[19]={preferred_meta!r}; RFQ候选数={len(matches)}",
+    )
+
+
 def fill_rfq_grid_rows(
     sap: SapSession,
     grid,
@@ -3171,7 +4064,8 @@ def fill_rfq_grid_rows(
         row = rows[0]
         task.rfq_row = row
 
-        sap.modify_cell(grid, row, COL_RFQ_QTY_PROTOTYPE, task.rfq_qty_p)
+        if task.rfq_qty_p:
+            sap.modify_cell(grid, row, COL_RFQ_QTY_PROTOTYPE, task.rfq_qty_p)
         sap.modify_cell(grid, row, COL_RFQ_QTY_SERIAL, task.rfq_qty_s)
 
         if sap.column_exists(grid, COL_AFM_REQUEST):
@@ -3184,7 +4078,9 @@ def fill_rfq_grid_rows(
             if vendor and sap.column_exists(grid, vendor_column):
                 sap.modify_cell(grid, row, vendor_column, vendor)
 
-            if sap.column_exists(grid, cb_column):
+            # Only No/blank authorizes clearing a configured supplier's box.
+            # Yes leaves SAP unchanged, including an already-unchecked box.
+            if vendor and not task.cost_breakdown[vendor_index - 1] and sap.column_exists(grid, cb_column):
                 sap.modify_checkbox(
                     grid,
                     row,
@@ -3201,11 +4097,431 @@ def fill_rfq_grid_rows(
     return valid
 
 
+
+def _popup_action_candidates(action: str) -> list[str]:
+    action = action.upper()
+    if action == "YES":
+        # Exact PROD recording: wnd[1]/usr/btnBUTTON_1
+        return [
+            "wnd[1]/usr/btnBUTTON_1",
+            "wnd[1]/usr/btnSPOP-OPTION1",
+        ]
+    if action == "NO":
+        # Attachment popup may expose either No or toolbar Cancel.
+        return [
+            "wnd[1]/usr/btnBUTTON_2",
+            "wnd[1]/usr/btnSPOP-OPTION2",
+            "wnd[1]/tbar[0]/btn[12]",
+        ]
+    if action == "CONTINUE":
+        # Exact PROD recording: wnd[1]/tbar[0]/btn[0]
+        return [
+            "wnd[1]/tbar[0]/btn[0]",
+        ]
+    raise ValueError(f"Unsupported popup action: {action}")
+
+
+def press_prod_popup_action(
+    sap: SapSession,
+    action: str,
+    *,
+    step_name: str,
+) -> None:
+    """Wait for the requested modal action, press a fresh COM object, then pause.
+
+    The previous code classified a Yes/No SAPLSPO1 window as a generic "Warning"
+    and pressed toolbar Continue instead of BUTTON_1. That left the same modal
+    open and caused the handler to loop repeatedly.
+
+    This helper follows the exact PROD recording and reacquires the button on
+    every attempt. It also deliberately waits after each successful press so SAP
+    has time to replace wnd[1] with the next confirmation.
+    """
+    action = action.upper()
+    candidates = _popup_action_candidates(action)
+    deadline = time.time() + PROD_RFQ_POPUP_STEP_TIMEOUT_SEC
+    last_error = ""
+
+    while time.time() < deadline:
+        if not sap.exists("wnd[1]"):
+            time.sleep(SAP_POLL_SEC)
+            continue
+
+        # Log only lightweight modal metadata; do not depend on HTML question text.
+        try:
+            title = safe_text(sap.find("wnd[1]", required=False).Text)
+        except Exception:
+            title = ""
+
+        available = [
+            control_id
+            for control_id in candidates
+            if sap.exists(control_id)
+        ]
+
+        if not available:
+            time.sleep(SAP_POLL_SEC)
+            continue
+
+        for attempt in range(1, PROD_RFQ_POPUP_CLICK_RETRIES + 1):
+            # Re-acquire the button every attempt; modal transitions invalidate
+            # cached SAP GUI COM objects surprisingly often.
+            pressed = None
+            for control_id in candidates:
+                control = sap.find(control_id, required=False)
+                if control is None:
+                    continue
+                try:
+                    control.Press()
+                    pressed = control_id
+                    break
+                except Exception as exc:
+                    last_error = f"{control_id}: {exc}"
+
+            if pressed:
+                print(
+                    f"   ✅ {step_name}: {action} "
+                    f"| Popup={title or '<no title>'} "
+                    f"| Control={pressed} | Attempt={attempt}"
+                )
+                sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+                # Critical: allow the old modal to close and the next one to be
+                # created before the next state-machine step.
+                time.sleep(PROD_RFQ_POPUP_POST_CLICK_SEC)
+                return
+
+            time.sleep(0.5)
+
+    popup_text = ""
+    try:
+        popup_text = sap.window_text("wnd[1]") if sap.exists("wnd[1]") else ""
+    except Exception:
+        pass
+    raise SapRpaError(
+        "RFQ_POPUP",
+        f"{step_name} 未能执行 {action}；"
+        f"候选控件={candidates}; last={last_error}; "
+        f"popup={popup_text[:1000]}",
+    )
+
+
+
+def extract_created_rfq_from_text(text: str) -> tuple[str, str]:
+    """Extract RFQ number from PROD final success text.
+
+    Supports examples such as:
+      RFQ No 1000101082 is created successfully
+      RFQ: 1000101082 has created successfully
+      RFQ 1000101082 created successfully
+    """
+    normalized = re.sub(r"\s+", " ", safe_text(text)).strip()
+    if not normalized:
+        return "", ""
+
+    patterns = [
+        r"\bRFQ\s*(?:No\.?|Number)?\s*[:#]?\s*(\d{7,12})\s+"
+        r"(?:is\s+|has\s+|has\s+been\s+)?created\s+successfully\b",
+        r"\bRFQ\s*(?:No\.?|Number)?\s*[:#]?\s*(\d{7,12})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, normalized, re.I)
+        if match:
+            return normalize_identifier(match.group(1)), normalized
+
+    if "created successfully" in normalized.casefold():
+        return "", normalized
+
+    return "", ""
+
+
+def capture_rfq_success_from_message_display(sap: SapSession) -> tuple[str, str]:
+    candidates: list[str] = []
+
+    try:
+        value = sap.popup_message_text("wnd[1]")
+        if value:
+            candidates.append(value)
+    except Exception:
+        pass
+
+    try:
+        value = sap.window_text("wnd[1]")
+        if value:
+            candidates.append(value)
+    except Exception:
+        pass
+
+    direct_grid = sap.find(
+        "wnd[1]/usr/cntlCUSTOMER_200/shellcont/shell",
+        required=False,
+    )
+    if direct_grid is not None:
+        try:
+            rows = sap.row_count(direct_grid)
+        except Exception:
+            rows = 0
+
+        probable_columns = [
+            "MESSAGE", "MSGTEXT", "MESSAGE_TEXT", "MSGTX", "MSGTXT",
+            "TEXT", "MSG", "VALUE", "FIELDVALUE",
+        ]
+        try:
+            discovered = sap._grid_column_keys(direct_grid)
+        except Exception:
+            discovered = []
+
+        for row in range(rows):
+            values: list[str] = []
+            for column in [*discovered, *probable_columns]:
+                try:
+                    value = safe_text(direct_grid.GetCellValue(row, column))
+                except Exception:
+                    continue
+                if value and value not in values:
+                    values.append(value)
+            if values:
+                candidates.append(" | ".join(values))
+
+    for candidate in candidates:
+        number, success_text = extract_created_rfq_from_text(candidate)
+        if number or success_text:
+            return number, success_text
+
+    return "", ""
+
+
+def return_to_npl_start_after_rfq(
+    sap: SapSession,
+    *,
+    max_back_steps: int,
+) -> int:
+    """After a successful RFQ, press Back exactly N times.
+
+    v27 follows the user's confirmed PROD navigation:
+      write RFQ Number to Excel -> Back x4 -> next material
+
+    There is no fixed sleep between Back presses and no early-stop shortcut.
+    """
+    print(
+        f"   ↩️ RFQ结果已写入Excel，立即Back {max_back_steps}次"
+    )
+
+    for step in range(1, max_back_steps + 1):
+        print(f"   ↩️ RFQ成功后Back {step}/{max_back_steps}")
+        button = sap.find("wnd[0]/tbar[0]/btn[3]", required=False)
+        if button is not None:
+            try:
+                button.Press()
+                sap.wait_not_busy(SAP_LONG_WAIT_SEC)
+            except Exception as exc:
+                raise SapRpaError(
+                    "POST_RFQ_RECOVERY",
+                    f"RFQ成功后Back {step}/{max_back_steps}失败：{exc}",
+                ) from exc
+        else:
+            sap.send_vkey(3)
+
+    # Reset query state. The next ROW-mode material performs a fresh exact search.
+    sap._active_npl_query = None
+    sap._npl_transaction_started = sap.current_transaction() == TCODE_NPL
+
+    print(
+        f"   ✅ RFQ成功后已完成Back x{max_back_steps}；"
+        "下一Excel行重新执行精确Material查询"
+    )
+    return max_back_steps
+
+
+
+def wait_for_next_prod_rfq_popup_or_success(
+    sap: SapSession,
+    *,
+    timeout: float,
+) -> tuple[str, str]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if sap.exists("wnd[1]"):
+            return "POPUP", ""
+        terminal = rfq_terminal_success_message(sap)
+        if terminal:
+            return "SUCCESS", terminal
+        try:
+            if bool(sap.session.Busy):
+                time.sleep(SAP_POLL_SEC)
+                continue
+        except Exception:
+            pass
+        time.sleep(SAP_POLL_SEC)
+
+    if sap.exists("wnd[1]"):
+        return "POPUP", ""
+    terminal = rfq_terminal_success_message(sap)
+    if terminal:
+        return "SUCCESS", terminal
+    return "TIMEOUT", ""
+
+
+def process_prod_final_rfq_popups(
+    sap: SapSession,
+    group: TaskGroup,
+) -> tuple[str, str]:
+    """Robust PROD RFQ popup state machine, including delayed attachment popup."""
+    if group.attach_file:
+        raise SapRpaError(
+            "RFQ_ATTACHMENT_UNSUPPORTED",
+            "当前Excel要求Attach File=true，但自动附件上传尚未实现。",
+        )
+
+    print(
+        "   🧭 PROD最终弹窗动态处理："
+        "Warning=YES | RFQ Create=YES | Attach File=NO/Cancel | "
+        "Message Display=抓RFQ No后Continue"
+    )
+
+    handled = 0
+    captured_rfq_number = ""
+    captured_success_message = ""
+
+    while handled < 10:
+        if not sap.exists("wnd[1]"):
+            state, terminal = wait_for_next_prod_rfq_popup_or_success(
+                sap,
+                timeout=PROD_RFQ_NEXT_POPUP_WAIT_SEC,
+            )
+            if state == "SUCCESS":
+                number, message = extract_created_rfq_from_text(terminal)
+                if number:
+                    captured_rfq_number = captured_rfq_number or number
+                if message:
+                    captured_success_message = captured_success_message or message
+                print(f"   ✅ 已检测到RFQ终态成功：{terminal}")
+                return captured_rfq_number, captured_success_message
+
+            if state == "TIMEOUT":
+                if captured_rfq_number or captured_success_message:
+                    return captured_rfq_number, captured_success_message
+                raise SapRpaError(
+                    "RFQ_POPUP_WAIT",
+                    "上一RFQ确认已点击，但在"
+                    f"{PROD_RFQ_NEXT_POPUP_WAIT_SEC:.0f}秒内既未出现下一弹窗，"
+                    "也未检测到RFQ成功状态。请检查SAP当前页面。",
+                )
+
+        try:
+            popup = sap.find("wnd[1]", required=False)
+            title = safe_text(getattr(popup, "Text", ""))
+        except Exception:
+            title = ""
+
+        try:
+            popup_text = sap.window_text("wnd[1]")
+        except Exception:
+            popup_text = ""
+
+        combined = f"{title} | {popup_text}".casefold()
+
+        has_yes = sap.exists("wnd[1]/usr/btnBUTTON_1") or sap.exists(
+            "wnd[1]/usr/btnSPOP-OPTION1"
+        )
+        has_no = (
+            sap.exists("wnd[1]/usr/btnBUTTON_2")
+            or sap.exists("wnd[1]/usr/btnSPOP-OPTION2")
+            or sap.exists("wnd[1]/tbar[0]/btn[12]")
+        )
+        has_continue = sap.exists("wnd[1]/tbar[0]/btn[0]")
+
+        print(
+            "   🪟 PROD RFQ弹窗识别："
+            f"Title={title or '<blank>'} | "
+            f"Yes={has_yes} No/Cancel={has_no} Continue={has_continue}"
+        )
+
+        if "attach file" in combined or "attachment" in combined:
+            press_prod_popup_action(
+                sap, "NO", step_name="附件确认（不上传附件 / Cancel）"
+            )
+
+        elif "rfq create" in combined or "create rfq" in combined:
+            press_prod_popup_action(
+                sap, "YES", step_name="RFQ Create确认"
+            )
+
+        elif ("warning" in combined or "preferred supplier" in combined) and has_yes:
+            press_prod_popup_action(
+                sap, "YES", step_name="RFQ Warning/Preferred Supplier确认"
+            )
+
+        elif has_continue and not has_yes and not has_no:
+            number, success_message = capture_rfq_success_from_message_display(sap)
+            if number:
+                captured_rfq_number = number
+                print(f"   🎯 最终Message Display已提取RFQ Number：{number}")
+            if success_message:
+                captured_success_message = success_message
+                print(
+                    "   ✅ 最终Message Display成功消息："
+                    f"{success_message[:500]}"
+                )
+
+            press_prod_popup_action(
+                sap, "CONTINUE", step_name="RFQ Message Display Continue"
+            )
+
+            if captured_rfq_number or captured_success_message:
+                return captured_rfq_number, captured_success_message
+
+        elif has_yes and has_no:
+            raise SapRpaError(
+                "RFQ_POPUP_UNKNOWN",
+                "发现未知Yes/No弹窗，程序拒绝猜测按钮。"
+                f"Title={title!r}; Popup={popup_text[:1500]}",
+            )
+
+        elif has_continue:
+            number, success_message = capture_rfq_success_from_message_display(sap)
+            if number:
+                captured_rfq_number = number
+            if success_message:
+                captured_success_message = success_message
+            press_prod_popup_action(
+                sap, "CONTINUE", step_name="RFQ Continue"
+            )
+            if captured_rfq_number or captured_success_message:
+                return captured_rfq_number, captured_success_message
+
+        else:
+            raise SapRpaError(
+                "RFQ_POPUP_UNKNOWN",
+                "无法识别PROD RFQ弹窗控件。"
+                f"Title={title!r}; Popup={popup_text[:1500]}",
+            )
+
+        handled += 1
+
+    raise SapRpaError(
+        "RFQ_POPUP_LOOP",
+        "PROD RFQ弹窗处理超过10次，已停止以避免重复点击。",
+    )
+
+
 def handle_preferred_supplier_warning(sap: SapSession, allow: bool) -> None:
     if not sap.exists("wnd[1]"):
         return
 
     text = sap.window_text("wnd[1]").casefold()
+
+    # In PROD the HTML question text is not reliably exposed through SAP GUI
+    # scripting, while the exact recording clearly presses BUTTON_1 after btn[19].
+    # Use the recorded Yes control rather than classifying on inaccessible text.
+    if SAP_TARGET_ENV == "PROD":
+        press_prod_popup_action(
+            sap,
+            "YES",
+            step_name="进入Detailed RFQ后的确认",
+        )
+        return
+
     if "preferred supplier" in text:
         if allow:
             if not sap.handle_simple_confirmation(yes=True):
@@ -3220,7 +4536,6 @@ def handle_preferred_supplier_warning(sap: SapSession, allow: bool) -> None:
                 "RFQ没有Preferred Supplier，Excel未允许继续",
             )
     else:
-        # The recording shows a generic BUTTON_1 after opening detailed RFQ.
         sap.handle_simple_confirmation(yes=True)
 
 
@@ -3234,6 +4549,47 @@ def fill_optional_control_text(sap: SapSession, control_id: str, value: str) -> 
     return True
 
 
+def _set_calendar_property(calendar, names: Sequence[str], value: str) -> bool:
+    for name in names:
+        try:
+            setattr(calendar, name, value)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def set_rfq_due_date_from_excel(sap: SapSession, date_iso: str) -> None:
+    """Write Excel quotation due date directly into the SAP field.
+
+    No F4 calendar popup is used in v27. Excel dates are normalized to the
+    SAP display format DD.MM.YYYY, e.g. 25.09.2026, and written directly.
+    """
+    date_value = parse_date_value(date_iso)
+    if date_value is None:
+        raise SapRpaError(
+            "RFQ_DUE_DATE",
+            f"无法解析Excel F列RFQ日期：{date_iso!r}",
+        )
+
+    display_text = sap_display_date(date_value)  # DD.MM.YYYY
+    due_control = sap.find(ID_RFQ_DUE_DATE, required=True)
+    due_control.Text = display_text
+
+    try:
+        due_control.SetFocus()
+    except Exception:
+        pass
+
+    # Let SAP validate the typed value without opening the calendar.
+    sap.send_vkey(0)
+    sap.raise_on_status_error("RFQ_DUE_DATE")
+
+    print(
+        f"   📅 RFQ Due Date <- Excel F直接写入SAP: {display_text}"
+    )
+
+
 def fill_detailed_rfq_header(sap: SapSession, group: TaskGroup) -> None:
     # The supplied recording does not contain the RFQ Comment popup controls.
     # Never silently ignore a requested comment.
@@ -3244,6 +4600,8 @@ def fill_detailed_rfq_header(sap: SapSession, group: TaskGroup) -> None:
             "请先将RFQ Comment留空，或补录该按钮和弹窗。",
         )
 
+    # Fixed mapping: primary Supplier Email comes from Excel E.
+    # load_tasks() has already overridden group.emails[0][0] with column E.
     for vendor_index in range(1, 6):
         for email_index in range(1, 4):
             email = group.emails[vendor_index - 1][email_index - 1]
@@ -3258,22 +4616,29 @@ def fill_detailed_rfq_header(sap: SapSession, group: TaskGroup) -> None:
                     f"找不到Email字段：Vendor{vendor_index} Email{email_index} "
                     f"({control_id})",
                 )
+            if vendor_index == 1 and email_index == 1:
+                print(f"   ✉️ Supplier Email <- Excel E: {email}")
 
-    sap.set_text(ID_RFQ_DUE_DATE, group.quotation_due_date)
-    sap.send_vkey(0)
+    set_rfq_due_date_from_excel(sap, group.quotation_due_date)
     sap.raise_on_status_error("RFQ_HEADER")
 
 
-def process_final_rfq_popups(sap: SapSession, group: TaskGroup) -> None:
+def process_final_rfq_popups(
+    sap: SapSession,
+    group: TaskGroup,
+) -> tuple[str, str]:
+    if SAP_TARGET_ENV == "PROD":
+        return process_prod_final_rfq_popups(sap, group)
+
+    # QA / legacy generic handler
     deadline = time.time() + SAP_LONG_WAIT_SEC
     handled = 0
 
     while time.time() < deadline and handled < 10:
         if not sap.exists("wnd[1]"):
-            # Give the next popup a short chance to appear.
             time.sleep(0.5)
             if not sap.exists("wnd[1]"):
-                return
+                return "", ""
 
         text = sap.window_text("wnd[1]")
         lower = text.casefold()
@@ -3318,8 +4683,6 @@ def process_final_rfq_popups(sap: SapSession, group: TaskGroup) -> None:
                 raise SapRpaError("RFQ_POPUP", f"Warning弹窗无法继续：{text}")
 
         else:
-            # Generic order matching the recording:
-            # standard Continue -> BUTTON_1 -> BUTTON_1 -> BUTTON_2 -> standard Continue
             pressed = sap.press_first_existing(
                 [
                     "wnd[1]/tbar[0]/btn[0]",
@@ -3333,6 +4696,8 @@ def process_final_rfq_popups(sap: SapSession, group: TaskGroup) -> None:
         handled += 1
         sap.wait_not_busy(SAP_LONG_WAIT_SEC)
         time.sleep(0.5)
+
+    return "", ""
 
 
 def extract_rfq_number(sap: SapSession) -> str:
@@ -3418,7 +4783,7 @@ def identify_popup_material_tasks(
         for material in task_by_material:
             if re.search(rf"(?<!\d){re.escape(material)}(?!\d)", popup_text):
                 matched_materials.add(material)
-        if PROCESS_MODE == "ROW" and len(tasks) == 1 and not matched_materials:
+        if len(tasks) == 1 and not matched_materials:
             matched_materials.add(tasks[0].material)
 
     return [task for task in tasks if task.material in matched_materials], popup_text
@@ -3489,7 +4854,7 @@ def identify_existing_rfq_tasks(
             if re.search(rf"(?<!\d){re.escape(material)}(?!\d)", popup_text):
                 matched_materials.add(material)
 
-        # PROCESS_MODE=ROW makes the active material unambiguous. This fallback
+        # A single-task popup makes the active material unambiguous. This fallback
         # is used only after the popup text itself has been recognized as the
         # Existing-RFQ message; it will not misclassify PPAP/Technology errors.
         if len(tasks) == 1 and not matched_materials:
@@ -3540,17 +4905,67 @@ def rematch_remaining_npl_tasks(
     return matched
 
 
+
+def is_buyer_receipt_prerequisite_error(message: str) -> bool:
+    normalized = re.sub(r"\s+", " ", safe_text(message)).strip().casefold()
+    return (
+        "vendor company view does not exist" in normalized
+        or "company view does not exist" in normalized
+    )
+
+
+def identify_buyer_receipt_prerequisite_tasks(
+    sap: SapSession,
+    tasks: Sequence[MaterialTask],
+) -> tuple[list[MaterialTask], str]:
+    return identify_popup_material_tasks(
+        sap,
+        tasks,
+        is_buyer_receipt_prerequisite_error,
+    )
+
+
+def mark_buyer_receipt_prerequisite_tasks(
+    excel: ExcelStore,
+    group: TaskGroup,
+    tasks: Sequence[MaterialTask],
+    popup_text: str,
+) -> None:
+    clean = re.sub(r"\s+", " ", safe_text(popup_text)).strip()
+    for task in tasks:
+        print(
+            f"   ⏭️ Material={task.material} Vendor Company View缺失，"
+            "记录后跳过并继续下一行"
+        )
+        excel.write_status(
+            [task.excel_row],
+            batch_key=group.key,
+            buyer_status="PREREQUISITE_MASTER_DATA_ERROR",
+            rfq_status="NOT_STARTED",
+            error_stage="BUYER_RECEIPT_PREREQUISITE",
+            error_message=clean[:3000],
+        )
+    excel.save()
+
+
 def create_buyer_receipt_skipping_existing_rfq(
     sap: SapSession,
     excel: ExcelStore,
     group: TaskGroup,
     npl_grid,
     matched_tasks: Sequence[MaterialTask],
-) -> tuple[Optional[Any], list[MaterialTask], list[MaterialTask], list[MaterialTask]]:
-    """Create Buyer Receipt and skip non-fatal Existing-RFQ/PPAP rows."""
+) -> tuple[
+    Optional[Any],
+    list[MaterialTask],
+    list[MaterialTask],
+    list[MaterialTask],
+    list[MaterialTask],
+]:
+    """Create Buyer Receipt and skip known non-fatal business-data errors."""
     active_tasks = list(matched_tasks)
     skipped_existing: list[MaterialTask] = []
     skipped_ppap: list[MaterialTask] = []
+    skipped_prerequisite: list[MaterialTask] = []
     attempts = 0
 
     while active_tasks:
@@ -3606,10 +5021,10 @@ def create_buyer_receipt_skipping_existing_rfq(
                 ]
 
                 if not CONTINUE_AFTER_EXISTING_RFQ:
-                    return None, [], skipped_existing, skipped_ppap
+                    return None, [], skipped_existing, skipped_ppap, skipped_prerequisite
                 if not active_tasks:
                     print("   ℹ️ 当前处理单元物料已有RFQ，继续Excel下一行")
-                    return None, [], skipped_existing, skipped_ppap
+                    return None, [], skipped_existing, skipped_ppap, skipped_prerequisite
 
                 npl_grid = sap.wait_grid_columns(
                     ID_GRID_CUSTOMER1,
@@ -3657,10 +5072,10 @@ def create_buyer_receipt_skipping_existing_rfq(
                     task for task in active_tasks if task.material not in ppap_materials
                 ]
                 if not CONTINUE_AFTER_PPAP_DATE_ERROR:
-                    return None, [], skipped_existing, skipped_ppap
+                    return None, [], skipped_existing, skipped_ppap, skipped_prerequisite
                 if not active_tasks:
                     print("   ℹ️ 当前处理单元需要新的PPAP Date，继续Excel下一行")
-                    return None, [], skipped_existing, skipped_ppap
+                    return None, [], skipped_existing, skipped_ppap, skipped_prerequisite
 
                 npl_grid = sap.wait_grid_columns(
                     ID_GRID_CUSTOMER1,
@@ -3675,8 +5090,61 @@ def create_buyer_receipt_skipping_existing_rfq(
                 )
                 continue
 
-            # A different Message Display means NPL data needs manual input.
-            message = popup_text or sap.popup_message_text("wnd[1]") or "Create Buyer Receipt出现Message Display"
+            prereq_tasks, prereq_popup_text = identify_buyer_receipt_prerequisite_tasks(
+                sap,
+                active_tasks,
+            )
+            if prereq_tasks:
+                mark_buyer_receipt_prerequisite_tasks(
+                    excel,
+                    group,
+                    prereq_tasks,
+                    prereq_popup_text,
+                )
+                skipped_prerequisite.extend(prereq_tasks)
+
+                if not sap.dismiss_message_display():
+                    raise SapRpaError(
+                        "BUYER_RECEIPT_PREREQUISITE_CONTINUE",
+                        "识别到Vendor Company View缺失，但无法点击Continue",
+                    )
+
+                prereq_materials = {task.material for task in prereq_tasks}
+                active_tasks = [
+                    task for task in active_tasks
+                    if task.material not in prereq_materials
+                ]
+
+                if not active_tasks:
+                    print(
+                        "   ✅ 已点击Continue；当前Material已跳过，"
+                        "继续Excel下一行"
+                    )
+                    return (
+                        None,
+                        [],
+                        skipped_existing,
+                        skipped_ppap,
+                        skipped_prerequisite,
+                    )
+
+                sap.recover_npl_selection_screen()
+                temp_group = TaskGroup(key=group.key, tasks=list(active_tasks))
+                npl_grid = sap._execute_npl_query(temp_group)
+                active_tasks = rematch_remaining_npl_tasks(
+                    sap,
+                    npl_grid,
+                    group,
+                    active_tasks,
+                )
+                continue
+
+            # Unknown Message Display: stop safely instead of guessing.
+            message = (
+                popup_text
+                or sap.popup_message_text("wnd[1]")
+                or "Create Buyer Receipt出现Message Display"
+            )
             sap.dismiss_message_display()
             for task in active_tasks:
                 excel.write_status(
@@ -3694,9 +5162,9 @@ def create_buyer_receipt_skipping_existing_rfq(
             [COL_MATERIAL, COL_12MR_QTY, COL_RFQ_QTY_PROTOTYPE],
             timeout=SAP_LONG_WAIT_SEC,
         )
-        return buyer_grid, active_tasks, skipped_existing, skipped_ppap
+        return buyer_grid, active_tasks, skipped_existing, skipped_ppap, skipped_prerequisite
 
-    return None, [], skipped_existing, skipped_ppap
+    return None, [], skipped_existing, skipped_ppap, skipped_prerequisite
 
 def try_resume_saved_buyer_receipt(
     sap: SapSession,
@@ -3753,42 +5221,52 @@ def complete_rfq_from_buyer_receipt(
     skipped_existing: Sequence[MaterialTask] = (),
     skipped_ppap: Sequence[MaterialTask] = (),
     blocked_ppap: Sequence[MaterialTask] = (),
+    skipped_prerequisite: Sequence[MaterialTask] = (),
 ) -> tuple[str, str]:
     # -------------------------------------------------------------------------
-    # Step 3: Immediately create RFQ from Buyer Receipt (do not exit transaction).
+    # Step 3: Continue RFQ immediately after Buyer Receipt save.
+    # PROD recording: CUSTOMER1 -> LIFNRx_CB -> select row -> btn[19].
+    # QA legacy path: btn[2] -> CUSTOMER2 -> btn[9] -> RFQ grid.
     # -------------------------------------------------------------------------
-    rfq_grid, terminal_success = open_rfq_creation_from_buyer_receipt(
-        sap,
-        buyer_grid,
-        successful_buyer_tasks,
-    )
+    if SAP_TARGET_ENV == "PROD" and PROD_DIRECT_RFQ_AFTER_BUYER_RECEIPT:
+        rfq_grid, rfq_tasks = prepare_prod_direct_rfq_rows(
+            sap,
+            buyer_grid,
+            successful_buyer_tasks,
+        )
+        terminal_success = ""
+    else:
+        rfq_grid, terminal_success = open_rfq_creation_from_buyer_receipt(
+            sap,
+            buyer_grid,
+            successful_buyer_tasks,
+        )
 
-    # QA 321 terminal condition: bottom-left status bar says
-    # "Data copied Successfully and email sent". The grid can be empty because
-    # the business action is already finished, so do not wait for LIFNR1_CB.
-    if terminal_success:
-        for task in successful_buyer_tasks:
-            excel.write_status(
-                [task.excel_row],
-                rfq_status="SUCCESS",
-                rfq_number="",
-                error_stage="",
-                error_message="",
+        # QA 321 terminal condition: bottom-left status bar says
+        # "Data copied Successfully and email sent".
+        if terminal_success:
+            for task in successful_buyer_tasks:
+                excel.write_status(
+                    [task.excel_row],
+                    rfq_status="SUCCESS",
+                    rfq_number="",
+                    error_stage="",
+                    error_message="",
+                )
+            excel.save()
+            print(
+                "   🎉 RFQ流程已完成（SAP状态栏终态成功）："
+                f"{terminal_success}"
             )
-        excel.save()
-        print(
-            "   🎉 RFQ流程已完成（SAP状态栏终态成功）："
-            f"{terminal_success}"
-        )
-        return "SUCCESS", ""
+            return "SUCCESS", ""
 
-    if rfq_grid is None:
-        raise SapRpaError(
-            "RFQ_GRID_MATCH",
-            "未取得RFQ Grid，且没有检测到终态成功消息",
-        )
+        if rfq_grid is None:
+            raise SapRpaError(
+                "RFQ_GRID_MATCH",
+                "未取得RFQ Grid，且没有检测到终态成功消息",
+            )
 
-    rfq_tasks = fill_rfq_grid_rows(sap, rfq_grid, successful_buyer_tasks)
+        rfq_tasks = fill_rfq_grid_rows(sap, rfq_grid, successful_buyer_tasks)
     rfq_task_materials = {task.material for task in rfq_tasks}
 
     for task in successful_buyer_tasks:
@@ -3812,19 +5290,53 @@ def complete_rfq_from_buyer_receipt(
         )
     excel.save()
 
-    sap.select_rows(rfq_grid, [int(task.rfq_row) for task in rfq_tasks if task.rfq_row is not None])
-    sap.press(ID_OPEN_DETAILED_RFQ)
+    sap.select_rows(
+        rfq_grid,
+        [int(task.rfq_row) for task in rfq_tasks if task.rfq_row is not None],
+    )
+    if SAP_TARGET_ENV == "PROD" and PROD_DIRECT_RFQ_AFTER_BUYER_RECEIPT:
+        press_prod_open_detailed_rfq(sap)
+    else:
+        sap.press(ID_OPEN_DETAILED_RFQ)
     handle_preferred_supplier_warning(sap, group.allow_without_preferred)
 
     fill_detailed_rfq_header(sap, group)
     sap.press(ID_CREATE_RFQ_FINAL)
-    process_final_rfq_popups(sap, group)
-    sap.wait_not_busy(SAP_LONG_WAIT_SEC)
-    time.sleep(1)
+    popup_rfq_number, popup_success_message = process_final_rfq_popups(sap, group)
     sap.raise_on_status_error("RFQ_FINAL_SAVE")
 
-    rfq_number = extract_rfq_number(sap)
+    rfq_number = popup_rfq_number or extract_rfq_number(sap)
+    if not rfq_number and popup_success_message:
+        rfq_number, _ = extract_created_rfq_from_text(popup_success_message)
+
     if not rfq_number:
+        # PROD may finish with the configured terminal success status instead of
+        # leaving an RFQ number visible on the current screen.
+        terminal_success = (
+            popup_success_message
+            or rfq_terminal_success_message(sap)
+        )
+        if terminal_success:
+            for task in rfq_tasks:
+                excel.write_status(
+                    [task.excel_row],
+                    rfq_status="SUCCESS",
+                    rfq_number="",
+                    error_stage="",
+                    error_message="",
+                )
+            excel.save()
+            print(
+                "   🎉 RFQ流程终态成功（未显示RFQ Number）："
+                f"{terminal_success}"
+            )
+            if SAP_TARGET_ENV == "PROD":
+                return_to_npl_start_after_rfq(
+                    sap,
+                    max_back_steps=RFQ_SUCCESS_BACK_STEPS,
+                )
+            return "SUCCESS", ""
+
         visible_text = sap.collect_all_visible_text()
         for task in rfq_tasks:
             excel.write_status(
@@ -3839,7 +5351,8 @@ def complete_rfq_from_buyer_receipt(
         excel.save()
         raise SapRpaError(
             "RFQ_NUMBER",
-            "RFQ创建流程完成，但未提取到RFQ Number；请先人工核查，避免重复创建",
+            "RFQ创建流程完成，但未提取到RFQ Number，且未检测到配置的终态成功消息；"
+            "请先人工核查，避免重复创建",
         )
 
     for task in rfq_tasks:
@@ -3851,13 +5364,26 @@ def complete_rfq_from_buyer_receipt(
             error_message="",
         )
     excel.save()
+    print(
+        f"   📝 RFQ Number已写入Excel最后状态列：{rfq_number}"
+    )
 
-    sap.dismiss_message_display()
-    if skipped_existing or skipped_ppap or blocked_ppap:
+    if SAP_TARGET_ENV == "PROD":
+        return_to_npl_start_after_rfq(
+            sap,
+            max_back_steps=RFQ_SUCCESS_BACK_STEPS,
+        )
+
+    if skipped_existing or skipped_ppap or blocked_ppap or skipped_prerequisite:
         notes: list[str] = []
         if skipped_existing:
             notes.append(
                 "Existing RFQ=" + ", ".join(task.material for task in skipped_existing)
+            )
+        if skipped_prerequisite:
+            notes.append(
+                "Vendor Company View缺失="
+                + ", ".join(task.material for task in skipped_prerequisite)
             )
         ppap_skips = list({task.material: task for task in [*skipped_ppap, *blocked_ppap]}.values())
         if ppap_skips:
@@ -3884,9 +5410,22 @@ def process_group(
     # The exact Continue control comes from the user's VBS recording.
     if sap.exists("wnd[1]"):
         stale_popup = sap.popup_message_text("wnd[1]")
-        if is_existing_rfq_message(stale_popup) or is_ppap_past_message(stale_popup):
-            popup_kind = "Existing RFQ" if is_existing_rfq_message(stale_popup) else "PPAP Date"
-            print(f"   🧹 检测到上次遗留的{popup_kind} Message Display，先点击Continue")
+        if (
+            is_existing_rfq_message(stale_popup)
+            or is_ppap_past_message(stale_popup)
+            or is_buyer_receipt_prerequisite_error(stale_popup)
+        ):
+            if is_existing_rfq_message(stale_popup):
+                popup_kind = "Existing RFQ"
+            elif is_ppap_past_message(stale_popup):
+                popup_kind = "PPAP Date"
+            else:
+                popup_kind = "Vendor Company View缺失"
+
+            print(
+                f"   🧹 检测到上次遗留的{popup_kind} Message Display，"
+                "先点击Continue"
+            )
             if not sap.dismiss_message_display():
                 raise SapRpaError(
                     "STALE_POPUP",
@@ -3986,7 +5525,13 @@ def process_group(
     # Existing RFQ is a non-fatal skip: mark that material, click Continue,
     # then keep processing the remaining materials and following Excel groups.
     # -------------------------------------------------------------------------
-    buyer_grid, create_tasks, skipped_existing, skipped_ppap = create_buyer_receipt_skipping_existing_rfq(
+    (
+        buyer_grid,
+        create_tasks,
+        skipped_existing,
+        skipped_ppap,
+        skipped_prerequisite,
+    ) = create_buyer_receipt_skipping_existing_rfq(
         sap,
         excel,
         group,
@@ -3995,6 +5540,8 @@ def process_group(
     )
 
     if not create_tasks or buyer_grid is None:
+        if skipped_prerequisite:
+            return "SKIPPED_BUYER_RECEIPT_PREREQUISITE", ""
         if skipped_ppap:
             return "INPUT_REQUIRED_PPAP_DATE", ""
         return "SKIPPED_EXISTING_RFQ", ""
@@ -4038,7 +5585,50 @@ def process_group(
         )
     excel.save()
 
-    successful_buyer_tasks, icon_debug, buyer_grid = save_buyer_receipt(sap, buyer_grid, buyer_tasks)
+    try:
+        successful_buyer_tasks, icon_debug, buyer_grid = save_buyer_receipt(
+            sap,
+            buyer_grid,
+            buyer_tasks,
+        )
+    except SapRpaError as exc:
+        if (
+            exc.stage == "BUYER_RECEIPT_SAVE_POPUP"
+            and CONTINUE_AFTER_BUYER_RECEIPT_MASTER_DATA_ERROR
+            and is_recoverable_buyer_receipt_master_data_error(exc.message)
+        ):
+            clean_message = safe_text(exc.message)
+            print(
+                "   ⚠️ Buyer Receipt无法保存，识别到可跳过的主数据错误："
+                + clean_message
+            )
+
+            # Write the error to Excel before navigating away.
+            for task in buyer_tasks:
+                excel.write_status(
+                    [task.excel_row],
+                    batch_key=group.key,
+                    buyer_status="MASTER_DATA_ERROR",
+                    rfq_status="NOT_STARTED",
+                    error_stage="BUYER_RECEIPT_MASTER_DATA",
+                    error_message=clean_message[:3000],
+                )
+            excel.save()
+
+            # Exact recorded recovery: Continue -> Back -> Back.
+            recover_after_buyer_receipt_master_data_error(
+                sap,
+                back_steps=BUYER_RECEIPT_ERROR_BACK_STEPS,
+            )
+
+            print(
+                "   ⏭️ 当前Material已记录主数据错误，"
+                "继续处理Excel下一行"
+            )
+            return "SKIPPED_BUYER_RECEIPT_MASTER_DATA", ""
+
+        raise
+
     successful_materials = {task.material for task in successful_buyer_tasks}
 
     for task in buyer_tasks:
@@ -4074,6 +5664,7 @@ def process_group(
         skipped_existing,
         skipped_ppap,
         blocked_ppap,
+        skipped_prerequisite,
     )
 
 
@@ -4093,7 +5684,7 @@ def create_csv_log(path: Path):
             "Timestamp",
             "Batch Key",
             "Plant",
-            "Project No.",
+            "MPP Project No.",
             "Materials",
             "Excel Rows",
             "Status",
@@ -4122,7 +5713,7 @@ def append_group_log(
             "Timestamp": now_text(),
             "Batch Key": group.key,
             "Plant": group.plant,
-            "Project No.": group.project,
+            "MPP Project No.": group.project,
             "Materials": ";".join(task.material for task in group.tasks),
             "Excel Rows": ";".join(str(task.excel_row) for task in group.tasks),
             "Status": status,
@@ -4142,22 +5733,57 @@ def append_group_log(
 def print_expected_headers() -> None:
     print("\nExcel建议表头：")
     print(
-        "Plant | Project No. | Material No. | Intended Supplier | "
-        "Supplier Email | Quotation Due Date | PPAP Date | Technology"
+        "Batch Group | Plant | MPP Project No. | Material No. | Supplier Parma | "
+        "12 MR Qty | RFQ Qty Prototype | RFQ Qty Serial | Technology | PPAP Date | "
+        "Supplier Email(E列) | Quotation Due Date(F列) | AFM Request | Cost Breakdown | "
+        "Allow Without Preferred Supplier | Attach File | RFQ Comment"
     )
-    print("PPAP Date和Technology为可选字段。")
+    print("Vendor2~Vendor5及其Cost Breakdown/Email列为可选。")
 
 
-def main() -> None:
+def standalone_main() -> None:
     print("=" * 80)
-    print("SAP NPL -> Buyer Receipt -> RFQ RPA v15 (Same-Project One-Back Reuse + QA Status Success)")
+    print("SAP NPL -> Buyer Receipt -> RFQ RPA v32 (Auto Date Normalize + Parma Group)")
     print("=" * 80)
+    print(f"ENV file: {ENV_PATH}")
+    print(f"ENV exists: {ENV_PATH.exists()}")
     print(f"Excel: {EXCEL_PATH}")
     print(f"Sheet: {SHEET_NAME or '<active>'}")
     print(f"DRY_RUN: {DRY_RUN}")
     print(f"TEST_GROUP_LIMIT: {TEST_GROUP_LIMIT or 'ALL'}")
     print(f"MAX_MATERIALS_PER_GROUP: {MAX_MATERIALS_PER_GROUP}")
-    print(f"PROCESS_MODE: {PROCESS_MODE} ({'逐行安全模式' if PROCESS_MODE == 'ROW' else '批量多选模式'})")
+    print(
+        "RFQ grouping: "
+        f"GroupByParma={GROUP_RFQ_BY_PARMA} | "
+        f"Key=Plant+Project+Parma | "
+        f"PROCESS_MODE={PROCESS_MODE} (ignored when GroupByParma=True) | "
+        f"MaxMaterialsPerRFQ={MAX_MATERIALS_PER_GROUP}"
+    )
+    print(
+        "Excel date normalization: "
+        "AUTO | PPAP Date + RFQ Due Date | "
+        "supports YYYY-MM-DD / YYYY.MM.DD / DD.MM.YYYY / Excel date cells"
+    )
+    print(
+        "PROD RFQ continuation: "
+        f"DirectAfterBR={PROD_DIRECT_RFQ_AFTER_BUYER_RECEIPT} | "
+        f"DueDateExcelCol={RFQ_DUE_DATE_EXCEL_COL}(F=6) | "
+        f"SupplierEmailExcelCol={SUPPLIER_EMAIL_EXCEL_COL}(E=5) | "
+        f"CalendarPicker=DISABLED(direct-write)"
+    )
+    print(
+        "PROD RFQ popup mode: DynamicTitleAware | "
+        f"StepTimeout={PROD_RFQ_POPUP_STEP_TIMEOUT_SEC:.1f}s | "
+        f"NextPopupWait={PROD_RFQ_NEXT_POPUP_WAIT_SEC:.1f}s | "
+        f"PostClickWait={PROD_RFQ_POPUP_POST_CLICK_SEC:.1f}s | "
+        f"Retries={PROD_RFQ_POPUP_CLICK_RETRIES}"
+    )
+    print(
+        "PROD RFQ success recovery: "
+        f"CaptureFinalPopupRFQ=True | "
+        f"WriteExcelBeforeBack=True | "
+        f"ImmediateBackSteps={RFQ_SUCCESS_BACK_STEPS}"
+    )
     print(f"Require green Buyer Receipt status: {REQUIRE_GREEN_BUYER_RECEIPT}")
     print(
         "Buyer Receipt save guard: "
@@ -4194,15 +5820,28 @@ def main() -> None:
         f"FallbackRestart={NPL_FALLBACK_RESTART}"
     )
     print(
+        "NPL lookup mode: "
+        f"SingleExact={NPL_EXACT_MATERIAL_QUERY} | "
+        f"MultiMaterialClipboard={NPL_MULTI_MATERIAL_QUERY}"
+    )
+    print(
         "Same-project NPL fast reuse: "
         f"Enabled={REUSE_SAME_PROJECT_NPL_RESULTS} | "
-        f"MaxBack={SAME_PROJECT_MAX_BACK_STEPS} | "
-        f"ResultWait={SAME_PROJECT_RESULT_WAIT_SEC:.1f}s"
+        f"Effective={'IGNORED while exact single/multi Material filter is enabled' if (NPL_EXACT_MATERIAL_QUERY or NPL_MULTI_MATERIAL_QUERY) else 'ACTIVE'}"
     )
     print(
         "Existing RFQ handling: "
         f"Skip={SKIP_EXISTING_RFQ_ROWS} | "
         f"ContinueRemaining={CONTINUE_AFTER_EXISTING_RFQ}"
+    )
+    print(
+        "Buyer Receipt master-data recovery: "
+        f"Enabled={CONTINUE_AFTER_BUYER_RECEIPT_MASTER_DATA_ERROR} | "
+        f"Sequence=Continue->Backx{BUYER_RECEIPT_ERROR_BACK_STEPS}"
+    )
+    print(
+        "Buyer Receipt Save popup mode: "
+        "NormalYesNo OR ImmediateMessageDisplay"
     )
     print(
         "SAP auto launch/target: "
@@ -4239,7 +5878,20 @@ def main() -> None:
             groups = groups[:TEST_GROUP_LIMIT]
 
         print(f"有效Material行: {len(tasks)}")
-        print(f"最终处理单元数: {len(groups)}")
+        print(f"最终RFQ Group数: {len(groups)}")
+        print("📦 v32分组规则：同Plant + 同Project + 同Parma = 同一个RFQ")
+        for idx, grp in enumerate(groups, start=1):
+            print(
+                f"   Group {idx}: Parma={grp.vendors[0]} | "
+                f"Plant={grp.plant} | Project={grp.project} | "
+                f"Materials={len(grp.tasks)}"
+            )
+            print(
+                "      ExcelRows="
+                + ",".join(str(t.excel_row) for t in grp.tasks)
+                + " | Materials="
+                + ",".join(t.material for t in grp.tasks)
+            )
 
         if not groups:
             print("没有需要处理的Group。")
@@ -4302,6 +5954,30 @@ def main() -> None:
                     error_message=exc.message,
                 )
 
+                # Safety: if Buyer Receipt was already saved successfully but RFQ
+                # continuation failed, do not automatically start the next Excel row.
+                # Otherwise same-project "one Back" can run from the wrong screen and
+                # risks confusing the recovery state / creating duplicates.
+                buyer_saved = any(
+                    safe_text(
+                        excel.worksheet.cell(
+                            task.excel_row,
+                            excel.status_columns["Buyer Receipt Status"],
+                        ).value
+                    ).upper() == "SUCCESS"
+                    for task in group.tasks
+                )
+                if buyer_saved:
+                    print(
+                        "⛔ 当前Group的Buyer Receipt已经保存成功，但RFQ尚未完成。"
+                        "为避免下一行从错误SAP页面继续，已停止后续Group。"
+                    )
+                    print(
+                        "   修复后直接重新运行即可；如果SAP仍停留在绿色Buyer Receipt页面，"
+                        "RESUME_SAVED_BUYER_RECEIPT=true 会优先从该页面继续RFQ。"
+                    )
+                    break
+
             except Exception as exc:
                 summary["ERROR"] += 1
                 message = f"Unexpected error: {type(exc).__name__}: {exc}"
@@ -4333,6 +6009,22 @@ def main() -> None:
                     error_stage="UNEXPECTED",
                     error_message=message,
                 )
+
+                buyer_saved = any(
+                    safe_text(
+                        excel.worksheet.cell(
+                            task.excel_row,
+                            excel.status_columns["Buyer Receipt Status"],
+                        ).value
+                    ).upper() == "SUCCESS"
+                    for task in group.tasks
+                )
+                if buyer_saved:
+                    print(
+                        "⛔ Buyer Receipt已保存成功但后续出现未预期错误；"
+                        "为避免下一行从错误SAP页面继续，停止后续Group。"
+                    )
+                    break
 
         print("\n" + "=" * 80)
         print("运行结束")
@@ -4368,5 +6060,12 @@ def main() -> None:
             log_handle.close()
 
 
+def main():
+    if HUB_ARGS.hub:
+        return run_hub(sys.modules[__name__], HUB_ARGS)
+    standalone_main()
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

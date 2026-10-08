@@ -1,4 +1,5 @@
 import type { AutomationProgress, AutomationResult, OpenSapRequest } from '../shared/automation-types'
+import type { AutomationInteraction, InteractionResponse } from '../shared/automation-interaction'
 import type {
   DiagnosticLogQuery,
   DiagnosticLogResult,
@@ -36,14 +37,6 @@ import type {
   Me01PreviewResult,
   SelectMe01ExcelResult
 } from '../shared/me01-types'
-import type {
-  Me52nBatchConfig,
-  Me52nBatchProgress,
-  Me52nBatchResult,
-  Me52nCancelResult,
-  Me52nPreviewResult,
-  SelectMe52nExcelResult
-} from '../shared/me52n-types'
 
 import type { ApqpConfig, ApqpFileResult, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../shared/apqp-types'
 
@@ -72,16 +65,16 @@ export interface SapAutomationApi {
   startMe01Batch: (config: Me01BatchConfig) => Promise<Me01BatchResult>
   cancelMe01Batch: () => Promise<Me01CancelResult>
   onMe01Progress: (listener: (progress: Me01BatchProgress) => void) => () => void
-  selectMe52nExcelFile: () => Promise<SelectMe52nExcelResult>
-  previewMe52nBatch: (config: Me52nBatchConfig) => Promise<Me52nPreviewResult>
-  startMe52nBatch: (config: Me52nBatchConfig) => Promise<Me52nBatchResult>
-  cancelMe52nBatch: () => Promise<Me52nCancelResult>
-  onMe52nProgress: (listener: (progress: Me52nBatchProgress) => void) => () => void
+  openAutomationArtifact: (path: string) => Promise<{ success: boolean; message?: string }>
   getExecutionHistory: (query?: ExecutionHistoryQuery) => Promise<ExecutionHistoryResult>
   selectRfqExcelFile: () => Promise<SelectRfqExcelResult>
   downloadRfqTemplate: () => Promise<DownloadRfqTemplateResult>
   previewRfqBatch: (config: RfqBatchConfig) => Promise<RfqPreviewResult>
   startRfqBatch: (config: RfqBatchConfig) => Promise<RfqBatchResult>
   cancelRfqBatch: () => Promise<RfqCancelResult>
+  getAutomationInteraction: () => Promise<AutomationInteraction | null>
+  onAutomationInteraction: (listener: (interaction: AutomationInteraction | null) => void) => () => void
+  respondAutomationInteraction: (input: InteractionResponse) => Promise<{ success: boolean; message?: string }>
+  openRfqArtifact: (path: string) => Promise<{ success: boolean; message?: string }>
   onRfqProgress: (listener: (progress: RfqBatchProgress) => void) => () => void
 }

@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { AppSettings } from '../../shared/settings-types'
-import { SAP_TRANSACTIONS } from '../../shared/sap-transactions'
+import type { AutomationInteraction } from '../../shared/automation-interaction'
 import { NotificationCenter } from './components/common/NotificationCenter'
+import { AutomationInteractionManager } from './components/common/AutomationInteractionManager'
 import { AppShell } from './components/layout/AppShell'
 import { useNotifications } from './hooks/use-notifications'
 import { useSapAutomation } from './hooks/use-sap-automation'
@@ -12,7 +13,7 @@ import { HistoryPage } from './pages/HistoryPage'
 import { OperationsPage } from './pages/OperationsPage'
 import { Me12LeadTimePage } from './pages/Me12LeadTimePage'
 import { Me01SourceListPage } from './pages/Me01SourceListPage'
-import { Me52nProjectRefPage } from './pages/Me52nProjectRefPage'
+import { setNotificationSoundsEnabled } from './hooks/notification-sound'
 import { ApqpPlanClosurePage } from './pages/ApqpPlanClosurePage'
 import { SettingsPage } from './pages/SettingsPage'
 import type { PageId } from './types/navigation'
@@ -22,7 +23,6 @@ const pageIds: PageId[] = [
   'create-rfq',
   'me12-lead-time',
   'me01-source-list',
-  'me52n-project-ref',
   'apqp-plan-closure',
   'operations',
   'history',
@@ -36,6 +36,8 @@ function pageFromHash(): PageId {
 
 export default function App(): React.JSX.Element {
   const [activePage, setActivePage] = useState<PageId>(pageFromHash)
+  const [guidedBusy, setGuidedBusy] = useState(false)
+  const [interactionState, setInteractionState] = useState<AutomationInteraction['state'] | null>(null)
   const [preferences, setPreferences] = useState<
     Pick<AppSettings, 'language' | 'fontSize' | 'theme'>
   >({ language: 'en', fontSize: 'medium', theme: 'light' })
@@ -44,12 +46,15 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     const onHashChange = (): void => setActivePage(pageFromHash())
+    const onGuidedRunning = (event: Event): void => setGuidedBusy(Boolean((event as CustomEvent).detail))
+    window.addEventListener('guided-running', onGuidedRunning)
     window.addEventListener('hashchange', onHashChange)
-    return () => window.removeEventListener('hashchange', onHashChange)
+    return () => { window.removeEventListener('hashchange', onHashChange); window.removeEventListener('guided-running', onGuidedRunning) }
   }, [])
 
   useEffect(() => {
     void window.sapAutomation.getSettings().then((settings) => {
+      setNotificationSoundsEnabled(settings.notificationSounds !== false)
       setPreferences({
         language: settings.language,
         fontSize: settings.fontSize,
@@ -73,32 +78,13 @@ export default function App(): React.JSX.Element {
       case 'dashboard':
         return <DashboardPage onNavigate={navigate} />
       case 'create-rfq':
-        return (
-          <CreateRfqPage
-            notify={notify}
-            onBack={() => navigate('operations')}
-          />
-        )
+        return <></>
       case 'me12-lead-time':
-        return (
-          <Me12LeadTimePage
-            notify={notify}
-            onBack={() => navigate('operations')}
-          />
-        )
       case 'me01-source-list':
-        return (
-          <Me01SourceListPage
-            notify={notify}
-            onBack={() => navigate('operations')}
-          />
-        )
-      case 'me52n-project-ref':
-        return <Me52nProjectRefPage notify={notify} onBack={() => navigate('operations')} />
-      case 'operations':
-        return <OperationsPage onNavigate={navigate} onOpenSap={() => void automation.openSapWebGui({ tcode: SAP_TRANSACTIONS.sapMenu })} automationBusy={automation.busy} />
       case 'apqp-plan-closure':
-        return <ApqpPlanClosurePage notify={notify} onBack={() => navigate('operations')} />
+        return <></>
+      case 'operations':
+        return <OperationsPage onNavigate={navigate} />
       case 'history':
         return <HistoryPage />
       case 'settings':
@@ -108,10 +94,17 @@ export default function App(): React.JSX.Element {
 
   return (
     <LocalizationProvider language={preferences.language}>
-      <AppShell activePage={activePage} onNavigate={navigate} statusLabel={automation.statusLabel} isBusy={automation.busy}>
+      <AppShell activePage={activePage} onNavigate={navigate} statusLabel={interactionState === 'WAITING_FOR_USER' ? preferences.language === 'zh-CN' ? '已暂停，等待用户处理' : 'Paused — waiting for user' : interactionState === 'RECOVERING' ? preferences.language === 'zh-CN' ? '正在验证 SAP' : 'Checking SAP' : guidedBusy ? preferences.language === 'zh-CN' ? '正在运行' : 'Running' : automation.statusLabel} isBusy={automation.busy || guidedBusy || interactionState !== null}>
           {renderPage()}
+          <div hidden={activePage !== 'create-rfq'}>
+            <CreateRfqPage notify={notify} onBack={() => navigate('operations')} />
+          </div>
+          <div hidden={activePage !== 'me12-lead-time'}><Me12LeadTimePage notify={notify} onBack={() => navigate('operations')} /></div>
+          <div hidden={activePage !== 'me01-source-list'}><Me01SourceListPage notify={notify} onBack={() => navigate('operations')} /></div>
+          <div hidden={activePage !== 'apqp-plan-closure'}><ApqpPlanClosurePage notify={notify} onBack={() => navigate('operations')} /></div>
         </AppShell>
         <NotificationCenter notifications={notifications} onDismiss={dismiss} />
+        <AutomationInteractionManager notify={notify} onStateChange={setInteractionState} />
     </LocalizationProvider>
   )
 }

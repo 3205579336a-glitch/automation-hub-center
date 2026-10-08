@@ -1,0 +1,11 @@
+.dialog { width: min(640px, calc(100vw - 48px)); max-height: calc(100vh - 48px); box-sizing: border-box; overflow: auto; padding: 26px; border: 2px solid var(--warning-text); border-radius: 16px; background: var(--surface); color: var(--text); box-shadow: 0 18px 80px #0005; }
+.dialog::backdrop { background: #0009; }
+.dialog h2 { margin-top: 0; color: var(--text-strong); }
+.dialog p { line-height: 1.6; overflow-wrap: anywhere; }
+.dialog dl { display: grid; grid-template-columns: minmax(90px, .35fr) minmax(0, 1fr); gap: 8px 16px; }
+.dialog dt { color: var(--text-muted); }
+.dialog dd { margin: 0; overflow-wrap: anywhere; }
+.state, .warning { padding: 12px; background: var(--warning-soft); color: var(--warning-text); border-radius: 8px; }
+.details { padding: 12px 0; }
+.details summary { cursor: pointer; }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; padding-top: 16px; }

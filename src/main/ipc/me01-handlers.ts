@@ -15,6 +15,7 @@ import type { ExecutionHistoryService } from '../services/execution-history-serv
 import type { Me01ExcelService } from '../services/me01-excel-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
+import type { GuidedAutomationService } from '../services/guided-automation-service'
 import { isTrustedRenderer } from './ipc-security'
 
 export function registerMe01Handlers(
@@ -23,7 +24,8 @@ export function registerMe01Handlers(
   logger: DiagnosticLogger,
   history: ExecutionHistoryService,
   templatePath: string,
-  settingsService: SettingsService
+  settingsService: SettingsService,
+  guided: GuidedAutomationService
 ): void {
   ipcMain.handle(IPC_CHANNELS.downloadMe01Template, async (event): Promise<DownloadMe01TemplateResult> => {
     if (!isTrustedRenderer(event)) return { success: false, cancelled: false, message: 'The template request was rejected.' }
@@ -78,20 +80,28 @@ export function registerMe01Handlers(
     const reportProgress = (progress: Me01BatchProgress): void => {
       if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.me01Progress, progress)
     }
+    let runId: string
+    try { runId = guided.begin() } catch (error) { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: getErrorMessage(error) } }
+    try {
+    // Re-read immediately before any SAP write; invalid inputs never launch the engine.
+    const preview = await excelService.preview(input.excelPath)
+    if (!preview.uniqueMaterials) return { success: false, errorCode: 'INVALID_CONFIG', message: 'No valid materials were found.' }
     const historyEntry = await history.start({ operation: 'me01-source-list', label: 'ME01 Source List — Plant C100', summary: 'ME01 source-list batch is running.', tcode: 'ME01' })
     await logger.info({ category: 'automation', event: 'me01.batch.started', message: 'ME01 Source List batch started for Plant C100.', tcode: 'ME01' })
-    const result = await runner.run(input, reportProgress)
+    const result = await runner.run(input, reportProgress, { service: guided, runId })
     await history.finish(historyEntry.id, result.success ? {
       status: result.failed > 0 ? 'Partial' : 'Success', summary: result.message,
       total: result.processed, processed: result.processed, succeeded: result.succeeded,
       skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath
-    } : { status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed', summary: result.message })
+    } : { status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed', summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath })
     await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({
       category: 'automation', event: result.success ? 'me01.batch.completed' : 'me01.batch.failed',
       message: result.message, ...(!result.success ? { errorCode: result.errorCode } : {}), tcode: 'ME01',
       details: result.success ? { processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed } : undefined
     })
+    guided.registerArtifacts(result.resultPath, result.backupPath)
     return result
+    } finally { guided.end(runId) }
   })
 
   ipcMain.handle(IPC_CHANNELS.cancelMe01Batch, async (event): Promise<Me01CancelResult> => {

@@ -15,6 +15,7 @@ import type { Me12ExcelService } from '../services/me12-excel-service'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
+import type { GuidedAutomationService } from '../services/guided-automation-service'
 import { isTrustedRenderer } from './ipc-security'
 
 export function registerMe12Handlers(
@@ -23,7 +24,8 @@ export function registerMe12Handlers(
   logger: DiagnosticLogger,
   history: ExecutionHistoryService,
   templatePath: string,
-  settingsService: SettingsService
+  settingsService: SettingsService,
+  guided: GuidedAutomationService
 ): void {
   ipcMain.handle(
     IPC_CHANNELS.downloadMe12Template,
@@ -137,7 +139,7 @@ export function registerMe12Handlers(
           message: 'The batch request was rejected.'
         }
       }
-      if (!isMe12BatchConfig(input)) {
+      if (!isMe12BatchConfig(input) || input.confirmed !== true) {
         return {
           success: false,
           errorCode: 'INVALID_CONFIG',
@@ -149,6 +151,9 @@ export function registerMe12Handlers(
           event.sender.send(IPC_CHANNELS.me12Progress, progress)
         }
       }
+      let runId: string
+      try { runId = guided.begin() } catch (error) { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: getErrorMessage(error) } }
+      try {
       await logger.info({
         category: 'automation',
         event: 'me12.batch.started',
@@ -165,7 +170,7 @@ export function registerMe12Handlers(
         tcode: 'ME12',
         dryRun: input.dryRun
       })
-      const result = await runner.run(input, reportProgress)
+      const result = await runner.run(input, reportProgress, { service: guided, runId })
       await history.finish(
         historyEntry.id,
         result.success
@@ -183,7 +188,7 @@ export function registerMe12Handlers(
             }
           : {
               status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed',
-              summary: result.message
+              summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath
             }
       )
       await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({
@@ -202,7 +207,9 @@ export function registerMe12Handlers(
             }
           : undefined
       })
+      guided.registerArtifacts(result.resultPath, result.backupPath)
       return result
+      } finally { guided.end(runId) }
     }
   )
 

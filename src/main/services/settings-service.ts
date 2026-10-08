@@ -6,7 +6,7 @@ import type { DiagnosticLogger } from './diagnostic-logger'
 import type { LocalStoragePaths } from './local-storage-paths'
 
 export class SettingsService {
-  private static readonly SETTINGS_SCHEMA_VERSION = 6
+  private static readonly SETTINGS_SCHEMA_VERSION = 7
   private readonly settingsPath: string
   private readonly defaults: AppSettings
 
@@ -26,7 +26,10 @@ export class SettingsService {
       maxConcurrentBrowsers: 1,
       language: 'en',
       fontSize: 'medium',
-      theme: 'light'
+      theme: 'light',
+      notificationSounds: true,
+      openResultAfterCompletion: false,
+      maxConcurrentSapSessions: 3
     }
   }
 
@@ -76,7 +79,7 @@ export class SettingsService {
     if (!isAppSettings(parsed)) {
       return migrateLegacySettings(parsed, this.defaults)
     }
-    return parsed
+    return { ...this.defaults, ...parsed }
   }
 
   private async migrateLegacySettingsFile(): Promise<AppSettings> {
@@ -124,6 +127,9 @@ function migrateLegacySettings(value: unknown, defaults: AppSettings): AppSettin
       : defaults.sapWebGuiUrl
   return {
     ...defaults,
+    notificationSounds: typeof candidate.notificationSounds === 'boolean' ? candidate.notificationSounds : true,
+    openResultAfterCompletion: candidate.openResultAfterCompletion === true,
+    maxConcurrentSapSessions: Number.isInteger(candidate.maxConcurrentSapSessions) && Number(candidate.maxConcurrentSapSessions) >= 1 && Number(candidate.maxConcurrentSapSessions) <= 5 ? Number(candidate.maxConcurrentSapSessions) : 3,
     sapWebGuiUrl: legacyUrl,
     browser:
       candidate.browser === 'msedge' || candidate.browser === 'chrome'

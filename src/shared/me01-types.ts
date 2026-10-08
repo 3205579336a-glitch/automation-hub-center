@@ -16,6 +16,7 @@ export interface Me01ExcelPreview {
   duplicateRows: number
   skippedBlankRows: number
   sample: Me01PreviewRow[]
+  uniqueSuppliers?: number
 }
 
 export type Me01PreviewResult =
@@ -40,7 +41,7 @@ export type Me01BatchResult =
       resultPath: string
       backupPath: string
     }
-  | { success: false; errorCode: Me01BatchErrorCode; message: string }
+  | { success: false; errorCode: Me01BatchErrorCode; message: string; processed?: number; succeeded?: number; skipped?: number; failed?: number; resultPath?: string; backupPath?: string }
 
 export type Me01ProgressStage =
   | 'preparing'

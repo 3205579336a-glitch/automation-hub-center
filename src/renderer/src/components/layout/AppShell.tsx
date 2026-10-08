@@ -33,7 +33,6 @@ const pageTitleKeys: Record<PageId, TranslationKey> = {
   'create-rfq': 'createRfq',
   'me12-lead-time': 'me12LeadTime',
   'me01-source-list': 'me01SourceList',
-  'me52n-project-ref': 'me52nProjectRef',
   'apqp-plan-closure': 'apqpPlanClosure',
   operations: 'operations',
   history: 'history',

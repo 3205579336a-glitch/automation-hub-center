@@ -1,3 +1,4 @@
+param([switch]$SkipDependencyInstall)
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -16,8 +17,10 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
   py -3 -m venv $venvPath
 }
 
-& $pythonPath -m pip install --disable-pip-version-check --upgrade pip
-& $pythonPath -m pip install --disable-pip-version-check pyinstaller openpyxl pywin32 python-dotenv playwright
+if (-not $SkipDependencyInstall) {
+  & $pythonPath -m pip install --disable-pip-version-check pyinstaller openpyxl pywin32 python-dotenv playwright
+  if ($LASTEXITCODE -ne 0) { throw 'Automation runtime dependency installation failed.' }
+}
 & $pythonPath -m PyInstaller `
   --noconfirm `
   --clean `
@@ -25,6 +28,9 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
   --name automation-engine `
   --paths $sourceRoot `
   --hidden-import rfq_engine `
+  --hidden-import rfq_runtime `
+  --hidden-import rfq_interaction `
+  --hidden-import rfq_defaults `
   --hidden-import me01_source_list `
   --hidden-import me52n_project_ref `
   --hidden-import apqp_plan_closure `
@@ -35,6 +41,7 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
   --workpath $workPath `
   --specpath $specPath `
   $launcherPath
+if ($LASTEXITCODE -ne 0) { throw 'Automation engine build failed.' }
 
 $enginePath = Join-Path $distPath 'automation-engine\automation-engine.exe'
 & $enginePath --self-test

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 
 
@@ -44,9 +45,15 @@ def load_engine(name: str):
 def self_test() -> int:
     loaded: list[str] = []
     for name in ENGINES:
-        load_engine(name)
+        original_environment = dict(os.environ)
+        try:
+            load_engine(name)
+        finally:
+            os.environ.clear()
+            os.environ.update(original_environment)
         loaded.append(name)
-    print(json.dumps({"status": "ok", "engines": loaded}))
+    from rfq_defaults import ENGINE_VERSION
+    print(json.dumps({"status": "ok", "engines": loaded, "rfqEngineVersion": ENGINE_VERSION}))
     return 0
 
 

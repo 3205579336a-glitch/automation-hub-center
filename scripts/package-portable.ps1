@@ -20,7 +20,9 @@ if ($engineIsStale) {
 Push-Location $projectRoot
 try {
   npm run build
+  if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
   npx electron-builder --win dir
+  if ($LASTEXITCODE -ne 0) { throw 'Electron package build failed.' }
 } finally {
   Pop-Location
 }

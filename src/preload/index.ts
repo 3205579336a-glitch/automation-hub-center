@@ -3,8 +3,8 @@ import { IPC_CHANNELS } from '../shared/ipc-channels'
 import type { AutomationProgress } from '../shared/automation-types'
 import type { Me12BatchProgress } from '../shared/me12-types'
 import type { RfqBatchProgress } from '../shared/rfq-batch-types'
+import type { AutomationInteraction } from '../shared/automation-interaction'
 import type { Me01BatchProgress } from '../shared/me01-types'
-import type { Me52nBatchProgress } from '../shared/me52n-types'
 import type { SapAutomationApi } from './types'
 import type { ApqpProgress } from '../shared/apqp-types'
 
@@ -58,20 +58,20 @@ const sapAutomationApi: SapAutomationApi = {
     ipcRenderer.on(IPC_CHANNELS.me01Progress, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.me01Progress, handler)
   },
-  selectMe52nExcelFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectMe52nExcelFile),
-  previewMe52nBatch: (config) => ipcRenderer.invoke(IPC_CHANNELS.previewMe52nBatch, config),
-  startMe52nBatch: (config) => ipcRenderer.invoke(IPC_CHANNELS.startMe52nBatch, config),
-  cancelMe52nBatch: () => ipcRenderer.invoke(IPC_CHANNELS.cancelMe52nBatch),
-  onMe52nProgress: (listener) => {
-    const handler = (_event: Electron.IpcRendererEvent, progress: Me52nBatchProgress): void => listener(progress)
-    ipcRenderer.on(IPC_CHANNELS.me52nProgress, handler)
-    return () => ipcRenderer.removeListener(IPC_CHANNELS.me52nProgress, handler)
-  },
+  openAutomationArtifact: (path) => ipcRenderer.invoke(IPC_CHANNELS.openAutomationArtifact, path),
   selectRfqExcelFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectRfqExcelFile),
   downloadRfqTemplate: () => ipcRenderer.invoke(IPC_CHANNELS.downloadRfqTemplate),
   previewRfqBatch: (config) => ipcRenderer.invoke(IPC_CHANNELS.previewRfqBatch, config),
   startRfqBatch: (config) => ipcRenderer.invoke(IPC_CHANNELS.startRfqBatch, config),
   cancelRfqBatch: () => ipcRenderer.invoke(IPC_CHANNELS.cancelRfqBatch),
+  getAutomationInteraction: () => ipcRenderer.invoke(IPC_CHANNELS.getAutomationInteraction),
+  onAutomationInteraction: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, interaction: AutomationInteraction | null): void => listener(interaction)
+    ipcRenderer.on(IPC_CHANNELS.automationInteraction, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.automationInteraction, handler)
+  },
+  respondAutomationInteraction: (input) => ipcRenderer.invoke(IPC_CHANNELS.respondAutomationInteraction, input),
+  openRfqArtifact: (path) => ipcRenderer.invoke(IPC_CHANNELS.openRfqArtifact, path),
   onRfqProgress: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: RfqBatchProgress): void => {
       listener(progress)

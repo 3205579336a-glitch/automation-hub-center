@@ -14,6 +14,8 @@ import {
 } from '../services/me12-excel-service'
 import type { SettingsService } from '../services/settings-service'
 import type { BrowserSlotManager } from './browser-slot-manager'
+import type { GuidanceContext } from './native-interaction-bridge'
+import { GuidedCancelled } from '../services/guided-automation-service'
 
 const LOGIN_TIMEOUT_MS = 180_000
 const NAVIGATION_TIMEOUT_MS = 30_000
@@ -57,15 +59,14 @@ export class Me12BatchRunner {
       return false
     }
     this.cancelRequested = true
-    for (const context of this.contexts) {
-      void context.close().catch(() => undefined)
-    }
+    // Do not close a browser in the middle of a SAP Save. Stop at the record boundary.
     return true
   }
 
   async run(
     config: Me12BatchConfig,
-    reportProgress: (progress: Me12BatchProgress) => void
+    reportProgress: (progress: Me12BatchProgress) => void,
+    guidance?: GuidanceContext
   ): Promise<Me12BatchResult> {
     if (this.running) {
       return {
@@ -173,11 +174,33 @@ export class Me12BatchRunner {
       }
       browserCount = workers.length
 
+      if (guidance) {
+        // No worker may change a record until all opened windows are signed in.
+        await Promise.all(workers.map(async ({ page }) => {
+          try { await page.goto(resolvedUrl.url.toString(), { waitUntil: 'commit', timeout: 10_000 }) }
+          catch (error) { if (!/timeout/i.test(errorMessage(error))) throw error }
+        }))
+        const verify = async (): Promise<void> => {
+          for (const { page } of workers) {
+            if (page.isClosed() || new URL(page.url()).origin !== resolvedUrl.url.origin
+                || !await findTextboxAcrossFrames(page, ['Info Record', 'Purchasing Info Record'], 1_200)) {
+              throw new Error('An opened SAP window is not ready. Complete sign-in in every window.')
+            }
+          }
+        }
+        try { await verify() } catch {
+          await guidance.service.wait('Info Record', guidance.runId,
+            'Complete certificate selection and SAP sign-in in every opened browser window.',
+            '请在每个打开的浏览器窗口选择证书并完成 SAP 登录。', verify, () => this.cancelRequested)
+        }
+      }
+
       reportProgress({
         stage: 'waiting-for-login',
         message: `User confirmation required: select the Windows certificate in all ${browserCount} browser window(s).`
       })
       let nextTaskIndex = 0
+      let unsafeRecord = false
       let nextCheckpoint = config.saveEvery
       let saveQueue: Promise<string> = Promise.resolve(workbookSession.savePath)
       const saveCheckpoint = (): Promise<string> => {
@@ -186,9 +209,10 @@ export class Me12BatchRunner {
       }
 
       const runWorker = async (browserWorker: BrowserWorker): Promise<void> => {
-        let firstRecord = true
+        let firstRecord = !guidance
         while (true) {
           this.assertNotCancelled()
+          if (unsafeRecord) return
           const index = nextTaskIndex
           nextTaskIndex += 1
           if (index >= workbookSession.tasks.length) {
@@ -221,6 +245,7 @@ export class Me12BatchRunner {
             skipped += 1
           } else {
             failed += 1
+            if (guidance) unsafeRecord = true
           }
           this.excelService.writeTaskResult(
             workbookSession,
@@ -285,6 +310,12 @@ export class Me12BatchRunner {
 
       reportProgress({ stage: 'saving', message: 'Saving final Excel results…' })
       const resultPath = await this.excelService.saveCheckpoint(session)
+      if (unsafeRecord && guidance) {
+        // All workers are now idle and partial results are durable. Unknown states are stop-only.
+        await guidance.service.wait('Info Record', guidance.runId,
+          'A record could not be verified. Partial results were saved; stop and review the details before trying again.',
+          '有一条记录无法验证。已保存部分结果，请停止并查看详情后再处理。', undefined, () => this.cancelRequested)
+      }
       reportProgress({
         stage: 'completed',
         message: `ME12 batch completed: ${succeeded} succeeded, ${skipped} skipped, ${failed} failed.`,
@@ -305,7 +336,7 @@ export class Me12BatchRunner {
         backupPath: session.backupPath
       }
     } catch (error) {
-      if (error instanceof BatchCancelledError) {
+      if (error instanceof BatchCancelledError || error instanceof GuidedCancelled) {
         if (session) {
           await this.excelService.saveCheckpoint(session).catch(() => undefined)
         }
@@ -318,7 +349,8 @@ export class Me12BatchRunner {
         return {
           success: false,
           errorCode: 'CANCELLED',
-          message: 'ME12 batch was cancelled. Completed rows were checkpointed.'
+          message: 'ME12 batch was cancelled. Completed rows were checkpointed.',
+          processed, succeeded, skipped, failed, resultPath: session?.savePath, backupPath: session?.backupPath
         }
       }
       if (session) {
@@ -329,7 +361,8 @@ export class Me12BatchRunner {
       return {
         success: false,
         errorCode: 'BATCH_FAILED',
-        message
+        message,
+        processed, succeeded, skipped, failed, resultPath: session?.savePath, backupPath: session?.backupPath
       }
     } finally {
       await Promise.all(

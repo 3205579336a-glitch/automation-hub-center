@@ -2,8 +2,12 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import type { ApqpConfig, ApqpPreview, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../../shared/apqp-types'
+import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
+import type { AutomationInteraction } from '../../shared/automation-interaction'
 
 interface EngineEvent extends ApqpProgress {
+  interaction?: AutomationInteraction
+  requestId?: string
   preview?: ApqpPreview
   processed?: number
   succeeded?: number
@@ -36,9 +40,9 @@ export class ApqpRunner {
     } catch (error) { return { success: false, message: messageOf(error) } }
   }
 
-  async run(config: ApqpConfig, report: (event: ApqpProgress) => void): Promise<ApqpResult> {
+  async run(config: ApqpConfig, report: (event: ApqpProgress) => void, guidance?: GuidanceContext): Promise<ApqpResult> {
     try {
-      const e = await this.execute(config, false, report)
+      const e = await this.execute(config, false, report, guidance)
       return { success: true, message: e.message, total: e.total ?? 0, processed: e.processed ?? 0,
         succeeded: e.succeeded ?? 0, skipped: e.skipped ?? 0, failed: e.failed ?? 0,
         workers: e.workers ?? 0, cancelled: e.cancelled ?? false, resultPath: e.resultPath ?? '',
@@ -52,7 +56,7 @@ export class ApqpRunner {
     return true
   }
 
-  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void): Promise<EngineEvent> {
+  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void, guidance?: GuidanceContext): Promise<EngineEvent> {
     if (this.busy) throw new Error('An APQP preview or run is already active.')
     this.busy = true
     this.previewing = preview
@@ -64,19 +68,21 @@ export class ApqpRunner {
         const errors: string[] = []
         const child = spawn(launch.command, launch.args, {
           shell: false, windowsHide: true,
-          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '',
             SHEET_NAME: config.sheetName, PLANT: config.plant, TARGET_SYSTEM: config.system,
             TARGET_CLIENT: config.client, MAX_WORKERS: String(config.maxWorkers),
             CREATE_SESSIONS: String(config.createSessions), MAX_ITEMS: String(config.maxItems),
             OVERWRITE_EXISTING_DATE: String(config.overwriteExisting) }
         })
         this.child = child
+        const interactions = guidance ? new NativeInteractionBridge(guidance, child) : null
         const stdout = createInterface({ input: child.stdout })
         const stderr = createInterface({ input: child.stderr })
         stdout.on('line', (line) => {
           if (!line.startsWith('APQP_EVENT ')) return
           try {
             const e = JSON.parse(line.slice('APQP_EVENT '.length)) as EngineEvent
+            void interactions?.handle(e).catch(() => { this.cancel() })
             if (e.event === 'preview' || e.event === 'complete') final = e
             if (e.event === 'fatal') errors.push(e.message)
             if (!preview) report(e)

@@ -1,317 +1,72 @@
-import { AlertTriangle, FolderOpen, Info, Monitor, Rows3, Save, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { Save } from 'lucide-react'
 import type { AppSettings } from '../../../shared/settings-types'
 import { DiagnosticsPanel } from '../components/settings/DiagnosticsPanel'
 import { useLocalization } from '../i18n/use-localization'
+import { setNotificationSoundsEnabled } from '../hooks/notification-sound'
 import type { Notify } from '../types/notifications'
-import styles from './SettingsPage.module.css'
+import styles from '../components/automation/GuidedAutomation.module.css'
 
-interface SettingsPageProps {
-  notify: Notify
-  onPreferencesSaved: (preferences: Pick<AppSettings, 'language' | 'fontSize' | 'theme'>) => void
-}
+const defaults: AppSettings = { sapWebGuiUrl: '', browser: 'chrome', headless: false, defaultDownloadFolder: '',
+  batchStartRow: 2, batchSize: 100, maxConcurrentBrowsers: 1, language: 'en', fontSize: 'medium', theme: 'light',
+  notificationSounds: true, openResultAfterCompletion: false }
 
-const loadingDefaults: AppSettings = {
-  sapWebGuiUrl: '',
-  browser: 'chrome',
-  headless: false,
-  defaultDownloadFolder: '',
-  batchStartRow: 2,
-  batchSize: 100,
-  maxConcurrentBrowsers: 1,
-  language: 'en',
-  fontSize: 'medium',
-  theme: 'light'
-}
-
-export function SettingsPage({
-  notify,
-  onPreferencesSaved
-}: SettingsPageProps): React.JSX.Element {
-  const { t } = useLocalization()
-  const [settings, setSettings] = useState<AppSettings>(loadingDefaults)
+export function SettingsPage({ notify, onPreferencesSaved }: {
+  notify: Notify; onPreferencesSaved: (preferences: Pick<AppSettings, 'language' | 'fontSize' | 'theme'>) => void
+}): React.JSX.Element {
+  const { language, t } = useLocalization()
+  const zh = language === 'zh-CN'
+  const [settings, setSettings] = useState<AppSettings>(defaults)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-
+  const [advanced, setAdvanced] = useState(false)
   useEffect(() => {
-    let mounted = true
-    window.sapAutomation
-      .getSettings()
-      .then((storedSettings) => {
-        if (mounted) {
-          setSettings(storedSettings)
-          setLoading(false)
-        }
-      })
-      .catch((error: unknown) => {
-        if (mounted) {
-          setLoading(false)
-          notify({
-            kind: 'error',
-            title: 'Settings unavailable',
-            message: error instanceof Error ? error.message : 'Local settings could not be loaded.'
-          })
-        }
-      })
-    return () => {
-      mounted = false
-    }
+    let active = true
+    void window.sapAutomation.getSettings().then(stored => { if (active) setSettings(stored) })
+      .catch(() => notify({ kind: 'error', title: zh ? '无法读取设置' : 'Settings unavailable', message: zh ? '请重启应用后重试。' : 'Restart the app and try again.' }))
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [notify])
-
   const save = async (): Promise<void> => {
     setSaving(true)
     try {
-      const result = await window.sapAutomation.saveSettings(settings)
-      if (result.success) {
-        setSettings(result.settings)
-        onPreferencesSaved({
-          language: result.settings.language,
-          fontSize: result.settings.fontSize,
-          theme: result.settings.theme
-        })
-        notify({ kind: 'success', title: t('settingsSaved'), message: t('settingsSavedCopy') })
-      } else {
-        notify({ kind: 'error', title: 'Settings not saved', message: result.message })
-      }
-    } catch (error) {
-      notify({
-        kind: 'error',
-        title: 'Settings not saved',
-        message: error instanceof Error ? error.message : 'The main process did not respond.'
-      })
-    } finally {
-      setSaving(false)
-    }
+      const response = await window.sapAutomation.saveSettings(settings)
+      if (!response.success) throw new Error(response.message)
+      setSettings(response.settings)
+      setNotificationSoundsEnabled(response.settings.notificationSounds !== false)
+      onPreferencesSaved({ language: response.settings.language, theme: response.settings.theme, fontSize: response.settings.fontSize })
+      notify({ kind: 'success', title: t('settingsSaved'), message: t('settingsSavedCopy') })
+    } catch { notify({ kind: 'error', title: zh ? '未能保存' : 'Could not save', message: zh ? '请检查设置后重试。' : 'Check the settings and try again.' }) }
+    finally { setSaving(false) }
   }
-
-  return (
-    <div className="page">
-      <div className="page-heading">
-        <div><h2>{t('applicationSettings')}</h2><p>{t('applicationSettingsCopy')}</p></div>
-        <button className="button primary" onClick={() => void save()} disabled={loading || saving}>
-          <Save size={13} /> {saving ? 'Saving…' : t('saveSettings')}
-        </button>
+  return <div className="page">
+    <div className="page-heading"><div><h2>{t('applicationSettings')}</h2><p>{zh ? '按自己的习惯调整显示和提醒，无需配置自动化。' : 'Adjust appearance and reminders. No automation setup is needed.'}</p></div>
+      <button className="button primary" disabled={loading || saving} onClick={() => void save()}><Save size={14} />{saving ? zh ? '保存中…' : 'Saving…' : t('saveSettings')}</button></div>
+    <div className={styles.workflow}><section className={`card ${styles.section}`}>
+      <h3>{zh ? '显示与提醒' : 'Appearance & reminders'}</h3>
+      <div className={styles.fields}>
+        <label className="field"><span>{zh ? '语言' : 'Language'}</span><select className="select" aria-label={zh ? '语言' : 'Language'} disabled={loading} value={settings.language} onChange={event => setSettings({ ...settings, language: event.target.value === 'zh-CN' ? 'zh-CN' : 'en' })}><option value="en">English</option><option value="zh-CN">中文（简体）</option></select></label>
+        <label className="field"><span>{zh ? '主题' : 'Theme'}</span><select className="select" aria-label={zh ? '主题' : 'Theme'} disabled={loading} value={settings.theme} onChange={event => setSettings({ ...settings, theme: event.target.value === 'dark' ? 'dark' : 'light' })}><option value="light">{zh ? '白天' : 'Light'}</option><option value="dark">{zh ? '黑暗' : 'Dark'}</option></select></label>
+        <label className="field"><span>{zh ? '字体大小' : 'Text Size'}</span><select className="select" aria-label={zh ? '字体大小' : 'Text Size'} disabled={loading} value={settings.fontSize} onChange={event => setSettings({ ...settings, fontSize: event.target.value === 'small' ? 'small' : event.target.value === 'large' ? 'large' : 'medium' })}><option value="small">{zh ? '小' : 'Small'}</option><option value="medium">{zh ? '中' : 'Medium'}</option><option value="large">{zh ? '大' : 'Large'}</option></select></label>
       </div>
-
-      <div className={styles.layout}>
-        <div className={styles.settingsColumn}>
-          <section className={`card ${styles.section}`}>
-            <div className={styles.sectionHeading}>
-              <div className={styles.icon}><Monitor size={18} /></div>
-              <div><h3 className="section-title">{t('sapBrowser')}</h3><p className="section-copy">Connection target and installed browser used for automation</p></div>
-            </div>
-            <div className={styles.form}>
-              <div className="field">
-                <label>SAP WebGUI URL Template <span>*</span></label>
-                <input
-                  className="input"
-                  value={settings.sapWebGuiUrl}
-                  onChange={(event) => setSettings({ ...settings, sapWebGuiUrl: event.target.value })}
-                  placeholder="https://ui5ce.volvo.com/sap/bc/gui/sap/its/webgui?~transaction={tcode}#"
-                  disabled={loading}
-                />
-                <small>Use {'{tcode}'} as the transaction placeholder. Open SAP currently resolves it to SMEN.</small>
-              </div>
-              <div className={styles.twoColumns}>
-                <div className="field">
-                  <label>Browser</label>
-                  <select
-                    className="select"
-                    value={settings.browser}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        browser: event.target.value === 'msedge' ? 'msedge' : 'chrome'
-                      })
-                    }
-                    disabled={loading}
-                  >
-                    <option value="chrome">Google Chrome (Default)</option>
-                    <option value="msedge">Microsoft Edge</option>
-                  </select>
-                </div>
-                <div className={styles.toggleField}>
-                  <div><strong>Headless mode</strong><span>Keep the browser visible during automation</span></div>
-                  <button className={styles.toggle} disabled aria-label="Headless mode is off"><i /></button>
-                </div>
-              </div>
-              <div className={styles.certificateNotice} role="note">
-                <AlertTriangle size={20} />
-                <div>
-                  <strong>Action required in browser / 需要在浏览器中确认</strong>
-                  <span>After the browser opens, select your Windows certificate and click OK. Automation waits for SAP sign-in before continuing. / 浏览器打开后，请选择 Windows 证书并点击“确定”；自动化会等待 SAP 登录完成后再继续。</span>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className={`card ${styles.section}`}>
-            <div className={styles.sectionHeading}>
-              <div className={styles.icon}><Monitor size={18} /></div>
-              <div><h3 className="section-title">{t('appearance')} / 外观</h3><p className="section-copy">Language and text size / 语言和字体大小</p></div>
-            </div>
-            <div className={styles.form}>
-              <div className={styles.threeColumns}>
-                <div className="field">
-                  <label>{t('language')} / 语言</label>
-                  <select
-                    className="select"
-                    value={settings.language}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        language: event.target.value === 'zh-CN' ? 'zh-CN' : 'en'
-                      })
-                    }
-                    disabled={loading}
-                  >
-                    <option value="en">English</option>
-                    <option value="zh-CN">中文（简体）</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>Theme / 主题</label>
-                  <select
-                    className="select"
-                    value={settings.theme}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        theme: event.target.value === 'dark' ? 'dark' : 'light'
-                      })
-                    }
-                    disabled={loading}
-                  >
-                    <option value="light">Light / 白天</option>
-                    <option value="dark">Dark / 黑暗</option>
-                  </select>
-                </div>
-                <div className="field">
-                  <label>{t('fontSize')} / 字体大小</label>
-                  <select
-                    className="select"
-                    value={settings.fontSize}
-                    onChange={(event) => {
-                      const value = event.target.value
-                      setSettings({
-                        ...settings,
-                        fontSize:
-                          value === 'small' || value === 'large' ? value : 'medium'
-                      })
-                    }}
-                    disabled={loading}
-                  >
-                    <option value="small">{t('small')} / 小</option>
-                    <option value="medium">{t('medium')} / 中</option>
-                    <option value="large">{t('large')} / 大</option>
-                  </select>
-                </div>
-              </div>
-              <small>Changes apply after Save Settings / 保存设置后立即生效</small>
-            </div>
-          </section>
-
-          <section className={`card ${styles.section}`}>
-            <div className={styles.sectionHeading}>
-              <div className={styles.icon}><Rows3 size={18} /></div>
-              <div><h3 className="section-title">{t('batchExecution')}</h3><p className="section-copy">Row range and browser capacity for future batch operations</p></div>
-            </div>
-            <div className={styles.form}>
-              <div className={styles.batchGrid}>
-                <div className="field">
-                  <label>{t('startRow')} <span>*</span></label>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="1000000"
-                    value={settings.batchStartRow}
-                    onChange={(event) =>
-                      setSettings({ ...settings, batchStartRow: Number(event.target.value) })
-                    }
-                    disabled={loading}
-                  />
-                  <small>First worksheet row to read.</small>
-                </div>
-                <div className="field">
-                  <label>{t('rowsPerBatch')} <span>*</span></label>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="10000"
-                    value={settings.batchSize}
-                    onChange={(event) =>
-                      setSettings({ ...settings, batchSize: Number(event.target.value) })
-                    }
-                    disabled={loading}
-                  />
-                  <small>Maximum rows loaded in one batch.</small>
-                </div>
-                <div className="field">
-                  <label>{t('maxBrowsers')} <span>*</span></label>
-                  <input
-                    className="input"
-                    type="number"
-                    min="1"
-                    max="8"
-                    value={settings.maxConcurrentBrowsers}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        maxConcurrentBrowsers: Number(event.target.value)
-                      })
-                    }
-                    disabled={loading}
-                  />
-                  <small>Allowed range: 1–8 dedicated browser profiles.</small>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section className={`card ${styles.section}`}>
-            <div className={styles.sectionHeading}>
-              <div className={styles.icon}><FolderOpen size={18} /></div>
-              <div><h3 className="section-title">{t('filesDownloads')}</h3><p className="section-copy">Local path for future automation downloads</p></div>
-            </div>
-            <div className={styles.form}>
-              <div className="field">
-                <label>Default Download Folder <span>*</span></label>
-                <input
-                  className="input"
-                  value={settings.defaultDownloadFolder}
-                  onChange={(event) => setSettings({ ...settings, defaultDownloadFolder: event.target.value })}
-                  placeholder="C:\Users\YourName\Downloads"
-                  disabled={loading}
-                />
-                <small>Enter an existing folder path. Folder browsing will be added later.</small>
-              </div>
-            </div>
-          </section>
-
-          <DiagnosticsPanel notify={notify} />
+      <label><input type="checkbox" disabled={loading} checked={settings.notificationSounds !== false} onChange={event => setSettings({ ...settings, notificationSounds: event.target.checked })} /> {zh ? '提示音' : 'Notification Sounds'}</label>
+      <label><input type="checkbox" disabled={loading} checked={settings.openResultAfterCompletion === true} onChange={event => setSettings({ ...settings, openResultAfterCompletion: event.target.checked })} /> {zh ? '完成后自动打开结果（信息记录、APQP、货源清单）' : 'Open Result After Completion (Info Record, APQP, Source List)'}</label>
+      <p>{zh ? '所有数据与日志保存在本机，不收集 SAP 密码或证书。' : 'Data and logs stay on this computer. SAP passwords and certificates are not collected.'}</p>
+    </section>
+    <details className={`card ${styles.section}`} onToggle={event => setAdvanced(event.currentTarget.open)}>
+      <summary>{zh ? '高级 / Key User 设置' : 'Advanced / Key User Settings'}</summary>
+      {advanced && <><p>{zh ? '仅在公司环境需要调整时使用。普通操作不需要打开这里。' : 'Only for company-specific adjustments. Normal tasks do not require this area.'}</p>
+        <div className={styles.fields}>
+          <label className="field"><span>SAP WebGUI URL Template</span><input className="input" value={settings.sapWebGuiUrl} onChange={event => setSettings({ ...settings, sapWebGuiUrl: event.target.value })} /></label>
+          <label className="field"><span>{zh ? '浏览器' : 'Browser'}</span><select className="select" value={settings.browser} onChange={event => setSettings({ ...settings, browser: event.target.value === 'msedge' ? 'msedge' : 'chrome' })}><option value="chrome">Google Chrome</option><option value="msedge">Microsoft Edge</option></select></label>
+          <label className="field"><span>{zh ? '信息记录并发窗口' : 'Info Record worker windows'}</span><input className="input" type="number" min={1} max={8} value={settings.maxConcurrentBrowsers} onChange={event => setSettings({ ...settings, maxConcurrentBrowsers: Number(event.target.value) })} /></label>
+          <label className="field"><span>{zh ? 'APQP 最大并发会话' : 'APQP maximum sessions'}</span><input className="input" type="number" min={1} max={5} value={settings.maxConcurrentSapSessions ?? 3} onChange={event => setSettings({ ...settings, maxConcurrentSapSessions: Number(event.target.value) })} /></label>
+          <label className="field"><span>{zh ? '模板默认保存位置' : 'Default template download location'}</span><input className="input" value={settings.defaultDownloadFolder} onChange={event => setSettings({ ...settings, defaultDownloadFolder: event.target.value })} /></label>
         </div>
-
-        <aside className={styles.infoColumn}>
-          <section className={styles.securityCard}>
-            <ShieldCheck size={22} />
-            <h3>Local-first security</h3>
-            <p>Settings are stored as a local JSON file in Electron’s application data directory.</p>
-            <ul>
-              <li>No SAP usernames or passwords</li>
-              <li>No cloud database or web server</li>
-              <li>Dedicated Chrome or Edge profile</li>
-              <li>Manual Windows certificate confirmation</li>
-              <li>Typed and isolated IPC bridge</li>
-            </ul>
-          </section>
-          <div className={styles.note}>
-            <Info size={16} />
-            <p><strong>Certificate sign-in / 证书登录</strong><span>The app does not attempt to select or read a certificate. Confirm the Windows certificate directly in the browser when the highlighted reminder appears. / 应用不会选择或读取证书；看到醒目提醒后，请直接在浏览器中确认 Windows 证书。</span></p>
-          </div>
-        </aside>
-      </div>
-    </div>
-  )
+        <button className="button" onClick={() => void window.sapAutomation.openSapWebGui()}>{zh ? '检查浏览器连接' : 'Check browser connection'}</button>
+        <DiagnosticsPanel notify={notify} />
+      </>}
+    </details></div>
+  </div>
 }

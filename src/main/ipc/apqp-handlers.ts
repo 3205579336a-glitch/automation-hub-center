@@ -6,9 +6,10 @@ import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
+import type { GuidedAutomationService } from '../services/guided-automation-service'
 import { isTrustedRenderer } from './ipc-security'
 
-export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogger, history: ExecutionHistoryService, settings: SettingsService, templatePath: string): void {
+export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogger, history: ExecutionHistoryService, settings: SettingsService, templatePath: string, guided: GuidedAutomationService): void {
   ipcMain.handle(IPC_CHANNELS.downloadApqpTemplate, async (event): Promise<ApqpFileResult> => {
     if (!isTrustedRenderer(event)) return { success: false, cancelled: false, message: 'Request rejected.' }
     try {
@@ -41,23 +42,33 @@ export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogge
     return runner.preview(config)
   })
   ipcMain.handle(IPC_CHANNELS.startApqp, async (event, config: unknown): Promise<ApqpResult> => {
-    if (!isTrustedRenderer(event) || !isApqpConfig(config) || !config.confirmed) return { success: false, message: 'Preview the workbook and authorize SAP session use and Excel writeback first.' }
+    if (!isTrustedRenderer(event) || !isApqpConfig(config)) return { success: false, message: 'Upload a valid APQP workbook first.' }
+    let runId: string
+    try { runId = guided.begin() } catch (error) { return { success: false, message: messageOf(error) } }
+    try {
+    const currentSettings = await settings.getSettings()
+    const effective = { ...config, system: '', client: '', sheetName: '', maxItems: 0, createSessions: false, maxWorkers: currentSettings.maxConcurrentSapSessions ?? 3 }
+    const preview = await runner.preview(effective)
+    if (!preview.success) return preview
+    if (preview.preview.invalid || !preview.preview.selected) return { success: false, message: 'Fix the incomplete rows before starting.' }
     const entry = await history.start({ operation: 'apqp-plan-closure', label: 'APQP Plan Closure Date', summary: 'Querying ZMFM050035.', tcode: 'ZMFM050035' })
     await logger.info({ category: 'automation', event: 'apqp.batch.started', message: 'APQP query started.', tcode: 'ZMFM050035', details: { maxWorkers: config.maxWorkers, system: config.system, client: config.client, plant: config.plant } })
-    const result = await runner.run(config, (progress) => {
+    const result = await runner.run(effective, (progress) => {
       if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress)
       if (progress.event === 'record' || progress.event === 'notice' || progress.event === 'workers') {
         const writeLog = progress.status && !['SUCCESS', 'NO_DATE', 'NO_RESULT'].includes(progress.status) ? logger.error.bind(logger) : logger.info.bind(logger)
         void writeLog({ category: 'automation', event: `apqp.${progress.event}`, message: progress.message, tcode: 'ZMFM050035' })
       }
-    })
+    }, { service: guided, runId })
     await history.finish(entry.id, result.success ? {
       status: result.cancelled ? 'Cancelled' : result.failed ? (result.succeeded ? 'Partial' : 'Failed') : 'Success', summary: result.message,
       total: result.total, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped,
       failed: result.failed, sessionCount: result.workers, resultPath: result.resultPath, backupPath: result.backupPath, logPath: result.logPath
     } : { status: 'Failed', summary: result.message })
     await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({ category: 'automation', event: result.success ? 'apqp.batch.completed' : 'apqp.batch.failed', message: result.message, tcode: 'ZMFM050035' })
+    if (result.success) guided.registerArtifacts(result.resultPath, result.backupPath, result.logPath)
     return result
+    } finally { guided.end(runId) }
   })
   ipcMain.handle(IPC_CHANNELS.cancelApqp, (event) => ({ success: isTrustedRenderer(event) && runner.cancel() }))
 }

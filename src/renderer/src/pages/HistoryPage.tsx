@@ -7,6 +7,7 @@ import type {
 import { StatusBadge } from '../components/common/StatusBadge'
 import { useLocalization } from '../i18n/use-localization'
 import styles from './HistoryPage.module.css'
+import { operationName } from './operation-name'
 
 export function HistoryPage(): React.JSX.Element {
   const { language, t } = useLocalization()
@@ -24,7 +25,7 @@ export function HistoryPage(): React.JSX.Element {
         statuses: status === 'all' ? undefined : [status],
         limit: 200
       })
-      setEntries(result.entries)
+      setEntries(result.entries.filter(entry => entry.operation !== 'me52n-project-ref' && entry.operation !== 'open-sap'))
     } catch {
       setEntries([])
     } finally {
@@ -55,7 +56,7 @@ export function HistoryPage(): React.JSX.Element {
             <input
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              placeholder={zh ? '搜索操作、结果、T-code…' : 'Search operation, result, T-code…'}
+              placeholder={zh ? '搜索操作、结果…' : 'Search operation, result…'}
               aria-label="Search operations"
             />
           </div>
@@ -126,15 +127,14 @@ function HistoryRows({
     <>
       <tr>
         <td>
-          <strong className={styles.operation}>{entry.label}</strong>
-          {entry.tcode && <small className={styles.tcode}>T-code: {entry.tcode}</small>}
+          <strong className={styles.operation}>{operationName(entry, zh)}</strong>
         </td>
         <td>{new Date(entry.startedAt).toLocaleString()}</td>
         <td>{formatDuration(entry.durationMs)}</td>
         <td><StatusBadge status={entry.status} /></td>
-        <td className={styles.result}>{entry.summary}</td>
+        <td className={styles.result}>{entry.processed !== undefined ? `${entry.succeeded ?? 0} ${zh ? '成功' : 'successful'} · ${entry.failed ?? 0} ${zh ? '失败' : 'failed'}` : zh ? '查看详情' : 'View details'}</td>
         <td>
-          <button className={styles.viewButton} aria-label={`View ${entry.label}`} onClick={onToggle}>
+          <button className={styles.viewButton} aria-label={`View ${operationName(entry, zh)}`} onClick={onToggle}>
             <Eye size={14} /> {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
         </td>
@@ -143,6 +143,7 @@ function HistoryRows({
         <tr className={styles.detailRow}>
           <td colSpan={6}>
             <div className={styles.details}>
+              <p>{entry.summary}</p><Detail label="T-code" value={entry.tcode ?? '—'} />
               <Detail label={zh ? '完成时间' : 'Completed'} value={entry.completedAt ? new Date(entry.completedAt).toLocaleString() : '—'} />
               <Detail label={entry.sessionCount !== undefined ? (zh ? 'SAP 会话数' : 'SAP sessions') : (zh ? '浏览器数' : 'Browsers')} value={entry.sessionCount ?? entry.browserCount ?? '—'} />
               <Detail label={zh ? '处理数' : 'Processed'} value={entry.processed ?? '—'} />

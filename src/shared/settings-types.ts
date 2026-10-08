@@ -14,6 +14,9 @@ export interface AppSettings {
   language: AppLanguage
   fontSize: AppFontSize
   theme: AppTheme
+  notificationSounds?: boolean
+  openResultAfterCompletion?: boolean
+  maxConcurrentSapSessions?: number
 }
 
 export type SaveSettingsResult =
@@ -38,7 +41,10 @@ export function isAppSettings(value: unknown): value is AppSettings {
     (candidate.fontSize === 'small' ||
       candidate.fontSize === 'medium' ||
       candidate.fontSize === 'large') &&
-    (candidate.theme === 'light' || candidate.theme === 'dark')
+    (candidate.theme === 'light' || candidate.theme === 'dark') &&
+    (candidate.notificationSounds === undefined || typeof candidate.notificationSounds === 'boolean') &&
+    (candidate.openResultAfterCompletion === undefined || typeof candidate.openResultAfterCompletion === 'boolean') &&
+    (candidate.maxConcurrentSapSessions === undefined || Number.isInteger(candidate.maxConcurrentSapSessions) && Number(candidate.maxConcurrentSapSessions) >= 1 && Number(candidate.maxConcurrentSapSessions) <= 5)
   )
 }
 

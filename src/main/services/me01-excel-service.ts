@@ -37,11 +37,11 @@ export class Me01ExcelService {
       if (!material || !parma) {
         throw new Error(`Excel row ${excelRow} must contain both Material No. and Parma.`)
       }
-      const existingParma = supplierByMaterial.get(material)
+      const existingParma = supplierByMaterial.get(normalizeIdentifier(material))
       if (existingParma && normalizeIdentifier(existingParma) !== normalizeIdentifier(parma)) {
         throw new Error(`Material ${material} has more than one Parma in the workbook. Keep only the supplier that should be fixed.`)
       }
-      supplierByMaterial.set(material, parma)
+      supplierByMaterial.set(normalizeIdentifier(material), parma)
       const key = `${normalizeIdentifier(material)}\u0000${normalizeIdentifier(parma)}`
       const assignment = assignments.get(key) ?? { material, parma, excelRows: [] }
       assignment.excelRows.push(excelRow)
@@ -64,6 +64,7 @@ export class Me01ExcelService {
       sheetName: worksheet.name,
       totalDataRows,
       uniqueMaterials: assignments.size,
+      uniqueSuppliers: new Set([...assignments.values()].map(row => normalizeIdentifier(row.parma))).size,
       duplicateRows: totalDataRows - assignments.size,
       skippedBlankRows,
       sample
@@ -95,13 +96,12 @@ async function readWorksheet(filePath: string): Promise<ParsedWorksheet> {
     name: decodeXml(attribute(match[1], 'name')),
     relationshipId: attribute(match[1], 'r:id') || attribute(match[1], 'id')
   }))
-  const selected = sheets.find((sheet) => sheet.name.toLowerCase() === 'me01_input') ?? sheets[0]
-  if (!selected?.relationshipId) throw new Error('The workbook has no readable worksheets.')
 
   const relationships = new Map<string, string>()
   for (const match of relationshipXml.matchAll(/<(?:\w+:)?Relationship\b([^>]*)\/?>/gi)) {
     relationships.set(attribute(match[1], 'Id'), decodeXml(attribute(match[1], 'Target')))
   }
+  const readSheet = (selected: { name: string; relationshipId: string }): ParsedWorksheet => {
   const target = relationships.get(selected.relationshipId)
   if (!target) throw new Error(`Worksheet "${selected.name}" is missing from the workbook package.`)
   const worksheetPath = target.replace(/^\/+/, '').startsWith('xl/')
@@ -130,6 +130,14 @@ async function readWorksheet(filePath: string): Promise<ParsedWorksheet> {
     maxRow = Math.max(maxRow, rowNumber)
   }
   return { name: selected.name, rows, maxRow }
+  }
+  const candidates = sheets.map(readSheet).filter(sheet => {
+    const headers = sheet.rows.get(1)
+    return headers && findHeaderColumn(headers, MATERIAL_HEADERS) && findHeaderColumn(headers, PARMA_HEADERS)
+  })
+  const preferred = candidates.find(sheet => sheet.name.toLowerCase() === 'me01_input')
+  if (!preferred && candidates.length !== 1) throw new Error('Keep one Source List input worksheet containing Material No. and Parma.')
+  return preferred ?? candidates[0]
 }
 
 function findHeaderColumn(headers: Map<number, string>, aliases: string[]): number {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import subprocess
 import time
 import winreg
@@ -13,6 +14,11 @@ from typing import Any
 
 import openpyxl
 import win32com.client
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from hub_user_interaction import HubStopped, HubUserInteraction, session_identity, verify_session
+
+HUB_INTERACTION = None
 
 
 PLANT = "C100"
@@ -84,16 +90,30 @@ class WorkbookResults:
             self.mode = "openpyxl"
             shutil.copy2(path, backup_path)
             self.workbook = openpyxl.load_workbook(path)
-            self.sheet = self.workbook[SHEET_NAME] if SHEET_NAME in self.workbook.sheetnames else self.workbook[self.workbook.sheetnames[0]]
+            self.sheet = self._input_sheet(list(self.workbook.worksheets), lambda sheet: [clean(cell.value).lower() for cell in sheet[1]])
             self._read_openpyxl()
         if not self.assignments:
             raise RuntimeError("No Material No. and Parma values were found in the uploaded workbook.")
 
+    def _input_sheet(self, sheets, header_values):
+        candidates = [sheet for sheet in sheets if MATERIAL_HEADERS.intersection(header_values(sheet)) and PARMA_HEADERS.intersection(header_values(sheet))]
+        for sheet in candidates:
+            if clean(getattr(sheet, "Name", getattr(sheet, "title", ""))).lower() == SHEET_NAME.lower():
+                return sheet
+        if len(candidates) != 1:
+            raise RuntimeError("Keep one Source List input worksheet containing Material No. and Parma.")
+        return candidates[0]
+
     def _excel_sheet(self) -> Any:
         try:
-            return self.workbook.Worksheets(SHEET_NAME)
+            preferred = self.workbook.Worksheets(SHEET_NAME)
+            titles = [clean(preferred.Cells(1, column).Value).lower() for column in range(1, max(1, int(preferred.UsedRange.Columns.Count)) + 1)]
+            if MATERIAL_HEADERS.intersection(titles) and PARMA_HEADERS.intersection(titles):
+                return preferred
         except Exception:
-            return self.workbook.Worksheets(1)
+            pass
+        sheets = [self.workbook.Worksheets(index) for index in range(1, self.workbook.Worksheets.Count + 1)]
+        return self._input_sheet(sheets, lambda sheet: [clean(sheet.Cells(1, column).Value).lower() for column in range(1, max(1, int(sheet.UsedRange.Columns.Count)) + 1)])
 
     def _add_assignment(self, material: str, parma: str, row: int) -> None:
         if not material and not parma:
@@ -262,6 +282,29 @@ def find_active_session() -> Any:
     raise RuntimeError("SAP Logon was opened, but no signed-in SAP GUI session became available within 3 minutes.")
 
 
+def find_hub_session() -> Any:
+    """Read-only selection: never hijack another task or guess between environments."""
+    application = win32com.client.GetObject("SAPGUI").GetScriptingEngine
+    candidates = []
+    environments = set()
+    for ci in range(application.Children.Count):
+        connection = application.Children(ci)
+        for si in range(connection.Children.Count):
+            session = connection.Children(si)
+            try:
+                identity = session_identity(session)
+                environments.add(identity[1:])
+                if session.Busy or session.findById("wnd[1]", False) is not None:
+                    continue
+                if str(session.Info.Transaction).upper() in {"", "SESSION_MANAGER", "S000", "ME01"}:
+                    candidates.append(session)
+            except Exception:
+                continue
+    if len(environments) != 1 or not candidates:
+        raise RuntimeError("Keep one signed-in SAP environment open and return an idle window to SAP home.")
+    return candidates[0]
+
+
 def open_me01(session: Any) -> None:
     session.findById("wnd[0]").maximize()
     command = session.findById("wnd[0]/tbar[0]/okcd")
@@ -351,7 +394,22 @@ def maintain_material(session: Any, material: str, parma: str) -> None:
     target_row, suppliers = locate_supplier_row(session, table_id, parma)
     if target_row < 0:
         supplier_list = ", ".join(suppliers) if suppliers else "none"
-        raise RuntimeError(f"Parma {parma} was not found in the Source List. Suppliers shown: {supplier_list}.")
+        if HUB_INTERACTION is None:
+            raise RuntimeError(f"Parma {parma} was not found in the Source List. Suppliers shown: {supplier_list}.")
+        identity = session_identity(session)
+        def verify_supplier():
+            verify_session(session, identity)
+            if clean(session.findById("wnd[0]/usr/ctxtEORD-MATNR").Text) != material or clean(session.findById("wnd[0]/usr/ctxtEORD-WERKS").Text).upper() != PLANT:
+                raise RuntimeError("Return to the same material and Plant C100 before continuing.")
+            row, _ = locate_supplier_row(session, table_id, parma)
+            if row < 0:
+                raise RuntimeError("The intended supplier is still missing.")
+            return row
+        target_row = HUB_INTERACTION.wait("SOURCE_SUPPLIER",
+            "The intended supplier is missing. Review the current Source List in SAP before continuing.",
+            "当前货源清单未找到指定供应商。请在 SAP 检查当前物料，确认后再继续。",
+            verify_supplier, materials=[material], rows=[], instructions="Review the same material and intended supplier. Do not delete other suppliers.",
+            instructionsZh="检查同一物料和指定供应商，不要删除其他供应商。")
     apply_target_supplier(session, table_id, target_row)
     session.findById("wnd[0]/tbar[0]/btn[11]").Press()
     wait_ready(session)
@@ -361,6 +419,10 @@ def maintain_material(session: Any, material: str, parma: str) -> None:
 
 
 def main() -> int:
+    global HUB_INTERACTION
+    HUB_INTERACTION = HubUserInteraction("Source List", emit) if os.environ.get("HUB_RUN_ID") else None
+    if HUB_INTERACTION:
+        HUB_INTERACTION.start_listener()
     excel_path = Path(os.environ.get("EXCEL_PATH", "")).expanduser().resolve()
     if not excel_path.is_file():
         raise RuntimeError("The selected ME01 workbook was not found.")
@@ -371,44 +433,71 @@ def main() -> int:
 
     total = len(results.assignments)
     emit("connecting", message="Connecting to SAP GUI. SAP Logon will open automatically if needed.", total=total)
-    session = find_active_session()
-    open_me01(session)
-
-    succeeded = 0
-    failed = 0
-    skipped = 0
-    for current, assignment in enumerate(results.assignments.values(), start=1):
-        material = assignment["material"]
-        parma = assignment["parma"]
-        excel_rows = assignment["rows"]
-        if results.existing_statuses(excel_rows) == {"SUCCESS"}:
-            skipped += 1
-            emit("record", message=f"{material} / Parma {parma}: already SUCCESS; skipped.", material=material,
-                 parma=parma, current=current, total=total, status="skipped")
-            continue
-        emit("record", message=f"Material {material}: locating Parma {parma} in Plant {PLANT}.",
-             material=material, parma=parma, current=current, total=total, status="running")
-        try:
-            maintain_material(session, material, parma)
-            succeeded += 1
-            results.write(excel_rows, "SUCCESS", "")
-            emit("record", message=f"{material} / Parma {parma}: matching Source List row fixed and saved.",
-                 material=material, parma=parma, current=current, total=total, status="success")
-        except Exception as error:
-            failed += 1
-            message = clean(error) or error.__class__.__name__
-            results.write(excel_rows, "ERROR", message)
-            emit("record", message=f"{material} / Parma {parma}: {message}", material=material,
-                 parma=parma, current=current, total=total, status="failed")
+    succeeded = failed = skipped = 0
+    cancelled = False
+    try:
+        if HUB_INTERACTION:
             try:
-                open_me01(session)
+                session = find_hub_session()
             except Exception:
-                pass
-        results.save()
+                if try_active_session() is None:
+                    try:
+                        launch_sap_logon()
+                    except Exception:
+                        pass
+                session = HUB_INTERACTION.wait("SIGN_IN",
+                    "Sign in to SAP and return an idle window to SAP home. Keep only one SAP environment open.",
+                    "请完成 SAP 登录，并让空闲窗口回到 SAP 首页；只保留一个 SAP 环境。",
+                    find_hub_session)
+        else:
+            session = find_active_session()
+        identity = session_identity(session) if HUB_INTERACTION else None
+        open_me01(session)
+        for current, assignment in enumerate(results.assignments.values(), start=1):
+            if HUB_INTERACTION and HUB_INTERACTION.stop_event.is_set():
+                raise HubStopped()
+            material = assignment["material"]
+            parma = assignment["parma"]
+            excel_rows = assignment["rows"]
+            if results.existing_statuses(excel_rows) == {"SUCCESS"}:
+                skipped += 1
+                emit("record", message=f"{material} / Parma {parma}: already SUCCESS; skipped.", material=material,
+                     parma=parma, current=current, total=total, status="skipped")
+                continue
+            emit("record", message=f"Material {material}: locating Parma {parma} in Plant {PLANT}.",
+                 material=material, parma=parma, current=current, total=total, status="running")
+            try:
+                if HUB_INTERACTION:
+                    verify_session(session, identity)
+                maintain_material(session, material, parma)
+                succeeded += 1
+                results.write(excel_rows, "SUCCESS", "")
+                emit("record", message=f"{material} / Parma {parma}: matching Source List row fixed and saved.",
+                     material=material, parma=parma, current=current, total=total, status="success")
+            except Exception as error:
+                failed += 1
+                message = clean(error) or error.__class__.__name__
+                results.write(excel_rows, "ERROR", message)
+                emit("record", message=f"{material} / Parma {parma}: {message}", material=material,
+                     parma=parma, current=current, total=total, status="failed")
+                if HUB_INTERACTION:
+                    results.save()
+                    HUB_INTERACTION.wait("UNVERIFIED_STATE",
+                        "SAP could not safely complete this record. Partial results were saved. Stop and review details.",
+                        "当前记录无法安全完成。已保存部分结果，请停止并查看详情。", materials=[material])
+                try:
+                    open_me01(session)
+                except Exception:
+                    pass
+            results.save()
 
-    results.save()
-    emit("complete", message="ME01 source-list batch finished.", processed=total, succeeded=succeeded,
-         skipped=skipped, failed=failed, resultPath=str(excel_path), backupPath=str(backup_path))
+    except HubStopped:
+        cancelled = True
+    finally:
+        results.save()
+    emit("complete", message="Source List stopped safely." if cancelled else "ME01 source-list batch finished.",
+         processed=succeeded + failed + skipped, succeeded=succeeded, skipped=skipped, failed=failed,
+         cancelled=cancelled, resultPath=str(excel_path), backupPath=str(backup_path))
     return 0
 
 

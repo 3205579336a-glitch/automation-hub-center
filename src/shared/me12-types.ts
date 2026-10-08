@@ -1,4 +1,5 @@
 export interface Me12BatchConfig {
+  confirmed?: boolean
   excelPath: string
   sheetName: string
   infoRecordColumn: number
@@ -68,6 +69,12 @@ export type Me12BatchResult =
       success: false
       errorCode: Me12BatchErrorCode
       message: string
+      processed?: number
+      succeeded?: number
+      skipped?: number
+      failed?: number
+      resultPath?: string
+      backupPath?: string
     }
 
 export type Me12ProgressStage =
@@ -112,20 +119,19 @@ export function isMe12BatchConfig(value: unknown): value is Me12BatchConfig {
   const candidate = value as Record<string, unknown>
   return (
     typeof candidate.excelPath === 'string' &&
-    candidate.excelPath.length <= 1_024 &&
+    candidate.excelPath.length > 0 && candidate.excelPath.length <= 1_024 &&
+    (candidate.confirmed === undefined || typeof candidate.confirmed === 'boolean') &&
     typeof candidate.sheetName === 'string' &&
     candidate.sheetName.length <= 100 &&
     isIntegerInRange(candidate.infoRecordColumn, 1, 16_384) &&
     isIntegerInRange(candidate.plantColumn, 1, 16_384) &&
     isIntegerInRange(candidate.dataStartRow, 2, 1_048_576) &&
     typeof candidate.targetPlant === 'string' &&
-    candidate.targetPlant.length >= 1 &&
-    candidate.targetPlant.length <= 20 &&
+    /^[a-zA-Z0-9]{1,4}$/.test(candidate.targetPlant) &&
     typeof candidate.purchasingOrganization === 'string' &&
-    candidate.purchasingOrganization.length <= 20 &&
+    /^[a-zA-Z0-9]{1,4}$/.test(candidate.purchasingOrganization) &&
     typeof candidate.targetLeadTime === 'string' &&
-    candidate.targetLeadTime.length >= 1 &&
-    candidate.targetLeadTime.length <= 10 &&
+    /^\d{1,3}$/.test(candidate.targetLeadTime) &&
     (candidate.infoCategory === 'standard' || candidate.infoCategory === 'consignment') &&
     isIntegerInRange(candidate.infoRecordWidth, 0, 30) &&
     typeof candidate.dryRun === 'boolean' &&

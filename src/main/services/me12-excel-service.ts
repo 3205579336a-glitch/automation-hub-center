@@ -166,28 +166,18 @@ async function readWorkbook(
   const relationshipsXml = readArchiveText(archive, 'xl/_rels/workbook.xml.rels')
   const sharedStrings = parseSharedStrings(archive['xl/sharedStrings.xml'])
   const sheets = parseSheets(workbookXml)
-  const selected = requestedSheetName
-    ? sheets.find((sheet) => sheet.name === requestedSheetName)
-    : sheets[0]
-  if (!selected) {
-    throw new Error(
-      requestedSheetName
-        ? `Worksheet "${requestedSheetName}" was not found.`
-        : 'The workbook has no worksheets.'
-    )
-  }
-
   const relationships = parseRelationships(relationshipsXml)
-  const target = relationships.get(selected.relationshipId)
-  if (!target) {
-    throw new Error(`The worksheet relationship for "${selected.name}" is missing.`)
-  }
-  const worksheetPath = normalizeWorksheetPath(target)
-  const worksheetXml = readArchiveText(archive, worksheetPath)
-  return {
-    archive,
-    worksheet: parseWorksheet(selected.name, worksheetPath, worksheetXml, sharedStrings)
-  }
+  const candidates = sheets.filter(sheet => !requestedSheetName || sheet.name === requestedSheetName).map(sheet => {
+    const target = relationships.get(sheet.relationshipId)
+    if (!target) throw new Error('The input worksheet is missing from the workbook.')
+    const path = normalizeWorksheetPath(target)
+    return parseWorksheet(sheet.name, path, readArchiveText(archive, path), sharedStrings)
+  }).filter(sheet => {
+    const headers = [...(sheet.rows.get(1)?.values() ?? [])].map(value => value.trim().toLowerCase().replace(/\s+/g, ' '))
+    return headers.includes('plant') && headers.some(header => ['purchasing info rec.', 'purchasing info record', 'info record'].includes(header))
+  })
+  if (candidates.length !== 1) throw new Error('Keep exactly one input worksheet containing Info Record and Plant columns. Download a fresh template if needed.')
+  return { archive, worksheet: candidates[0] }
 }
 
 function parseSheets(xml: string): Array<{ name: string; relationshipId: string }> {
@@ -227,7 +217,7 @@ function parseSharedStrings(content: Uint8Array | undefined): string[] {
   if (!content) {
     return []
   }
-  const xml = strFromU8(content)
+  const xml = normalizeSpreadsheetNamespace(strFromU8(content))
   const strings: string[] = []
   for (const match of xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/gi)) {
     strings.push(extractTextNodes(match[1]))
@@ -313,6 +303,7 @@ function analyzeWorksheet(
       skippedEmptyInfoRecord += 1
       continue
     }
+    if (!/^\d{1,10}$/.test(infoRecord)) throw new Error(`Excel row ${row}: Info Record must be a numeric identifier up to 10 digits.`)
     const rows = rowsByInfoRecord.get(infoRecord) ?? []
     rows.push(row)
     rowsByInfoRecord.set(infoRecord, rows)
@@ -518,7 +509,16 @@ function readArchiveText(archive: Record<string, Uint8Array>, path: string): str
   if (!content) {
     throw new Error(`The workbook entry "${path}" is missing.`)
   }
-  return strFromU8(content)
+  return normalizeSpreadsheetNamespace(strFromU8(content))
+}
+
+/** Office permits both default and prefixed SpreadsheetML; retain a valid namespace when writing. */
+function normalizeSpreadsheetNamespace(xml: string): string {
+  const namespace = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+  const prefix = xml.match(/xmlns:([\w]+)="http:\/\/schemas\.openxmlformats\.org\/spreadsheetml\/2006\/main"/)?.[1]
+  if (!prefix) return xml
+  const normalized = xml.replace(new RegExp(`<(/?)${prefix}:`, 'g'), '<$1')
+  return normalized.includes(`xmlns="${namespace}"`) ? normalized : normalized.replace(/(<\w+\b)/, `$1 xmlns="${namespace}"`)
 }
 
 function extractTextNodes(xml: string): string {
@@ -599,7 +599,7 @@ function isPermissionError(error: unknown): error is NodeJS.ErrnoException {
   return (
     error instanceof Error &&
     'code' in error &&
-    (error.code === 'EACCES' || error.code === 'EPERM')
+    (error.code === 'EACCES' || error.code === 'EPERM' || error.code === 'EBUSY')
   )
 }
 

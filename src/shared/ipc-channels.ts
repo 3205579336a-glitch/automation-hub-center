@@ -34,5 +34,10 @@ export const IPC_CHANNELS = {
   previewRfqBatch: 'rfq:preview',
   startRfqBatch: 'rfq:start',
   cancelRfqBatch: 'rfq:cancel',
-  rfqProgress: 'rfq:progress'
+  getAutomationInteraction: 'automation:interaction:get',
+  respondAutomationInteraction: 'automation:interaction:respond',
+  automationInteraction: 'automation:interaction',
+  rfqProgress: 'rfq:progress',
+  openRfqArtifact: 'rfq:open-artifact',
+  openAutomationArtifact: 'automation:open-artifact'
 } as const

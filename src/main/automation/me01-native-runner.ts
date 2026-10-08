@@ -2,6 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import type { Me01BatchConfig, Me01BatchProgress, Me01BatchResult } from '../../shared/me01-types'
+import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
+import type { AutomationInteraction } from '../../shared/automation-interaction'
 
 interface EnginePaths {
   executable: string
@@ -11,6 +13,9 @@ interface EnginePaths {
 }
 
 interface EngineEvent {
+  interaction?: AutomationInteraction
+  requestId?: string
+  cancelled?: boolean
   event?: string
   message?: string
   current?: number
@@ -34,7 +39,7 @@ export class Me01NativeRunner {
 
   constructor(private readonly enginePaths: EnginePaths) {}
 
-  async run(config: Me01BatchConfig, reportProgress: (progress: Me01BatchProgress) => void): Promise<Me01BatchResult> {
+  async run(config: Me01BatchConfig, reportProgress: (progress: Me01BatchProgress) => void, guidance?: GuidanceContext): Promise<Me01BatchResult> {
     if (this.child) {
       return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Another ME01 run is already in progress.' }
     }
@@ -59,19 +64,22 @@ export class Me01NativeRunner {
         this.child = spawn(launch.command, launch.args, {
           shell: false,
           windowsHide: true,
-          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath }
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '' }
         })
       } catch (error) {
         finish({ success: false, errorCode: 'ENGINE_UNAVAILABLE', message: getErrorMessage(error) })
         return
       }
       const child = this.child
+      const interactions = guidance ? new NativeInteractionBridge(guidance, child) : null
+      child.stdin.on('error', () => undefined)
       const stdout = createInterface({ input: child.stdout })
       const stderr = createInterface({ input: child.stderr })
       stdout.on('line', (line) => {
         if (!line.startsWith(EVENT_PREFIX)) return
         try {
           const event = JSON.parse(line.slice(EVENT_PREFIX.length)) as EngineEvent
+          void interactions?.handle(event).catch(() => { this.cancel() })
           if (event.event === 'complete') finalEvent = event
           if (event.event === 'fatal' && event.message) errors.push(event.message)
           const progress = progressFromEvent(event)
@@ -88,9 +96,11 @@ export class Me01NativeRunner {
       child.once('close', (code) => {
         stdout.close()
         stderr.close()
-        if (this.cancelRequested) {
+        if (this.cancelRequested || finalEvent?.cancelled) {
           reportProgress({ stage: 'cancelled', status: 'skipped', message: 'ME01 source-list batch was cancelled.' })
-          finish({ success: false, errorCode: 'CANCELLED', message: 'ME01 source-list batch was cancelled.' })
+          finish({ success: false, errorCode: 'CANCELLED', message: 'Source List task stopped. Completed changes are preserved.',
+            processed: finalEvent?.processed, succeeded: finalEvent?.succeeded, skipped: finalEvent?.skipped, failed: finalEvent?.failed,
+            resultPath: finalEvent?.resultPath, backupPath: finalEvent?.backupPath })
           return
         }
         if (code !== 0 || !finalEvent) {
@@ -124,7 +134,8 @@ export class Me01NativeRunner {
   cancel(): boolean {
     if (!this.child) return false
     this.cancelRequested = true
-    return this.child.kill()
+    if (!this.child.stdin.destroyed) { this.child.stdin.write('cancel\n'); return true }
+    return false
   }
 
   private async resolveLaunch(): Promise<{ command: string; args: string[] } | null> {

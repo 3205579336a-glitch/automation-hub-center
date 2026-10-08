@@ -4,6 +4,7 @@ export interface RfqBatchConfig {
   excelPath: string
   environment: RfqEnvironment
   productionConfirmed: boolean
+  fingerprint?: string
 }
 
 export interface RfqPreviewRow {
@@ -13,8 +14,22 @@ export interface RfqPreviewRow {
   material: string
   supplier: string
   quotationDueDate: string
+  qty12mr?: string
+  rfqQtyPrototype?: string
+  rfqQtySerial?: string
+  costBreakdown?: boolean | null
   valid: boolean
   message: string
+  skipped?: boolean
+  duplicateOf?: number | null
+}
+
+export interface RfqGroupPreview {
+  key: string
+  plant: string
+  project: string
+  supplier: string
+  materials: string[]
 }
 
 export interface RfqExcelPreview {
@@ -24,6 +39,13 @@ export interface RfqExcelPreview {
   invalidRows: number
   skippedBlankRows: number
   sample: RfqPreviewRow[]
+  groupCount: number
+  groups: RfqGroupPreview[]
+  plants: string[]
+  warnings: string[]
+  skippedRows: number
+  duplicateRows?: number
+  fingerprint: string
 }
 
 export type RfqProgressStage =
@@ -34,13 +56,35 @@ export type RfqProgressStage =
   | 'complete'
   | 'failed'
   | 'cancelled'
+  | 'waiting-for-user'
+  | 'recovering'
 
 export interface RfqBatchProgress {
+  automation?: string
+  requestId?: string
+  state?: 'WAITING_FOR_USER' | 'RECOVERING' | 'RUNNING' | 'CANCELLED'
+  allowedActions?: ('continue' | 'stop')[]
+  recoveryPoint?: string
+  issueSummary?: string
+  issueSummaryZh?: string
+  type?: string
+  runId?: string
+  groupKey?: string
+  supplier?: string
+  plant?: string
+  project?: string
+  materials?: string[] | number
+  rfqNumber?: string
+  rows?: number[]
+  step?: string
+  succeeded?: number
+  skipped?: number
+  failed?: number
   stage: RfqProgressStage
   message: string
   current?: number
   total?: number
-  status?: 'running' | 'success' | 'skipped' | 'failed'
+  status?: 'running' | 'success' | 'skipped' | 'failed' | 'waiting' | 'recovering'
 }
 
 export type SelectRfqExcelResult =
@@ -65,6 +109,12 @@ export type RfqBatchResult =
       failed: number
       resultPath: string
       logPath?: string
+      runId?: string
+      total?: number
+      materials?: number
+      withSkips?: number
+      rfqNumbers?: string[]
+      diagnosticsPath?: string
     }
   | {
       success: false
@@ -74,7 +124,16 @@ export type RfqBatchResult =
         | 'ENGINE_UNAVAILABLE'
         | 'CANCELLED'
         | 'EXECUTION_FAILED'
+      processed?: number
+      total?: number
+      succeeded?: number
+      skipped?: number
+      failed?: number
       message: string
+      runId?: string
+      resultPath?: string
+      diagnosticsPath?: string
+      rfqNumbers?: string[]
     }
 
 export interface RfqCancelResult {

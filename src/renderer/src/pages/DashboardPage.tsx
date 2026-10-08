@@ -13,6 +13,7 @@ import { StatusBadge } from '../components/common/StatusBadge'
 import { useLocalization } from '../i18n/use-localization'
 import type { PageId } from '../types/navigation'
 import styles from './DashboardPage.module.css'
+import { operationName } from './operation-name'
 
 interface DashboardPageProps {
   onNavigate: (page: PageId) => void
@@ -30,7 +31,7 @@ export function DashboardPage({
     let mounted = true
     void window.sapAutomation.getExecutionHistory({ limit: 200 }).then((result) => {
       if (mounted) {
-        setHistory(result.entries)
+        setHistory(result.entries.filter(entry => entry.operation !== 'me52n-project-ref' && entry.operation !== 'open-sap'))
         setLoading(false)
       }
     }).catch(() => {
@@ -104,7 +105,7 @@ export function DashboardPage({
               <div className={styles.activityItem} key={item.id}>
                 <span className={`${styles.activityDot} ${item.status === 'Success' ? styles.dotSuccess : styles.dotMuted}`} />
                 <div className={styles.activityDetails}>
-                  <strong>{item.label}</strong>
+                  <strong>{operationName(item, zh)}</strong>
                   <span>{new Date(item.startedAt).toLocaleString()} · {formatDuration(item.durationMs, zh)}</span>
                 </div>
                 <StatusBadge status={item.status} />
@@ -139,7 +140,7 @@ function buildMetrics(history: ExecutionHistoryEntry[], zh: boolean, loading: bo
   const pending = loading ? '…' : undefined
 
   return [
-    { label: 'availableOperations' as const, value: '6', note: zh ? `${running} 个正在运行` : `${running} currently running`, icon: Workflow, tone: 'blue' as const },
+    { label: 'availableOperations' as const, value: '4', note: zh ? `${running} 个正在运行` : `${running} currently running`, icon: Workflow, tone: 'blue' as const },
     { label: 'runsToday' as const, value: pending ?? String(today.length), note: zh ? `昨日 ${yesterday.length} 次` : `${yesterday.length} yesterday`, icon: Clock3, tone: 'violet' as const },
     { label: 'successfulRuns' as const, value: pending ?? String(successful), note: zh ? `今日成功率 ${successRate}%` : `${successRate}% success rate today`, icon: CheckCircle2, tone: 'green' as const },
     { label: 'failedRuns' as const, value: pending ?? String(failed), note: failed > 0 ? (zh ? '需要检查' : 'Requires review') : (zh ? '今日无失败' : 'No failures today'), icon: CircleX, tone: 'red' as const }
