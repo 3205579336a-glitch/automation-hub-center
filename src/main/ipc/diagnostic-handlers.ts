@@ -19,8 +19,11 @@ export function registerDiagnosticHandlers(
       if (!isTrustedRenderer(event) || !isDiagnosticLogQuery(input)) {
         throw new Error('Invalid diagnostic log request')
       }
+      const limit = input.limit ?? 100
+      const entries = await logger.getEntries({ ...input, limit: limit + 1 })
       return {
-        entries: await logger.getEntries(input),
+        entries: entries.slice(0, limit),
+        hasMore: entries.length > limit,
         logDirectory: storagePaths.logsDirectory,
         dataDirectory: storagePaths.rootDirectory
       }

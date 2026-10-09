@@ -30,3 +30,6 @@
 .back { border: 0; background: none; color: var(--primary); display: flex; align-items: center; gap: .4rem; padding: 0; margin-bottom: 1rem; cursor: pointer; font: inherit; }
 @media (max-width: 1180px) { .body { grid-template-columns: 1fr; } }
 @media (max-width: 650px) { .fields, .metrics { grid-template-columns: 1fr; } }
+.eta { display: flex; flex-direction: column; gap: 5px; margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); overflow-wrap: anywhere; }
+.eta > span, .eta > small { color: var(--text-muted); font-size: .85rem; line-height: 1.5; }
+.eta > strong { color: var(--text-strong); font-size: 1rem; }

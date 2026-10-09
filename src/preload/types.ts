@@ -1,5 +1,6 @@
 import type { AutomationProgress, AutomationResult, OpenSapRequest } from '../shared/automation-types'
 import type { AutomationInteraction, InteractionResponse } from '../shared/automation-interaction'
+import type { EtaSnapshot, LocalIntelligenceSnapshot } from '../shared/local-intelligence'
 import type {
   DiagnosticLogQuery,
   DiagnosticLogResult,
@@ -17,7 +18,8 @@ import type {
 } from '../shared/me12-types'
 import type {
   ExecutionHistoryQuery,
-  ExecutionHistoryResult
+  ExecutionHistoryResult,
+  DeleteHistoryResult
 } from '../shared/execution-history-types'
 import type {
   DownloadRfqTemplateResult,
@@ -41,6 +43,8 @@ import type {
 import type { ApqpConfig, ApqpFileResult, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../shared/apqp-types'
 
 export interface SapAutomationApi {
+  getLocalIntelligence: () => Promise<LocalIntelligenceSnapshot>
+  onAutomationEta: (listener: (eta: EtaSnapshot) => void) => () => void
   downloadApqpTemplate: () => Promise<ApqpFileResult>
   selectApqpExcel: () => Promise<ApqpFileResult>
   previewApqp: (config: ApqpConfig) => Promise<ApqpPreviewResult>
@@ -67,6 +71,7 @@ export interface SapAutomationApi {
   onMe01Progress: (listener: (progress: Me01BatchProgress) => void) => () => void
   openAutomationArtifact: (path: string) => Promise<{ success: boolean; message?: string }>
   getExecutionHistory: (query?: ExecutionHistoryQuery) => Promise<ExecutionHistoryResult>
+  deleteExecutionHistory: () => Promise<DeleteHistoryResult>
   selectRfqExcelFile: () => Promise<SelectRfqExcelResult>
   downloadRfqTemplate: () => Promise<DownloadRfqTemplateResult>
   previewRfqBatch: (config: RfqBatchConfig) => Promise<RfqPreviewResult>

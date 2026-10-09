@@ -13,6 +13,7 @@ export class GuidedAutomationService {
   private requests = new Map<string, { request: AutomationInteraction; respond: (input: InteractionResponse) => Promise<boolean> }>()
   private artifacts = new Set<string>()
   private activeRun = ''
+  private interactionListeners = new Set<(request: AutomationInteraction | null) => void>()
   constructor(private readonly directory: string, private readonly rfqBusy: () => boolean) {}
 
   begin(): string {
@@ -21,6 +22,10 @@ export class GuidedAutomationService {
     return this.activeRun
   }
   isRunning(): boolean { return Boolean(this.activeRun) }
+  onInteraction(listener: (request: AutomationInteraction | null) => void): () => void {
+    this.interactionListeners.add(listener)
+    return () => this.interactionListeners.delete(listener)
+  }
   end(runId: string): void {
     for (const [key, value] of this.requests) if (value.request.runId === runId) this.requests.delete(key)
     if (this.activeRun === runId) this.activeRun = ''
@@ -96,6 +101,9 @@ export class GuidedAutomationService {
     await writeFile(join(directory, 'checkpoint.json'), JSON.stringify(request, null, 2), 'utf8')
   }
   private broadcast(): void {
+    for (const listener of this.interactionListeners) {
+      try { listener(this.getInteraction()) } catch { /* Advisory observers never own engine control. */ }
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       try {
         if (window.isDestroyed()) continue

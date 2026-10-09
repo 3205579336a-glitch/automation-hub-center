@@ -1,4 +1,4 @@
-export type InteractionAction = 'continue' | 'stop'
+export type InteractionAction = 'continue' | 'stop' | 'open-fix-session'
 
 export interface InteractionField {
   id: string
@@ -40,7 +40,7 @@ export function isInteractionResponse(value: unknown): value is InteractionRespo
   const input = value as Record<string, unknown>
   return typeof input.runId === 'string' && input.runId.length <= 100
     && typeof input.requestId === 'string' && /^[a-zA-Z0-9-]{1,100}$/.test(input.requestId)
-    && (input.action === 'continue' || input.action === 'stop')
+    && (input.action === 'continue' || input.action === 'stop' || input.action === 'open-fix-session')
     && (input.values === undefined || (!!input.values && typeof input.values === 'object'
       && !Array.isArray(input.values) && Object.keys(input.values).length <= 20
       && Object.entries(input.values).every(([key, value]) => /^[a-zA-Z0-9_-]{1,50}$/.test(key)

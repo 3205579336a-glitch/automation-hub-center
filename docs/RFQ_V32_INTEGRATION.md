@@ -54,7 +54,7 @@ The complete supplied baseline is in `resources/rpa/rfq_defaults.py`.
 
 | Area | Internal behavior |
 | --- | --- |
-| SAP | PROD; VCE / 100; `VCE - One Digital Core [949]`; currently signed-in user; no stored credentials |
+| SAP | PROD; VCE [949] / Client 100; `VCE - One Digital Core [949]`; [949] is the Logon entry code, not the SAP client; currently signed-in user; no stored credentials |
 | Guards | Environment guard and auto-select enabled; unverified environment forbidden; production write enabled only after Hub confirmation |
 | Excel | Path supplied by UI; `RPA_Input` or detected compatible sheet; row 2; aliases resolve email/date columns; backup/lock fallback/COM sync enabled |
 | Grouping | `GROUP_RFQ_BY_PARMA=true`, `MAX_MATERIALS_PER_GROUP=50`, no group-count limit |
@@ -65,6 +65,8 @@ The complete supplied baseline is in `resources/rpa/rfq_defaults.py`.
 | Timing | Supplied SAP login, wait, polling and Excel save retry values remain internal |
 
 Hub mode clears every known engine environment option before applying the baseline, so stale Windows environment variables and a developer `.env` cannot redirect it. Validation always disables production writes. The original SAP system/client/connection checks still run before SAP writes. Manual standalone development can use an optional `.env`; no `.env` alone does not authorize a standalone Production write. The ordinary UI exposes no QA switch or technical fields; QA remains a developer-only runtime path.
+
+Duplicate-login protection: RFQ reuses a signed-in, non-busy target session without a modal dialog. If the target connection already exists but its identity does not match, sign-in is incomplete, or all matching sessions are busy/blocked, it stops with a diagnostic instead of opening another connection. A target connection with no readable sessions is also protected; an unreadable connection inventory fails closed. Only an absent target connection permits one automatic open. This never selects the multiple-logon option that ends existing logins. The authorized change is limited to `SapSession._get_or_open_target_session`; RFQ transaction/business methods remain baseline-protected.
 
 ## Workbook and local data
 

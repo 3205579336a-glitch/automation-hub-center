@@ -11,9 +11,9 @@ const folder = await mkdtemp(join(tmpdir(), 'hub-guided-smoke-'))
 const artifacts = resolve('artifacts')
 await mkdir(artifacts, { recursive: true })
 const modules = [
-  { card: 'Update Info Record', title: 'Update Info Record', template: 'ME12_Supplier_Lead_Time_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['B', 'C100']], name: 'Info Record' },
-  { card: 'APQP', title: 'APQP Plan Close Dates', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['D', '41889']], name: 'APQP' },
-  { card: 'Update Source List', title: 'Update Source List', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889']], name: 'Source List' }
+  { card: 'Automatically Update Supplier Lead Times (SLT) in Batch', title: 'Automatically Update Supplier Lead Times (SLT) in Batch', template: 'ME12_Supplier_Lead_Time_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['B', 'C100']], name: 'Info Record' },
+  { card: 'Automatically Query APQP Plan Close Dates in Batch', title: 'Automatically Query APQP Plan Close Dates in Batch', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['D', '41889']], name: 'APQP' },
+  { card: 'Automatically Maintain Source Lists in Batch', title: 'Automatically Maintain Source Lists in Batch', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889']], name: 'Source List' }
 ]
 for (const module of modules) {
   const archive = unzipSync(await readFile(join('resources/templates', module.template)))
@@ -28,7 +28,7 @@ for (const module of modules) {
 }
 let app
 try {
-  app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${folder}`] })
+  app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${folder}`], env: { ...process.env, LOCALAPPDATA: folder } })
   const page = await app.firstWindow()
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
@@ -62,8 +62,14 @@ try {
   await page.getByRole('button', { name: 'Info', exact: true }).first().click()
   await page.getByRole('dialog').waitFor()
   await page.getByRole('button', { name: 'Close', exact: true }).last().click()
+  const sltCard = page.getByRole('heading', { name: modules[0].card, exact: true }).locator('..')
+  await sltCard.getByRole('note').getByText(/Permission required: SAP ME12/).waitFor()
+  await sltCard.getByRole('button', { name: 'Info', exact: true }).click()
+  await page.getByRole('dialog').getByRole('note').getByText(/Permission required: SAP ME12/).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).last().click()
   for (const module of modules) {
     await open(module)
+    if (module.channel === 'me12') await page.getByRole('note').getByText(/Permission required: SAP ME12/).waitFor()
     await page.getByRole('button', { name: 'Download template', exact: true }).click()
     await stat(join(folder, module.template))
     const before = await readFile(module.path)
@@ -78,6 +84,7 @@ try {
       await run.click()
       const confirmation = page.getByRole('dialog', { name: 'Ready to update', exact: true })
       await confirmation.waitFor()
+      if (module.channel === 'me12') await confirmation.getByText(/Permission required: SAP ME12/).waitFor()
       await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click()
       assert.equal(await confirmation.isVisible(), false)
     }
@@ -104,7 +111,7 @@ try {
             { id: 'yes', label: 'Yes/no input', type: 'yes-no', required: true },
             { id: 'check', label: 'Checkbox input', type: 'checkbox', required: true }
           ] : [] }
-        owner.webContents.send('automation:interaction', current)
+        globalThis.setTimeout(() => owner.webContents.send('automation:interaction', current), 750)
         return new Promise(resolve => { finish = resolve })
       })
       ipcMain.handle('automation:interaction:respond', (_event, input) => {
@@ -126,6 +133,7 @@ try {
     }, module)
     await run.click()
     if (module.channel !== 'apqp') await page.getByRole('dialog', { name: 'Ready to update' }).getByRole('button', { name: 'Start Automation', exact: true }).click()
+    await page.locator('header').getByText('Running', { exact: true }).waitFor()
     const prompt = page.getByRole('dialog', { name: module.channel === 'me01' ? 'Automation Paused' : 'Action Required', exact: true })
     await prompt.waitFor()
     await page.evaluate(() => { window.location.hash = '/operations' }) // A route change must not dismiss the global pause.
@@ -148,6 +156,7 @@ try {
       await prompt.getByRole('button', { name: 'Check Again', exact: true }).click()
     }
     await prompt.waitFor({ state: 'hidden' })
+    await page.locator('header').getByText('Ready', { exact: true }).waitFor()
     await open(module)
     const result = page.getByRole('region', { name: 'Automation result', exact: true })
     await result.waitFor()
@@ -186,6 +195,38 @@ try {
   await page.getByRole('heading', { name: 'Execution history', exact: true }).waitFor()
   await page.getByRole('button', { name: 'Dashboard', exact: true }).click()
   assert.equal(await page.getByText('Available Operations', { exact: true }).locator('..').locator('strong').innerText(), '4')
+  // Long task names must remain readable in both languages with large text.
+  await operations()
+  for (const title of ['Automatically Create Buyer Receipts and RFQs in Batch from NPL', ...modules.map(module => module.card)]) {
+    await page.getByRole('heading', { name: title, exact: true }).waitFor()
+  }
+  const checkCards = async () => {
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false)
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('article')].every(card => {
+      const title = card.querySelector('h3').getBoundingClientRect()
+      const description = card.querySelector('p').getBoundingClientRect()
+      const button = card.querySelector('button').getBoundingClientRect()
+      return title.bottom <= description.top + 1 && description.bottom <= button.top + 1 && card.scrollWidth <= card.clientWidth
+    })), true, 'Task titles, descriptions and actions must not overlap or overflow')
+  }
+  await checkCards()
+  await page.screenshot({ path: join(artifacts, 'operations-batch-en-large.png'), fullPage: true })
+  await page.getByRole('button', { name: 'Settings', exact: true }).click()
+  await page.getByLabel('Language', { exact: true }).selectOption('zh-CN')
+  await page.getByRole('button', { name: 'Save Settings', exact: true }).click()
+  await page.getByRole('button', { name: '操作中心', exact: true }).click()
+  for (const title of ['在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', '自动批量更新供应商交货时间（SLT）', '自动批量查询 APQP 计划关闭日期', '自动批量 Source List 维护']) {
+    await page.getByRole('heading', { name: title, exact: true }).waitFor()
+  }
+  await checkCards()
+  await page.getByRole('note').getByText(/需要权限：请确认已开通 SAP ME12/).waitFor()
+  await page.screenshot({ path: join(artifacts, 'operations-batch-zh-large.png'), fullPage: true })
+  const rfqCard = page.getByRole('heading', { name: '在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', exact: true }).locator('..')
+  await rfqCard.getByRole('button', { name: '说明', exact: true }).click()
+  await page.getByRole('dialog').getByText('上传一份 Excel 模板，系统自动查询 NPL 物料，按工厂、项目和供应商分组，批量创建 Buyer Receipt 和 RFQ，并将结果回写 Excel。', { exact: true }).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click()
+  await rfqCard.getByRole('button', { name: '打开', exact: true }).click()
+  await page.getByRole('heading', { name: '在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', exact: true }).waitFor()
   assert.deepEqual(errors, [])
   console.log('Guided desktop smoke passed: real downloads/previews; ME52N removed; confirmation; APQP no SAP-write confirmation; global WAIT/recheck/stop; five input types; shared results; sounds/mute; dark/large layout; Advanced hidden. No SAP accessed.')
 } catch (error) {

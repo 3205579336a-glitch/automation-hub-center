@@ -5,6 +5,7 @@ import styles from './OperationGuideModal.module.css'
 export interface OperationGuide {
   title: string
   description: string
+  permissionNotice?: string
   steps: string[]
   availability: 'active' | 'coming-soon'
 }
@@ -51,6 +52,7 @@ export function OperationGuideModal({
         </header>
 
         <p className={styles.description}>{guide.description}</p>
+        {guide.permissionNotice && <p className={styles.description} role="note">{guide.permissionNotice}</p>}
         <div className={styles.demo} aria-label="Animated operation steps">
           {guide.steps.map((step, index) => (
             <div className={styles.stepGroup} key={step}>

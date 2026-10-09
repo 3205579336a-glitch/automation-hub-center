@@ -1,5 +1,6 @@
-import { appendFile, readFile, readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { appendFile, readFile, readdir, lstat, realpath, writeFile, rename, unlink } from 'node:fs/promises'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type {
   DiagnosticLevel,
@@ -11,12 +12,16 @@ export type DiagnosticLogInput = Omit<DiagnosticLogEntry, 'id' | 'timestamp'>
 
 export class DiagnosticLogger {
   private writeQueue: Promise<void> = Promise.resolve()
+  private runContext = new AsyncLocalStorage<string>()
 
   constructor(private readonly logsDirectory: string) {}
+
+  withRun<T>(id: string, work: () => Promise<T>): Promise<T> { return this.runContext.run(id, work) }
 
   log(input: DiagnosticLogInput): Promise<void> {
     const entry: DiagnosticLogEntry = {
       ...input,
+      details: this.runContext.getStore() ? { ...input.details, runId: this.runContext.getStore()! } : input.details,
       id: randomUUID(),
       timestamp: new Date().toISOString()
     }
@@ -49,6 +54,7 @@ export class DiagnosticLogger {
       .reverse()
     const entries: DiagnosticLogEntry[] = []
     const limit = query.limit ?? 100
+    let skipped = 0
 
     for (const fileName of fileNames) {
       const content = await readFile(join(this.logsDirectory, fileName), 'utf8')
@@ -61,6 +67,7 @@ export class DiagnosticLogger {
 
       for (const entry of fileEntries) {
         if (matchesQuery(entry, query)) {
+          if (skipped < (query.offset ?? 0)) { skipped++; continue }
           entries.push(entry)
           if (entries.length >= limit) {
             return entries
@@ -69,6 +76,63 @@ export class DiagnosticLogger {
       }
     }
     return entries
+  }
+
+  async deleteRun(id: string): Promise<void> {
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
+      const names = (await readdir(this.logsDirectory)).filter(name => /^sap-toolbox-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+      for (const name of names) {
+        const path = join(this.logsDirectory, name)
+        if ((await lstat(path)).isSymbolicLink() || (await realpath(path)).toLowerCase() !== path.toLowerCase()) continue
+        const content = await readFile(path, 'utf8')
+        // Preserve malformed/unattributed legacy lines; never delete unrelated runs.
+        const remaining = content.split(/\r?\n/).filter(line => {
+          const entry = parseLogEntry(line)
+          return entry?.details?.runId !== id
+        }).join('\n')
+        if (remaining === content) continue
+        const temporary = path + '.' + randomUUID() + '.tmp'
+        await writeFile(temporary, remaining, 'utf8')
+        await rename(temporary, path)
+      }
+    })
+    await this.writeQueue
+  }
+
+  async purge(before?: number, protectedRuns = new Set<string>()): Promise<string[]> {
+    const warnings: string[] = []
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
+      if ((await realpath(this.logsDirectory)).toLowerCase() !== resolve(this.logsDirectory).toLowerCase()) {
+        warnings.push('Linked log directories were kept.'); return
+      }
+      const names = (await readdir(this.logsDirectory)).filter(name => /^sap-toolbox-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name))
+      for (const name of names) {
+        const path = join(this.logsDirectory, name)
+        try {
+          if ((await lstat(path)).isSymbolicLink() || (await realpath(path)).toLowerCase() !== resolve(path).toLowerCase()) {
+            warnings.push('Linked diagnostic files were kept.'); continue
+          }
+          const content = await readFile(path, 'utf8')
+          const remaining = content.split(/\r?\n/).filter(line => {
+            if (!line) return false
+            const entry = parseLogEntry(line)
+            if (entry?.details?.runId && protectedRuns.has(String(entry.details.runId))) return true
+            // Auto retention preserves malformed/undated legacy lines. Manual
+            // Clear All may remove them, but only within named diagnostic files.
+            return before !== undefined && (!entry || !Number.isFinite(Date.parse(entry.timestamp)) || Date.parse(entry.timestamp) >= before)
+          })
+          if (!remaining.length) await unlink(path)
+          else {
+            const updated = remaining.join('\n') + '\n'
+            if (updated === content) continue
+            const temporary = path + '.' + randomUUID() + '.tmp'
+            await writeFile(temporary, updated, 'utf8'); await rename(temporary, path)
+          }
+        } catch { warnings.push('Some diagnostic files could not be removed; they were kept.') }
+      }
+    })
+    await this.writeQueue
+    return [...new Set(warnings)]
   }
 }
 

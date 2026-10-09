@@ -13,6 +13,7 @@ import { IPC_CHANNELS } from '../../shared/ipc-channels'
 import type { RfqNativeRunner } from '../automation/rfq-native-runner'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
+import type { LocalIntelligenceService } from '../services/local-intelligence-service'
 import type { RfqExcelService } from '../services/rfq-excel-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
@@ -26,7 +27,8 @@ export function registerRfqHandlers(
   history: ExecutionHistoryService,
   templatePath: string,
   settingsService: SettingsService,
-  guided?: GuidedAutomationService
+  guided?: GuidedAutomationService,
+  intelligence?: LocalIntelligenceService
 ): void {
   ipcMain.handle(
     IPC_CHANNELS.downloadRfqTemplate,
@@ -125,9 +127,11 @@ export function registerRfqHandlers(
         return { success: false, errorCode: 'INVALID_CONFIG', message: 'Confirm the Production warning before starting Create RFQ.' }
       }
       let reservation: string | undefined
+      let timingId: string | undefined
       try { reservation = guided?.begin() } catch { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Finish or stop the current automation first.' } }
       try {
       const reportProgress = (progress: RfqBatchProgress): void => {
+        intelligence?.observe(historyEntry.id, progress)
         if (progress.state === 'WAITING_FOR_USER') {
           try {
             const owner = BrowserWindow.fromWebContents(event.sender)
@@ -149,12 +153,14 @@ export function registerRfqHandlers(
         summary: `Create RFQ is running in ${input.environment}.`,
         tcode: 'ZMFM050072'
       })
+      intelligence?.begin(historyEntry.id, 'create-rfq', historyEntry.id)
+      timingId = historyEntry.id
       await logger.info({
         category: 'automation',
         event: 'rfq.batch.started',
         message: `Create RFQ started in ${input.environment}.`,
         tcode: 'ZMFM050072',
-        details: { environment: input.environment }
+        details: { environment: input.environment, runId: historyEntry.id }
       })
       const result = await runner.run(input, (progress) => {
         reportProgress(progress)
@@ -163,6 +169,7 @@ export function registerRfqHandlers(
             tcode: 'ZMFM050072', details: { runId: historyEntry.id, group: progress.groupKey ?? '' } }).catch(() => undefined)
         }
       }, historyEntry.id)
+      const timing = intelligence?.finish(historyEntry.id, result.success ? 'Success' : result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed')
       try { if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.automationInteraction, null) } catch { /* Renderer may have closed. */ }
       await history.finish(historyEntry.id, result.success
         ? {
@@ -173,7 +180,9 @@ export function registerRfqHandlers(
             succeeded: result.succeeded,
             skipped: result.skipped,
             failed: result.failed,
-            resultPath: result.resultPath
+            resultPath: result.resultPath,
+            logPath: result.logPath,
+            performance: timing
           }
         : {
             status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed',
@@ -183,7 +192,9 @@ export function registerRfqHandlers(
             succeeded: result.succeeded,
             skipped: result.skipped,
             failed: result.failed,
-            resultPath: result.resultPath
+            resultPath: result.resultPath,
+            logPath: result.logPath,
+            performance: timing
           })
       await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({
         category: 'automation',
@@ -192,11 +203,11 @@ export function registerRfqHandlers(
         ...(!result.success ? { errorCode: result.errorCode } : {}),
         tcode: 'ZMFM050072',
         details: result.success
-          ? { environment: input.environment, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed }
-          : { environment: input.environment }
+          ? { runId: historyEntry.id, environment: input.environment, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed }
+          : { runId: historyEntry.id, environment: input.environment }
       })
       return result
-      } finally { if (reservation) guided?.end(reservation) }
+      } finally { if (timingId) intelligence?.finish(timingId, 'Cancelled'); if (reservation) guided?.end(reservation) }
     }
   )
 

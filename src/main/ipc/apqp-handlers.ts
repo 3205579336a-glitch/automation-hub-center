@@ -4,12 +4,13 @@ import { isApqpConfig, type ApqpFileResult, type ApqpPreviewResult, type ApqpRes
 import type { ApqpRunner } from '../automation/apqp-runner'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
+import type { LocalIntelligenceService } from '../services/local-intelligence-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
 import type { GuidedAutomationService } from '../services/guided-automation-service'
 import { isTrustedRenderer } from './ipc-security'
 
-export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogger, history: ExecutionHistoryService, settings: SettingsService, templatePath: string, guided: GuidedAutomationService): void {
+export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogger, history: ExecutionHistoryService, settings: SettingsService, templatePath: string, guided: GuidedAutomationService, intelligence?: LocalIntelligenceService): void {
   ipcMain.handle(IPC_CHANNELS.downloadApqpTemplate, async (event): Promise<ApqpFileResult> => {
     if (!isTrustedRenderer(event)) return { success: false, cancelled: false, message: 'Request rejected.' }
     try {
@@ -44,6 +45,7 @@ export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogge
   ipcMain.handle(IPC_CHANNELS.startApqp, async (event, config: unknown): Promise<ApqpResult> => {
     if (!isTrustedRenderer(event) || !isApqpConfig(config)) return { success: false, message: 'Upload a valid APQP workbook first.' }
     let runId: string
+    let timingId: string | undefined
     try { runId = guided.begin() } catch (error) { return { success: false, message: messageOf(error) } }
     try {
     const currentSettings = await settings.getSettings()
@@ -51,24 +53,28 @@ export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogge
     const preview = await runner.preview(effective)
     if (!preview.success) return preview
     if (preview.preview.invalid || !preview.preview.selected) return { success: false, message: 'Fix the incomplete rows before starting.' }
-    const entry = await history.start({ operation: 'apqp-plan-closure', label: 'APQP Plan Closure Date', summary: 'Querying ZMFM050035.', tcode: 'ZMFM050035' })
-    await logger.info({ category: 'automation', event: 'apqp.batch.started', message: 'APQP query started.', tcode: 'ZMFM050035', details: { maxWorkers: config.maxWorkers, system: config.system, client: config.client, plant: config.plant } })
+    const entry = await history.start({ operation: 'apqp-plan-closure', diagnosticRunId: runId, label: 'APQP Plan Closure Date', summary: 'Querying ZMFM050035.', tcode: 'ZMFM050035' })
+    timingId = entry.id
+    intelligence?.begin(entry.id, 'apqp-plan-closure', runId, preview.preview.selected)
+    await logger.info({ category: 'automation', event: 'apqp.batch.started', message: 'APQP query started.', tcode: 'ZMFM050035', details: { runId: entry.id, maxWorkers: config.maxWorkers, system: config.system, client: config.client, plant: config.plant } })
     const result = await runner.run(effective, (progress) => {
+      intelligence?.observe(entry.id, progress)
       if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress)
       if (progress.event === 'record' || progress.event === 'notice' || progress.event === 'workers') {
         const writeLog = progress.status && !['SUCCESS', 'NO_DATE', 'NO_RESULT'].includes(progress.status) ? logger.error.bind(logger) : logger.info.bind(logger)
-        void writeLog({ category: 'automation', event: `apqp.${progress.event}`, message: progress.message, tcode: 'ZMFM050035' })
+        void writeLog({ category: 'automation', event: `apqp.${progress.event}`, message: progress.message, tcode: 'ZMFM050035', details: { runId: entry.id } })
       }
     }, { service: guided, runId })
+    const timing = intelligence?.finish(entry.id, result.success ? result.cancelled ? 'Cancelled' : 'Success' : 'Failed')
     await history.finish(entry.id, result.success ? {
       status: result.cancelled ? 'Cancelled' : result.failed ? (result.succeeded ? 'Partial' : 'Failed') : 'Success', summary: result.message,
       total: result.total, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped,
-      failed: result.failed, sessionCount: result.workers, resultPath: result.resultPath, backupPath: result.backupPath, logPath: result.logPath
-    } : { status: 'Failed', summary: result.message })
-    await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({ category: 'automation', event: result.success ? 'apqp.batch.completed' : 'apqp.batch.failed', message: result.message, tcode: 'ZMFM050035' })
+      failed: result.failed, sessionCount: result.workers, resultPath: result.resultPath, backupPath: result.backupPath, logPath: result.logPath, performance: timing
+    } : { status: 'Failed', summary: result.message, performance: timing })
+    await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({ category: 'automation', event: result.success ? 'apqp.batch.completed' : 'apqp.batch.failed', message: result.message, tcode: 'ZMFM050035', details: { runId: entry.id } })
     if (result.success) guided.registerArtifacts(result.resultPath, result.backupPath, result.logPath)
     return result
-    } finally { guided.end(runId) }
+    } finally { if (timingId) intelligence?.finish(timingId, 'Cancelled'); guided.end(runId) }
   })
   ipcMain.handle(IPC_CHANNELS.cancelApqp, (event) => ({ success: isTrustedRenderer(event) && runner.cancel() }))
 }

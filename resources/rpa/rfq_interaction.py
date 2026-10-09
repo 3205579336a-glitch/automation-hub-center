@@ -44,7 +44,7 @@ class InteractionController:
         self.args, self.emit, self.persist, self.cancel = args, emit, persist, cancel
         self.state = 'RUNNING'
 
-    def wait(self, stage, issue, tasks, verify=None):
+    def wait(self, stage, issue, tasks, verify=None, extra=None, open_fix=None):
         directory = Path(self.args.control_dir)
         directory.mkdir(parents=True, exist_ok=True)
         self.persist(tasks, 'WAITING_FOR_USER', stage, issue)
@@ -55,6 +55,8 @@ class InteractionController:
                         state='WAITING_FOR_USER', step=stage, recoveryPoint=stage,
                         rows=[t.excel_row for t in tasks], materials=[t.material for t in tasks],
                         message=issue, allowedActions=['continue', 'stop'] if verify else ['stop'])
+            if open_fix and verify:
+                data['allowedActions'].append('open-fix-session')
             duplicate = re.search(r'Material[= ]([^\s:;]+): expected one SAP row, found (\d+)', issue)
             if duplicate:
                 material, count = duplicate.groups()
@@ -66,6 +68,10 @@ class InteractionController:
             else:
                 data.update(issueSummary='The current SAP screen or data could not be verified.' if verify else 'An unexpected SAP state was detected.',
                             issueSummaryZh='当前 SAP 页面或数据未通过验证。' if verify else '检测到未确认的 SAP 状态。')
+            if extra:
+                data.update(extra)
+            if not open_fix or not verify:
+                data['allowedActions'] = [item for item in data['allowedActions'] if item != 'open-fix-session']
             checkpoint = {**data, 'runId': self.args.run_id}
             # Local diagnostics only. No credential/COM objects are serialized.
             (directory / 'checkpoint.json').write_text(json.dumps(checkpoint, ensure_ascii=False), encoding='utf-8')
@@ -81,6 +87,18 @@ class InteractionController:
                         response.unlink()
                         if isinstance(command, dict) and command.get('runId') == self.args.run_id and command.get('requestId') == request_id:
                             action = command.get('action')
+                            if action == 'open-fix-session' and open_fix and verify and action in data['allowedActions']:
+                                try:
+                                    message = open_fix()
+                                except Exception as exc:
+                                    message = 'Open Fix Session unavailable: ' + str(exc) + '. Use another available SAP session, then Recheck.'
+                                # One opening attempt per paused checkpoint: hide
+                                # it after success or failure, retain manual Recheck.
+                                open_fix = None
+                                data['allowedActions'] = [item for item in data['allowedActions'] if item != 'open-fix-session']
+                                self.emit('FIX_SESSION_RESULT', requestId=request_id, state='WAITING_FOR_USER',
+                                          step=stage, message=message, allowedActions=data['allowedActions'])
+                                continue
                             if action == 'stop' or action == 'continue' and verify:
                                 break
                     except (OSError, ValueError):
@@ -98,6 +116,9 @@ class InteractionController:
                 result = verify()
             except Exception as exc:
                 issue = 'The issue is still present. / 问题仍未解决：' + str(exc)
+                # A fresh read may distinguish a technical failure from actual
+                # missing data. Keep WAITING while updating the same checkpoint.
+                stage = extra.get('recoveryPoint', stage) if extra else stage
                 self.state = 'WAITING_FOR_USER'
                 self.persist(tasks, 'WAITING_FOR_USER', stage, issue)
                 continue

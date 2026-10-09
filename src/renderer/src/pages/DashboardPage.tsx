@@ -14,6 +14,8 @@ import { useLocalization } from '../i18n/use-localization'
 import type { PageId } from '../types/navigation'
 import styles from './DashboardPage.module.css'
 import { operationName } from './operation-name'
+import { TASK_PAGES, useTaskRanking } from '../hooks/use-task-ranking'
+import { operationCopy } from '../i18n/operation-copy'
 
 interface DashboardPageProps {
   onNavigate: (page: PageId) => void
@@ -26,6 +28,7 @@ export function DashboardPage({
   const [history, setHistory] = useState<ExecutionHistoryEntry[]>([])
   const [loading, setLoading] = useState(true)
   const zh = language === 'zh-CN'
+  const { ranking, loading: rankingLoading } = useTaskRanking()
 
   useEffect(() => {
     let mounted = true
@@ -93,6 +96,14 @@ export function DashboardPage({
               {t('openOperations')} <ArrowRight size={13} />
             </button>
           </div>
+          <p className="section-copy">{rankingLoading ? zh ? '正在加载任务…' : 'Loading tasks…'
+            : ranking.personalized ? zh ? '常用任务优先 · 仅根据本机运行记录' : 'Common tasks first · Local history only'
+            : zh ? '选择一个任务开始自动批量处理' : 'Choose a task to start automated batch processing'}</p>
+          {!rankingLoading && <div className={styles.actionsGrid} aria-label={zh ? '任务快捷入口' : 'Task shortcuts'}>
+            {ranking.order.map(id => <button key={id} className="button" onClick={() => onNavigate(TASK_PAGES[id])}>
+              {operationCopy(TASK_PAGES[id], language).shortTitle}<ArrowRight size={13} />
+            </button>)}
+          </div>}
         </section>
 
         <section className={`card ${styles.activity}`}>

@@ -38,7 +38,7 @@ def initialize(env_path):
             "EXCEL_PATH": args.excel_path or "",
             "SAP_TARGET_ENV": args.target_env,
             "EXPECTED_SAP_SYSTEM": "VCE" if args.target_env == "PROD" else "CEQ",
-            "EXPECTED_SAP_CLIENT": "100",
+            "EXPECTED_SAP_CLIENT": DEFAULTS["EXPECTED_SAP_CLIENT"] if args.target_env == "PROD" else "100",
             "EXPECTED_SAP_USER": "",
             "ALLOW_PRODUCTION_WRITE": "true" if args.production_confirmed and not args.validate_only else "false",
         })
@@ -422,6 +422,12 @@ def run_hub(engine, args):
                     return original(*a, **kw)
                 return wrapped
             replace(engine, name, observe(getattr(engine, name), kind, message))
+
+        # Hub-only observation/verification hooks; validation and standalone
+        # execution keep the supplied engine unchanged.
+        from rfq_runtime_improvements import RuntimeImprovements
+        improvements = RuntimeImprovements(engine, event, controller, replace)
+        improvements.install()
 
         old_csv = engine.create_csv_log
         def csv_log(path):

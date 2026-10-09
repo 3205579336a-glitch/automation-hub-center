@@ -4,11 +4,18 @@ import type { AutomationProgress } from '../shared/automation-types'
 import type { Me12BatchProgress } from '../shared/me12-types'
 import type { RfqBatchProgress } from '../shared/rfq-batch-types'
 import type { AutomationInteraction } from '../shared/automation-interaction'
+import type { EtaSnapshot } from '../shared/local-intelligence'
 import type { Me01BatchProgress } from '../shared/me01-types'
 import type { SapAutomationApi } from './types'
 import type { ApqpProgress } from '../shared/apqp-types'
 
 const sapAutomationApi: SapAutomationApi = {
+  getLocalIntelligence: () => ipcRenderer.invoke(IPC_CHANNELS.getLocalIntelligence),
+  onAutomationEta: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, eta: EtaSnapshot): void => listener(eta)
+    ipcRenderer.on(IPC_CHANNELS.automationEta, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.automationEta, handler)
+  },
   downloadApqpTemplate: () => ipcRenderer.invoke(IPC_CHANNELS.downloadApqpTemplate),
   selectApqpExcel: () => ipcRenderer.invoke(IPC_CHANNELS.selectApqpExcel),
   previewApqp: (config) => ipcRenderer.invoke(IPC_CHANNELS.previewApqp, config),
@@ -33,6 +40,7 @@ const sapAutomationApi: SapAutomationApi = {
   getDiagnosticLogs: (query = {}) => ipcRenderer.invoke(IPC_CHANNELS.getDiagnosticLogs, query),
   getExecutionHistory: (query = {}) =>
     ipcRenderer.invoke(IPC_CHANNELS.getExecutionHistory, query),
+  deleteExecutionHistory: () => ipcRenderer.invoke(IPC_CHANNELS.deleteExecutionHistory),
   openLogFolder: () => ipcRenderer.invoke(IPC_CHANNELS.openLogFolder),
   selectMe12ExcelFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectMe12ExcelFile),
   downloadMe12Template: () => ipcRenderer.invoke(IPC_CHANNELS.downloadMe12Template),

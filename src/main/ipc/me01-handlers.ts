@@ -12,6 +12,7 @@ import { isMe01BatchConfig } from '../../shared/me01-types'
 import type { Me01NativeRunner } from '../automation/me01-native-runner'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
+import type { LocalIntelligenceService } from '../services/local-intelligence-service'
 import type { Me01ExcelService } from '../services/me01-excel-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
@@ -25,7 +26,8 @@ export function registerMe01Handlers(
   history: ExecutionHistoryService,
   templatePath: string,
   settingsService: SettingsService,
-  guided: GuidedAutomationService
+  guided: GuidedAutomationService,
+  intelligence?: LocalIntelligenceService
 ): void {
   ipcMain.handle(IPC_CHANNELS.downloadMe01Template, async (event): Promise<DownloadMe01TemplateResult> => {
     if (!isTrustedRenderer(event)) return { success: false, cancelled: false, message: 'The template request was rejected.' }
@@ -77,7 +79,9 @@ export function registerMe01Handlers(
     if (!isTrustedRenderer(event) || !isMe01BatchConfig(input) || !input.confirmed) {
       return { success: false, errorCode: 'INVALID_CONFIG', message: 'Upload a valid workbook and confirm the active SAP GUI session before running ME01.' }
     }
+    let timingId: string | undefined
     const reportProgress = (progress: Me01BatchProgress): void => {
+      if (timingId) intelligence?.observe(timingId, progress)
       if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.me01Progress, progress)
     }
     let runId: string
@@ -86,22 +90,26 @@ export function registerMe01Handlers(
     // Re-read immediately before any SAP write; invalid inputs never launch the engine.
     const preview = await excelService.preview(input.excelPath)
     if (!preview.uniqueMaterials) return { success: false, errorCode: 'INVALID_CONFIG', message: 'No valid materials were found.' }
-    const historyEntry = await history.start({ operation: 'me01-source-list', label: 'ME01 Source List — Plant C100', summary: 'ME01 source-list batch is running.', tcode: 'ME01' })
-    await logger.info({ category: 'automation', event: 'me01.batch.started', message: 'ME01 Source List batch started for Plant C100.', tcode: 'ME01' })
-    const result = await runner.run(input, reportProgress, { service: guided, runId })
+    const historyEntry = await history.start({ operation: 'me01-source-list', diagnosticRunId: runId, label: 'ME01 Source List — Plant C100', summary: 'ME01 source-list batch is running.', tcode: 'ME01' })
+    timingId = historyEntry.id
+    intelligence?.begin(historyEntry.id, 'me01-source-list', runId, preview.uniqueMaterials)
+    await logger.info({ category: 'automation', event: 'me01.batch.started', message: 'ME01 Source List batch started for Plant C100.', tcode: 'ME01', details: { runId: historyEntry.id } })
+    const work = () => runner.run(input, reportProgress, { service: guided, runId })
+    const result = await (logger.withRun?.(historyEntry.id, work) ?? work())
+    const timing = intelligence?.finish(historyEntry.id, result.success ? 'Success' : result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed')
     await history.finish(historyEntry.id, result.success ? {
       status: result.failed > 0 ? 'Partial' : 'Success', summary: result.message,
       total: result.processed, processed: result.processed, succeeded: result.succeeded,
-      skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath
-    } : { status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed', summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath })
+      skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath, performance: timing
+    } : { status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed', summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath, performance: timing })
     await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({
       category: 'automation', event: result.success ? 'me01.batch.completed' : 'me01.batch.failed',
       message: result.message, ...(!result.success ? { errorCode: result.errorCode } : {}), tcode: 'ME01',
-      details: result.success ? { processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed } : undefined
+      details: result.success ? { runId: historyEntry.id, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed } : { runId: historyEntry.id }
     })
     guided.registerArtifacts(result.resultPath, result.backupPath)
     return result
-    } finally { guided.end(runId) }
+    } finally { if (timingId) intelligence?.finish(timingId, 'Cancelled'); guided.end(runId) }
   })
 
   ipcMain.handle(IPC_CHANNELS.cancelMe01Batch, async (event): Promise<Me01CancelResult> => {

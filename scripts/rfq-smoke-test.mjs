@@ -12,8 +12,8 @@ await mkdir(artifactDirectory, { recursive: true })
 let electronApp
 try {
   electronApp = await electron.launch(process.env.RFQ_PACKAGED_EXE
-    ? { executablePath: process.env.RFQ_PACKAGED_EXE, args: [`--user-data-dir=${testUserData}`] }
-    : { args: ['.', '--disable-gpu', `--user-data-dir=${testUserData}`] })
+    ? { executablePath: process.env.RFQ_PACKAGED_EXE, args: [`--user-data-dir=${testUserData}`], env: { ...process.env, LOCALAPPDATA: testUserData } }
+    : { args: ['.', '--disable-gpu', `--user-data-dir=${testUserData}`], env: { ...process.env, LOCALAPPDATA: testUserData } })
   const window = await electronApp.firstWindow()
   await window.getByText('Welcome back', { exact: true }).waitFor({ timeout: 30000 })
   await window.evaluate(async (downloadFolder) => {
@@ -26,7 +26,8 @@ try {
     shell.showItemInFolder = () => undefined
   }, sampleWorkbook)
   await window.getByRole('button', { name: 'Operations', exact: true }).click()
-  await window.getByRole('heading', { name: 'Create Buyer Receipt / RFQ', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
+  await window.getByRole('heading', { name: 'Automatically Create Buyer Receipts and RFQs in Batch from NPL', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
+  await window.getByText('VCE · Production [949] · Client 100', { exact: true }).waitFor()
   await window.getByRole('button', { name: 'Download template', exact: true }).click()
   await window.getByText('Template downloaded', { exact: true }).waitFor()
   await stat(join(testUserData, 'Create_RFQ_Template.xlsx'))
@@ -49,6 +50,7 @@ try {
   await run.click()
   await window.getByRole('dialog').waitFor()
   await window.getByText('Ready to Start', { exact: true }).waitFor()
+  await window.getByRole('dialog').getByText('VCE / Production [949] / Client 100', { exact: true }).waitFor()
   await window.screenshot({ path: join(artifactDirectory, 'rfq-v32-confirmation.png'), fullPage: true })
   // Never confirm PROD in a test. Cancel before injecting a purely UI mock.
   await window.getByRole('button', { name: 'Cancel', exact: true }).click()
@@ -69,7 +71,7 @@ try {
   await window.getByRole('button', { name: 'Run Another Task', exact: true }).waitFor()
   await window.screenshot({ path: join(artifactDirectory, 'rfq-v32-result-mock.png'), fullPage: true })
   await window.getByRole('button', { name: 'Operations', exact: true }).click()
-  await window.getByRole('heading', { name: 'Create Buyer Receipt / RFQ', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
+  await window.getByRole('heading', { name: 'Automatically Create Buyer Receipts and RFQs in Batch from NPL', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
   await window.getByText(/MOCK-10001/).first().waitFor()
   await window.evaluate(() => {
     globalThis.document.documentElement.dataset.theme = 'dark'

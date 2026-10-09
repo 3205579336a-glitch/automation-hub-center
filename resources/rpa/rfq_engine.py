@@ -1874,24 +1874,25 @@ class SapSession:
         candidates = self._collect_sessions(application)
         self._print_sessions(candidates)
 
+        def matches_identity(meta):
+            return (
+                meta.get("target_verified") and meta.get("user")
+                and (not EXPECTED_SAP_SYSTEM or meta["system"] == EXPECTED_SAP_SYSTEM)
+                and (not EXPECTED_SAP_CLIENT or meta["client"] == EXPECTED_SAP_CLIENT)
+                and (not EXPECTED_SAP_USER or meta["user"] == EXPECTED_SAP_USER)
+            )
+
+        def ready(session):
+            try:
+                return not bool(session.Busy) and session.FindById("wnd[1]", False) is None
+            except Exception:
+                return False
+
         target_matches = [
             (session, meta)
             for session, meta in candidates
-            if meta.get("target_verified")
+            if matches_identity(meta) and ready(session)
         ]
-
-        # When System/Client are configured, apply them as an extra filter.
-        if EXPECTED_SAP_SYSTEM or EXPECTED_SAP_CLIENT or EXPECTED_SAP_USER:
-            filtered: list[tuple[Any, dict[str, Any]]] = []
-            for session, meta in target_matches:
-                if EXPECTED_SAP_SYSTEM and meta["system"] != EXPECTED_SAP_SYSTEM:
-                    continue
-                if EXPECTED_SAP_CLIENT and meta["client"] != EXPECTED_SAP_CLIENT:
-                    continue
-                if EXPECTED_SAP_USER and meta["user"] != EXPECTED_SAP_USER:
-                    continue
-                filtered.append((session, meta))
-            target_matches = filtered
 
         if target_matches:
             if len(target_matches) > 1:
@@ -1902,7 +1903,47 @@ class SapSession:
             print("✅ 复用已打开的目标SAP会话")
             return target_matches[0]
 
-        # No target session exists: open the exact SAP Logon entry.
+        # Never mistake a mismatched/busy/login-pending target for an absent
+        # connection. Opening it again can terminate the user's existing login.
+        existing_targets = [meta for _, meta in candidates
+                            if meta.get("target_verified") or (
+                                EXPECTED_SAP_SYSTEM and meta.get("system") == EXPECTED_SAP_SYSTEM)]
+        if existing_targets:
+            actual = "; ".join(
+                f"Entry={meta.get('connection_description') or '<unknown>'}, "
+                f"System={meta.get('system') or '<unknown>'}, "
+                f"Client={meta.get('client') or '<unknown>'}, "
+                f"User={meta.get('user') or '<not signed in>'}"
+                for meta in existing_targets
+            )
+            raise RuntimeError(
+                "目标SAP连接已存在，但没有符合校验且空闲的已登录会话。"
+                "为避免重复登录，未打开新连接。请完成已有登录、处理弹窗，"
+                "并核对系统/Client/用户配置后重试；不要结束其他登录。"
+                f"期望 System={EXPECTED_SAP_SYSTEM or '<optional>'}, "
+                f"Client={EXPECTED_SAP_CLIENT or '<optional>'}。实际：{actual}"
+            )
+
+        # _collect_sessions deliberately tolerates COM errors. Recheck the
+        # connection inventory before opening, including entries with no session.
+        try:
+            connection_count = int(application.Children.Count)
+            for index in range(connection_count):
+                connection = application.Children(index)
+                description = self._connection_description(connection)
+                if not description:
+                    raise RuntimeError("SAP连接名称无法读取")
+                if self._description_matches_target(description):
+                    raise RuntimeError(
+                        f"目标SAP连接 {description!r} 已存在，但会话尚未就绪。"
+                        "请在已有窗口完成登录；为避免重复登录，未打开新连接。"
+                    )
+        except Exception as exc:
+            raise RuntimeError(
+                "无法确认目标SAP连接不存在，已停止以避免重复登录。" + str(exc)
+            ) from exc
+
+        # Only an absent target connection may be opened, once.
         self._open_target_connection(application)
         time.sleep(1)
         candidates = self._collect_sessions(application)
@@ -1910,17 +1951,8 @@ class SapSession:
         target_matches = [
             (session, meta)
             for session, meta in candidates
-            if meta.get("target_verified")
+            if matches_identity(meta) and ready(session)
         ]
-
-        if EXPECTED_SAP_SYSTEM or EXPECTED_SAP_CLIENT or EXPECTED_SAP_USER:
-            target_matches = [
-                (session, meta)
-                for session, meta in target_matches
-                if (not EXPECTED_SAP_SYSTEM or meta["system"] == EXPECTED_SAP_SYSTEM)
-                and (not EXPECTED_SAP_CLIENT or meta["client"] == EXPECTED_SAP_CLIENT)
-                and (not EXPECTED_SAP_USER or meta["user"] == EXPECTED_SAP_USER)
-            ]
 
         if not target_matches:
             raise RuntimeError(

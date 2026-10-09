@@ -2,14 +2,19 @@ import { ArrowLeft, Download, Upload, Play, Square, FolderOpen, AlertTriangle } 
 import { useEffect, useRef, useState } from 'react'
 import type { RfqBatchProgress, RfqBatchResult, RfqExcelPreview } from '../../../shared/rfq-batch-types'
 import { useLocalization } from '../i18n/use-localization'
+import { operationCopy } from '../i18n/operation-copy'
+import { completedUnits } from '../../../shared/local-intelligence'
+import { useAdaptiveEta } from '../hooks/use-adaptive-eta'
+import { AdaptiveEta } from '../components/automation/AdaptiveEta'
 import type { Notify } from '../types/notifications'
 import styles from './CreateRfqPage.module.css'
 
-interface CreateRfqPageProps { notify: Notify; onBack: () => void }
+interface CreateRfqPageProps { notify: Notify; onBack: () => void; onRunningChange: (running: boolean) => void }
 
-export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX.Element {
+export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPageProps): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
+  const text = operationCopy('create-rfq', language)
   const t = (cn: string, en: string): string => zh ? cn : en
   const [excelPath, setExcelPath] = useState('')
   const [downloadedPath, setDownloadedPath] = useState('')
@@ -17,21 +22,28 @@ export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX
   const [events, setEvents] = useState<RfqBatchProgress[]>([])
   const [result, setResult] = useState<RfqBatchResult | null>(null)
   const [running, setRunning] = useState(false)
+  useEffect(() => { onRunningChange(running) }, [running, onRunningChange])
+  const { eta, unavailable: etaUnavailable } = useAdaptiveEta('create-rfq', running)
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [attention, setAttention] = useState<RfqBatchProgress | null>(null)
   const [numbers, setNumbers] = useState<string[]>([])
+  const [slowWait, setSlowWait] = useState<RfqBatchProgress | null>(null)
   const dialog = useRef<HTMLDialogElement>(null)
   const attentionNotified = useRef(false)
   const latest = events[events.length - 1]
   const group = [...events].reverse().find((event) => event.groupKey)
   const totals = [...events].reverse().find((event) => event.succeeded !== undefined)
-  const completedGroups = totals?.current ?? 0
+  const completedGroups = result?.processed ?? Math.max(0, ...events.map(event => completedUnits('create-rfq', event) ?? 0))
   const percent = preview?.groupCount ? Math.min(100, Math.round(completedGroups / preview.groupCount * 100)) : 0
   const canRun = Boolean(preview && preview.validRows > 0 && preview.invalidRows === 0 && !running && !loading && !result)
 
   useEffect(() => window.sapAutomation.onRfqProgress((event) => {
+    // Detailed timing stays in engine diagnostics, not the buyer's live status.
+    if (event.type === 'WRITE_PROFILE' || event.type === 'RUNTIME_PROFILE') return
+    if (event.type === 'SAP_SLOW') setSlowWait(event)
+    else if (event.type === 'SAP_RECOVERED' || event.state === 'WAITING_FOR_USER' || ['RUN_COMPLETED', 'RUN_FAILED', 'RUN_CANCELLED'].includes(event.type ?? '')) setSlowWait(null)
     setEvents((previous) => [...previous.slice(-199), event])
     if (event.rfqNumber) setNumbers((previous) => [...new Set([...previous, event.rfqNumber!])])
     if (event.type === 'ACTION_REQUIRED' && event.state !== 'WAITING_FOR_USER') {
@@ -79,7 +91,7 @@ export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX
   const start = async (): Promise<void> => {
     if (!canRun || !preview || !confirming) return
     setConfirming(false); setRunning(true); setStopping(false); setEvents([]); setResult(null); setAttention(null); setNumbers([])
-    attentionNotified.current = false
+    attentionNotified.current = false; setSlowWait(null)
     try {
       const response = await window.sapAutomation.startRfqBatch({ excelPath, environment: 'PROD', productionConfirmed: true, fingerprint: preview.fingerprint })
       setResult(response)
@@ -122,13 +134,19 @@ export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX
     RUN_FAILED: t('执行停止，请查看详情', 'Run stopped; review details'),
     RUN_CANCELLED: t('已停止并保存结果', 'Stopped with results saved'),
     RECOVERING: t('正在重新验证 SAP 状态', 'Checking SAP state again'),
-    INTERACTION_RESOLVED: t('验证通过，从当前步骤继续', 'Verified; resuming the current step')
+    INTERACTION_RESOLVED: t('验证通过，从当前步骤继续', 'Verified; resuming the current step'),
+    COMMODITY_CHECK_STARTED: t('检查 Commodity', 'Checking Commodity'),
+    NPL_READ_FAILED: t('NPL 数据读取失败', 'NPL data read failed'),
+    COMMODITY_RECHECK_STARTED: t('重新查询 NPL 并检查 Commodity', 'Re-querying NPL and checking Commodity'),
+    COMMODITY_RECHECK_SUCCESS: t('Commodity 验证通过', 'Commodity verified'),
+    SAP_SLOW: t('SAP 响应较慢，仍在等待', 'SAP is responding slowly; still waiting'),
+    SAP_RECOVERED: t('SAP 已响应，继续当前步骤', 'SAP responded; continuing the current step')
   }
 
   return <div className="page">
     <button className={styles.backButton} onClick={onBack} disabled={running}><ArrowLeft size={16} />{t('返回操作中心', 'Back to Operations')}</button>
-    <div className="page-heading"><div><h2>{t('创建 RFQ', 'Create RFQ')}</h2><p>{t('下载模板、填写并上传，校验后即可开始。', 'Download, complete and upload the template, then review and start.')}</p></div>
-      <span className={styles.environmentBadge}>VCE · Client 100 · {t('正式系统', 'Production')}</span></div>
+    <div className="page-heading"><div><h2>{text.title}</h2><p>{text.description}</p></div>
+      <span className={styles.environmentBadge}>VCE · {t('正式系统', 'Production')} [949] · Client 100</span></div>
     <div className={styles.steps}>{[t('下载模板', 'Download template'), t('填写并上传', 'Complete and upload'), t('预览并开始', 'Review and start')].map((label, index) => <div key={label}><span>{index + 1}</span><strong>{label}</strong></div>)}</div>
     <div className={styles.layout}><div className={styles.mainColumn}>
       <section className={`card ${styles.section}`}>
@@ -170,6 +188,9 @@ export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX
         {(running || latest) && <><div className={styles.progressTrack} role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${percent}%` }} /></div>
           <p>{completedGroups} / {preview?.groupCount ?? 0} · {percent}%</p>
           <strong>{latest?.state === 'WAITING_FOR_USER' ? t('已暂停，等待用户处理', 'Paused; waiting for user') : stepLabels[latest?.type ?? ''] || t('准备运行', 'Preparing run')}</strong></>}
+        {running && <AdaptiveEta eta={eta} unavailable={etaUnavailable} automationId="create-rfq" total={preview?.groupCount ?? 0}
+          waiting={latest?.state === 'WAITING_FOR_USER'} recovering={latest?.state === 'RECOVERING'} />}
+        {running && slowWait && <div className={styles.hint} role="status"><strong>{t('SAP 响应较慢', 'SAP is responding slowly')}</strong><p>{t('自动化仍在等待 SAP，暂不需要操作。', 'The automation is still waiting for SAP. No action is required yet.')}</p><p>{t('当前步骤', 'Current step')}: {slowWait.step} · {t('已等待', 'Elapsed wait')}: {Math.round(slowWait.waitSeconds ?? 0)} {t('秒', 'sec')}</p></div>}
         {group && <p>Parma {group.supplier}<br />{group.plant} · Project {group.project}<br />{Array.isArray(group.materials) ? group.materials.join(', ') : ''}</p>}
         {totals && <div className={styles.metrics}><Metric label={t('成功 RFQ', 'Successful RFQs')} value={totals.succeeded ?? 0} /><Metric label={t('跳过', 'Skipped')} value={totals.skipped ?? 0} /><Metric label={t('失败', 'Failed')} value={totals.failed ?? 0} /></div>}
         {attention && <div className={styles.warning}><AlertTriangle size={18} /><strong>{t('需要处理', 'Action required')}</strong>
@@ -189,7 +210,7 @@ export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX
     </aside></div>
     <dialog ref={dialog} className={styles.confirmDialog} onCancel={() => setConfirming(false)} aria-labelledby="rfq-confirm-title">
       <h2 id="rfq-confirm-title">{t('确认开始', 'Ready to Start')}</h2>
-      <p>VCE / Client 100 / {t('正式系统', 'Production')}</p>
+      <p>VCE / {t('正式系统', 'Production')} [949] / Client 100</p>
       <p>{t('RFQ 分组', 'RFQ Groups')}: {preview?.groupCount} · {t('物料', 'Materials')}: {preview?.validRows}</p>
       <p>{t('本次操作将在 SAP 中创建真实 Buyer Receipt 和 RFQ。', 'This operation will create Buyer Receipts and RFQs in SAP Production.')}</p>
       <div className={styles.fileActions}><button className="button" autoFocus onClick={() => setConfirming(false)}>{t('取消', 'Cancel')}</button><button className="button primary" onClick={() => void start()}>{t('确认并开始', 'Confirm and Start')}</button></div>

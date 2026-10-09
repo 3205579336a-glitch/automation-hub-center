@@ -37,6 +37,7 @@ function pageFromHash(): PageId {
 export default function App(): React.JSX.Element {
   const [activePage, setActivePage] = useState<PageId>(pageFromHash)
   const [guidedBusy, setGuidedBusy] = useState(false)
+  const [rfqBusy, setRfqBusy] = useState(false)
   const [interactionState, setInteractionState] = useState<AutomationInteraction['state'] | null>(null)
   const [preferences, setPreferences] = useState<
     Pick<AppSettings, 'language' | 'fontSize' | 'theme'>
@@ -94,10 +95,10 @@ export default function App(): React.JSX.Element {
 
   return (
     <LocalizationProvider language={preferences.language}>
-      <AppShell activePage={activePage} onNavigate={navigate} statusLabel={interactionState === 'WAITING_FOR_USER' ? preferences.language === 'zh-CN' ? '已暂停，等待用户处理' : 'Paused — waiting for user' : interactionState === 'RECOVERING' ? preferences.language === 'zh-CN' ? '正在验证 SAP' : 'Checking SAP' : guidedBusy ? preferences.language === 'zh-CN' ? '正在运行' : 'Running' : automation.statusLabel} isBusy={automation.busy || guidedBusy || interactionState !== null}>
+      <AppShell activePage={activePage} onNavigate={navigate} statusLabel={interactionState === 'WAITING_FOR_USER' ? preferences.language === 'zh-CN' ? '已暂停，等待用户处理' : 'Paused — waiting for user' : interactionState === 'RECOVERING' ? preferences.language === 'zh-CN' ? '正在验证 SAP' : 'Checking SAP' : guidedBusy || rfqBusy || automation.busy ? preferences.language === 'zh-CN' ? '正在运行' : 'Running' : automation.statusLabel} isBusy={automation.busy || guidedBusy || rfqBusy || interactionState !== null}>
           {renderPage()}
           <div hidden={activePage !== 'create-rfq'}>
-            <CreateRfqPage notify={notify} onBack={() => navigate('operations')} />
+            <CreateRfqPage notify={notify} onBack={() => navigate('operations')} onRunningChange={setRfqBusy} />
           </div>
           <div hidden={activePage !== 'me12-lead-time'}><Me12LeadTimePage notify={notify} onBack={() => navigate('operations')} /></div>
           <div hidden={activePage !== 'me01-source-list'}><Me01SourceListPage notify={notify} onBack={() => navigate('operations')} /></div>

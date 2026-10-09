@@ -1,5 +1,5 @@
 import { Bug, FolderOpen, RefreshCw, Search } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   DiagnosticLevel,
   DiagnosticLogEntry,
@@ -7,6 +7,8 @@ import type {
 } from '../../../../shared/diagnostic-types'
 import type { Notify } from '../../types/notifications'
 import styles from './DiagnosticsPanel.module.css'
+import { ClearLogsButton } from '../common/ClearLogsButton'
+import { LogPagination } from '../common/LogPagination'
 
 interface DiagnosticsPanelProps {
   notify: Notify
@@ -23,26 +25,33 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
   const [search, setSearch] = useState('')
   const [level, setLevel] = useState<DiagnosticLevel | 'all'>('all')
   const [loading, setLoading] = useState(true)
+  const [page, setPage] = useState(1)
+  const request = useRef(0)
 
   const loadLogs = useCallback(async () => {
+    const current = ++request.current
     setLoading(true)
     try {
       const logs = await window.sapAutomation.getDiagnosticLogs({
         search,
         levels: level === 'all' ? undefined : [level],
-        limit: 20
+        limit: 20,
+        offset: (page - 1) * 20
       })
+      if (current !== request.current) return
       setResult(logs)
+      if (!logs.entries.length && page > 1) setPage(1)
     } catch (error) {
+      if (current !== request.current) return
       notify({
         kind: 'error',
         title: 'Diagnostics unavailable',
         message: error instanceof Error ? error.message : 'Local logs could not be read.'
       })
     } finally {
-      setLoading(false)
+      if (current === request.current) setLoading(false)
     }
-  }, [level, notify, search])
+  }, [level, notify, search, page])
 
   useEffect(() => {
     void loadLogs()
@@ -75,6 +84,9 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
         </div>
       </div>
 
+      <p className="section-copy">Logs older than 60 days are automatically cleaned while idle. Result Excel files are kept. / 60 天前的日志在空闲时自动清理，结果 Excel 保留。</p>
+      <ClearLogsButton onCleared={async () => { setPage(1); await loadLogs() }} />
+
       <div className={styles.paths}>
         <div><span>Hidden data / 隐藏数据</span><code>{result.dataDirectory || 'Loading…'}</code></div>
         <div><span>Log folder / 日志目录</span><code>{result.logDirectory || 'Loading…'}</code></div>
@@ -85,7 +97,7 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
           <Search size={14} />
           <input
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => { setSearch(event.target.value); setPage(1) }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 void loadLogs()
@@ -98,7 +110,7 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
         <select
           className="select"
           value={level}
-          onChange={(event) => setLevel(normalizeLevel(event.target.value))}
+          onChange={(event) => { setLevel(normalizeLevel(event.target.value)); setPage(1) }}
           aria-label="Diagnostic log level"
         >
           <option value="all">All levels / 全部</option>
@@ -110,7 +122,6 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
           Search / 查询
         </button>
       </div>
-
       <div className={styles.logList}>
         {loading ? (
           <div className={styles.empty}>Loading local logs…</div>
@@ -120,6 +131,7 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
           result.entries.map((entry) => <LogEntryRow entry={entry} key={entry.id} />)
         )}
       </div>
+      <LogPagination page={page} hasMore={result.hasMore ?? false} loading={loading} onPage={setPage} />
       <p className={styles.privacy}>
         Logs show the full Info Record for Key User troubleshooting, but exclude SAP passwords,
         certificate contents, and RFQ form values. 日志为排错显示完整 Info Record，但不记录

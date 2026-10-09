@@ -6,6 +6,10 @@ import type { ApqpConfig, ApqpPreview } from '../../../../shared/apqp-types'
 import type { AutomationOutcome, AutomationState } from '../../../../shared/guided-automation'
 import { outcomeOf } from '../../../../shared/guided-automation'
 import { useLocalization } from '../../i18n/use-localization'
+import { operationCopy } from '../../i18n/operation-copy'
+import { completedUnits, type AutomationId, type TimingProgress } from '../../../../shared/local-intelligence'
+import { useAdaptiveEta } from '../../hooks/use-adaptive-eta'
+import { AdaptiveEta } from './AdaptiveEta'
 import type { Notify } from '../../types/notifications'
 import { AutomationPageLayout, AutomationProgress, AutomationResult, FileUploader, PreviewSummary,
   RunConfirmationModal, TemplateDownloadButton, ValidationSummary, ViewDetailsPanel } from './AutomationPageLayout'
@@ -25,7 +29,7 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
   const t = (en: string, cn: string): string => zh ? cn : en
-  const title = module === 'info-record' ? t('Update Info Record', '更新采购信息记录') : module === 'source-list' ? t('Update Source List', '更新货源清单') : t('APQP Plan Close Dates', 'APQP 计划关闭日期')
+  const { title, description, permissionNotice } = operationCopy(module === 'info-record' ? 'me12-lead-time' : module === 'source-list' ? 'me01-source-list' : 'apqp-plan-closure', language)
   const [file, setFile] = useState('')
   const [downloaded, setDownloaded] = useState('')
   const [business, setBusiness] = useState({ plant: 'C100', org: 'C100', leadTime: '1', category: 'standard', overwrite: false })
@@ -35,6 +39,9 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
   const [technicalError, setTechnicalError] = useState('')
   const [busy, setBusy] = useState(false)
   const [running, setRunning] = useState(false)
+  const automationId: AutomationId = module === 'info-record' ? 'me12-batch' : module === 'source-list' ? 'me01-source-list' : 'apqp-plan-closure'
+  const { eta, unavailable: etaUnavailable } = useAdaptiveEta(automationId, running)
+  const [completed, setCompleted] = useState(0)
   const [confirming, setConfirming] = useState(false)
   const [outcome, setOutcome] = useState<AutomationOutcome | null>(null)
   const [events, setEvents] = useState<{ message: string; current?: number; total?: number }[]>([])
@@ -47,8 +54,12 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
     : { ...apqpDefaults, excelPath: file, plant: business.plant, overwriteExisting: business.overwrite }, [file, business, module])
 
   useEffect(() => {
-    const report = (event: { message: string; current?: number; total?: number }): void => {
-      if (runningRef.current) setEvents(current => [...current.slice(-49), event])
+    const report = (event: { message: string } & TimingProgress): void => {
+      if (runningRef.current) {
+        setEvents(current => [...current.slice(-49), event])
+        const count = completedUnits(automationId, event)
+        if (count !== undefined) setCompleted(current => Math.max(current, count))
+      }
     }
     const unsubscribe = module === 'info-record' ? api.onMe12Progress(report) : module === 'source-list' ? api.onMe01Progress(report) : api.onApqpProgress(report)
     const interaction = api.onAutomationInteraction(request => {
@@ -57,7 +68,7 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
       else if (!request) setState(current => ['WAITING_FOR_USER', 'RECOVERING'].includes(current) ? 'RUNNING' : current)
     })
     return () => { unsubscribe(); interaction() }
-  }, [api, module])
+  }, [api, module, automationId])
   useEffect(() => {
     if (!file || running) return
     let active = true
@@ -121,7 +132,7 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
   const start = async (): Promise<void> => {
     if (!canRun || runInFlight.current) return
     runInFlight.current = true; runningRef.current = true
-    setConfirming(false); setRunning(true); setState('RUNNING'); setEvents([]); setOutcome(null)
+    setConfirming(false); setRunning(true); setState('RUNNING'); setEvents([]); setOutcome(null); setCompleted(0)
     window.dispatchEvent(new CustomEvent('guided-running', { detail: true }))
     try {
       const response = module === 'info-record' ? await api.startMe12Batch({ ...(config as Me12BatchConfig), confirmed: true })
@@ -140,9 +151,8 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
   }
   const cancel = async (): Promise<void> => { if (module === 'info-record') await api.cancelMe12Batch(); else if (module === 'source-list') await api.cancelMe01Batch(); else await api.cancelApqp() }
   const update = (key: keyof typeof business, value: string | boolean): void => { setBusiness(current => ({ ...current, [key]: value })); setState(file ? 'VALIDATING' : 'READY'); setPreview(null) }
-  const description = module === 'apqp' ? t('Download plan close dates to Excel. This task does not change SAP data.', '查询计划关闭日期并写入 Excel，不修改 SAP 数据。')
-    : module === 'info-record' ? t('Update supplier lead times from a completed template.', '上传模板，批量更新供应商交货时间。') : t('Fix the intended supplier for each material in Plant C100.', '在工厂 C100，按物料和供应商代码固定货源。')
   return <AutomationPageLayout title={title} description={description} onBack={onBack}>
+    {permissionNotice && <p className={styles.warning} role="note">{permissionNotice}</p>}
     <div className={styles.body}><section className={`card ${styles.section}`}>
       <h3>{t('1. Prepare your file', '1. 准备文件')}</h3><p>{t('Fill only the input columns. Result columns are completed automatically. Save Excel before upload; Excel may remain open.', '只需填写输入列，结果列自动回写。上传前请保存 Excel；运行时 Excel 可以保持打开。')}</p>
       <div className={styles.actions}><TemplateDownloadButton busy={busy || running} onDownload={() => void download()} /><FileUploader busy={busy || running} onUpload={() => void upload()} /></div>
@@ -161,12 +171,14 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
         {invalid > 0 && <p className={styles.warning}>{t('Some rows are incomplete. Fill both material and supplier, then upload again.', '有不完整行，请补全物料和供应商后重新上传。')}</p>}
         <p>{t('Sample of your business data', '业务数据抽样')}</p><table className={styles.table}><thead><tr><th>{t('Record / Material', '记录 / 物料')}</th><th>{t('Supplier', '供应商')}</th></tr></thead><tbody>{preview.sample.map((row, i) => <tr key={i}><td>{'infoRecord' in row ? row.infoRecord : row.material}</td><td>{'parma' in row ? row.parma : 'vendor' in row ? row.vendor : '—'}</td></tr>)}</tbody></table><ViewDetailsPanel><pre>{JSON.stringify(preview, null, 2)}</pre></ViewDetailsPanel>
       </>}
-      {running && <AutomationProgress state={state} current={[...events].reverse().find(event => event.current !== undefined)?.current ?? 0} total={records} />}
+      {running && <><AutomationProgress state={state} current={completed} total={records} />
+        <AdaptiveEta eta={eta} unavailable={etaUnavailable} automationId={automationId} total={records}
+          waiting={state === 'WAITING_FOR_USER'} recovering={state === 'RECOVERING'} /></>}
       <div className={styles.actions}>{running ? <button className="button" onClick={() => void cancel()}><Square size={14} />{t('Stop safely', '安全停止')}</button>
         : <button className="button primary" disabled={!canRun} onClick={() => { if (module === 'apqp') void start(); else { setConfirming(true); notify({ kind: 'warning', title: t('Ready to update', '准备更新'), message: t('Review the batch confirmation.', '请核对本次批量修改。') }) } }}><Play size={14} />{module === 'apqp' ? t('Start query', '开始查询') : t('Start Automation', '开始自动化')}</button>}</div>
       {running && <ViewDetailsPanel><pre>{events.map(event => event.message).join('\n')}</pre></ViewDetailsPanel>}
     </section></div>
     {outcome && <AutomationResult outcome={outcome} onOpen={() => void openResult(outcome.resultPath || '')} onAnother={() => { setFile(''); setPreview(null); setOutcome(null); setEvents([]); setError(''); setState('READY') }} />}
-    <RunConfirmationModal open={confirming} title={t('Ready to update', '准备更新')} description={t('This batch will update purchasing data in SAP. Completed changes will not be rolled back when stopped.', '本次将批量修改 SAP 采购数据。停止任务不会撤销已保存的修改。')} metrics={metrics} onCancel={() => setConfirming(false)} onStart={() => void start()} />
+    <RunConfirmationModal open={confirming} title={t('Ready to update', '准备更新')} description={[t('This batch will update purchasing data in SAP. Completed changes will not be rolled back when stopped.', '本次将批量修改 SAP 采购数据。停止任务不会撤销已保存的修改。'), permissionNotice].filter(Boolean).join(' ')} metrics={metrics} onCancel={() => setConfirming(false)} onStart={() => void start()} />
   </AutomationPageLayout>
 }

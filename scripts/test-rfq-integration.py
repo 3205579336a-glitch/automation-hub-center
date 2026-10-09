@@ -65,9 +65,10 @@ class RfqTests(unittest.TestCase):
         # Exclude startup/main, ExcelStore and three authorized checkbox/Qty
         # edits (No clears, Yes preserves, optional blank Qty is not written).
         tree = ast.parse((ROOT/'resources/rpa/rfq_engine.py').read_text(encoding='utf-8-sig').replace('v31', 'v32'))
-        # Authorized query reset fix: exclude only these SapSession methods,
-        # keeping every other SAP/session business method baseline-protected.
-        query_methods = {'set_material_multiple_selection', '_execute_npl_query', '_replace_material_multiple_selection'}
+        # Authorized query reset and duplicate-login fixes only. The digest was
+        # computed from the original baseline with these methods excluded;
+        # every other SAP/session business method stays baseline-protected.
+        query_methods = {'set_material_multiple_selection', '_execute_npl_query', '_replace_material_multiple_selection', '_get_or_open_target_session'}
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == 'SapSession':
                 node.body = [method for method in node.body
@@ -76,7 +77,7 @@ class RfqTests(unittest.TestCase):
                        if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name not in {'main', 'standalone_main', 'ExcelStore', 'prepare_prod_direct_rfq_rows', 'fill_rfq_grid_rows', 'fill_buyer_receipt_rows'}]
         self.assertEqual(len(definitions), 68)
         self.assertEqual(hashlib.sha256('\n'.join(definitions).encode()).hexdigest(),
-                         'e86af6b0646d42af572f74da55a1b0330cf101212f9377ad78218f20c295faa7')
+                         '2b184aa9d8acd716e36225078e4e3517661aae19fdd92d2971d897b730742dba')
 
     def test_environment_guard_rejects_wrong_system_client_or_confirmation(self):
         session = engine.SapSession.__new__(engine.SapSession)
@@ -85,11 +86,139 @@ class RfqTests(unittest.TestCase):
         session.system_name, session.client, session.user = 'VCE', '100', 'TEST_ONLY'
         with patch.object(engine, 'ALLOW_PRODUCTION_WRITE', True):
             session._validate_environment()
-            for attribute, invalid in [('system_name', 'CEQ'), ('client', '200'), ('connection_target_verified', False)]:
+            for attribute, invalid in [('system_name', 'CEQ'), ('client', '949'), ('client', '200'), ('connection_target_verified', False)]:
                 with patch.object(session, attribute, invalid), self.assertRaises(RuntimeError):
                     session._validate_environment()
         with patch.object(engine, 'ALLOW_PRODUCTION_WRITE', False), self.assertRaises(RuntimeError):
             session._validate_environment()
+
+    def test_hub_client_defaults_and_qa_client_preserved(self):
+        from rfq_defaults import DEFAULTS
+        self.assertEqual(DEFAULTS['EXPECTED_SAP_CLIENT'], '100')
+        self.assertIn('[949]', DEFAULTS['SAP_PROD_CONNECTION_NAME'])
+        for target, system, client in [('PROD', 'VCE', '100'), ('QA', 'CEQ', '100')]:
+            with patch.dict(os.environ), patch.object(sys, 'argv', ['rfq', '--hub', '--target-env', target]):
+                initialize(Path(self.temp.name) / '.env')
+                self.assertEqual(os.environ['EXPECTED_SAP_SYSTEM'], system)
+                self.assertEqual(os.environ['EXPECTED_SAP_CLIENT'], client)
+
+    def sap_candidate(self, *, client='100', system='VCE', user='TEST_ONLY', verified=True, busy=False, popup=False):
+        session = MagicMock()
+        session.Busy = busy
+        session.FindById.return_value = object() if popup else None
+        return session, dict(system=system, client=client, user=user, target_verified=verified,
+                            transaction='SESSION_MANAGER', connection_index=0, session_index=0,
+                            connection_description='VCE - One Digital Core [949]' if verified else 'Other entry')
+
+    def test_signed_in_client_100_reused_without_new_login(self):
+        candidate = self.sap_candidate()
+        candidate[0].Info.SystemName = 'VCE'
+        candidate[0].Info.Client = '100'
+        candidate[0].Info.User = 'TEST_ONLY'
+        candidate[0].Info.Transaction = 'SESSION_MANAGER'
+        selector = engine.SapSession.__new__(engine.SapSession)
+        application = MagicMock()
+        application.Children.Count = 1
+        connection = application.Children.return_value
+        connection.Description = 'VCE - One Digital Core [949]'
+        connection.Children.Count = 1
+        connection.Children.return_value = candidate[0]
+        # Exercise the real connection enumeration/metadata read, not just a
+        # fabricated candidate list: entry [949] and Client 100 must be distinct.
+        with patch.object(selector, '_open_target_connection') as opened:
+            self.assertEqual(selector._get_or_open_target_session(application), candidate)
+            opened.assert_not_called()
+            application.OpenConnection.assert_not_called()
+        candidate[0].FindById.assert_called_once_with('wnd[1]', False)
+
+    def test_existing_target_mismatch_or_not_ready_never_relogs(self):
+        cases = [dict(client='949'), dict(system='CEQ'), dict(user=''), dict(busy=True), dict(popup=True),
+                 dict(verified=False)]
+        selector = engine.SapSession.__new__(engine.SapSession)
+        for values in cases:
+            with self.subTest(**values):
+                application = MagicMock()
+                candidate = self.sap_candidate(**values)
+                with patch.object(selector, '_collect_sessions', return_value=[candidate]), \
+                     patch.object(selector, '_open_target_connection') as opened, \
+                     self.assertRaisesRegex(RuntimeError, '为避免重复登录，未打开新连接'):
+                    selector._get_or_open_target_session(application)
+                opened.assert_not_called()
+                application.OpenConnection.assert_not_called()
+
+    def test_stale_expected_client_does_not_trigger_duplicate_login(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        application = MagicMock()
+        with patch.object(engine, 'EXPECTED_SAP_CLIENT', '949'), \
+             patch.object(selector, '_collect_sessions', return_value=[self.sap_candidate()]), \
+             patch.object(selector, '_open_target_connection') as opened, \
+             self.assertRaisesRegex(RuntimeError, '期望 System=VCE, Client=949.*Client=100'):
+            selector._get_or_open_target_session(application)
+        opened.assert_not_called()
+        application.OpenConnection.assert_not_called()
+
+    def test_wrong_user_does_not_trigger_new_login(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        application = MagicMock()
+        with patch.object(engine, 'EXPECTED_SAP_USER', 'OTHER_USER'), \
+             patch.object(selector, '_collect_sessions', return_value=[self.sap_candidate()]), \
+             patch.object(selector, '_open_target_connection') as opened, self.assertRaises(RuntimeError):
+            selector._get_or_open_target_session(application)
+        opened.assert_not_called()
+
+    def test_busy_target_does_not_hide_another_ready_target_session(self):
+        candidates = [self.sap_candidate(busy=True), self.sap_candidate()]
+        selector = engine.SapSession.__new__(engine.SapSession)
+        with patch.object(selector, '_collect_sessions', return_value=candidates), \
+             patch.object(selector, '_open_target_connection') as opened:
+            self.assertEqual(selector._get_or_open_target_session(MagicMock()), candidates[1])
+        opened.assert_not_called()
+
+    def test_target_connection_without_readable_sessions_never_reopens(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        application = MagicMock()
+        application.Children.Count = 1
+        application.Children.return_value.Description = 'VCE - One Digital Core [949]'
+        with patch.object(selector, '_collect_sessions', return_value=[]), \
+             patch.object(selector, '_open_target_connection') as opened, \
+             self.assertRaisesRegex(RuntimeError, '会话尚未就绪'):
+            selector._get_or_open_target_session(application)
+        opened.assert_not_called()
+        application.OpenConnection.assert_not_called()
+
+    def test_unreadable_connection_inventory_fails_closed(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        for broken_children in (None, MagicMock(Count=1, side_effect=RuntimeError('COM unavailable'))):
+            application = MagicMock()
+            application.Children = broken_children
+            with patch.object(selector, '_collect_sessions', return_value=[]), \
+                 patch.object(selector, '_open_target_connection') as opened, \
+                 self.assertRaisesRegex(RuntimeError, '已停止以避免重复登录'):
+                selector._get_or_open_target_session(application)
+            opened.assert_not_called()
+
+    def test_absent_target_opens_once_and_then_reuses(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        ready = self.sap_candidate()
+        for existing_qa in (False, True):
+            application = MagicMock()
+            application.Children.Count = 1 if existing_qa else 0
+            application.Children.return_value.Description = 'CEQ - One Digital Core - QA [321]'
+            before = [self.sap_candidate(system='CEQ', verified=False)] if existing_qa else []
+            with patch.object(selector, '_collect_sessions', side_effect=[before, [ready]]), \
+                 patch.object(selector, '_open_target_connection') as opened, patch.object(engine.time, 'sleep'):
+                self.assertEqual(selector._get_or_open_target_session(application), ready)
+            opened.assert_called_once_with(application)
+
+    def test_new_connection_not_ready_is_not_opened_again(self):
+        selector = engine.SapSession.__new__(engine.SapSession)
+        application = MagicMock()
+        application.Children.Count = 0
+        with patch.object(selector, '_collect_sessions', side_effect=[[], [self.sap_candidate(user='', popup=True)]]), \
+             patch.object(selector, '_open_target_connection') as opened, patch.object(engine.time, 'sleep'), \
+             self.assertRaises(RuntimeError):
+            selector._get_or_open_target_session(application)
+        opened.assert_called_once_with(application)
 
     def test_non_green_buyer_receipt_is_not_accepted(self):
         self.book()

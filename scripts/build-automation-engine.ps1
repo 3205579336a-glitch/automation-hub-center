@@ -29,6 +29,7 @@ if (-not $SkipDependencyInstall) {
   --paths $sourceRoot `
   --hidden-import rfq_engine `
   --hidden-import rfq_runtime `
+  --hidden-import rfq_runtime_improvements `
   --hidden-import rfq_interaction `
   --hidden-import rfq_defaults `
   --hidden-import me01_source_list `

@@ -11,6 +11,7 @@ import { registerDiagnosticHandlers } from './ipc/diagnostic-handlers'
 import { registerSettingsHandlers } from './ipc/settings-handlers'
 import { registerMe12Handlers } from './ipc/me12-handlers'
 import { registerHistoryHandlers } from './ipc/history-handlers'
+import { RunDiagnosticCleanup } from './services/run-diagnostic-cleanup'
 import { registerRfqHandlers } from './ipc/rfq-handlers'
 import { registerMe01Handlers } from './ipc/me01-handlers'
 import { DiagnosticLogger } from './services/diagnostic-logger'
@@ -18,6 +19,8 @@ import { LocalStoragePaths } from './services/local-storage-paths'
 import { SettingsService } from './services/settings-service'
 import { Me12ExcelService } from './services/me12-excel-service'
 import { ExecutionHistoryService } from './services/execution-history-service'
+import { LocalIntelligenceService } from './services/local-intelligence-service'
+import { IPC_CHANNELS } from '../shared/ipc-channels'
 import { RfqExcelService } from './services/rfq-excel-service'
 import { Me01ExcelService } from './services/me01-excel-service'
 import { GuidedAutomationService } from './services/guided-automation-service'
@@ -67,7 +70,14 @@ app.whenReady().then(async () => {
   const storagePaths = new LocalStoragePaths(app.getPath('userData'))
   await storagePaths.initialize()
   const logger = new DiagnosticLogger(storagePaths.logsDirectory)
-  const history = new ExecutionHistoryService(storagePaths.executionHistoryPath, logger)
+  const runsDirectory = join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'SAP Automation Toolbox', 'runs')
+  const diagnosticCleanup = new RunDiagnosticCleanup(runsDirectory, join(storagePaths.dataDirectory, 'interactions'))
+  const history = new ExecutionHistoryService(storagePaths.executionHistoryPath, logger, (entry, protectedPaths) => diagnosticCleanup.remove(entry, protectedPaths))
+  const intelligence = new LocalIntelligenceService(history, eta => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      try { if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.automationEta, eta) } catch { /* Optional UI hint. */ }
+    }
+  })
   const settingsService = new SettingsService(
     storagePaths,
     app.getPath('downloads'),
@@ -104,7 +114,8 @@ app.whenReady().then(async () => {
     script: join(resourceRoot, 'rpa', 'me01_source_list.py'),
     preferScript: !app.isPackaged
   })
-  const guided = new GuidedAutomationService(join(storagePaths.dataDirectory, 'interactions'), () => rfqRunner.isRunning())
+  const guided = new GuidedAutomationService(join(storagePaths.dataDirectory, 'interactions'), () => rfqRunner.isRunning() || history.isCleaning())
+  guided.onInteraction(request => intelligence.interaction(request))
   registerSettingsHandlers(settingsService, logger)
   registerAutomationHandlers(browserManager, logger, history)
   registerDiagnosticHandlers(logger, storagePaths)
@@ -115,7 +126,8 @@ app.whenReady().then(async () => {
     history,
     join(resourceRoot, 'templates', 'ME12_Supplier_Lead_Time_Template.xlsx'),
     settingsService,
-    guided
+    guided,
+    intelligence
   )
   registerRfqHandlers(
     rfqExcelService,
@@ -124,7 +136,8 @@ app.whenReady().then(async () => {
     history,
     join(resourceRoot, 'templates', 'Create_RFQ_Template.xlsx'),
     settingsService,
-    guided
+    guided,
+    intelligence
   )
   registerMe01Handlers(
     me01ExcelService,
@@ -133,7 +146,8 @@ app.whenReady().then(async () => {
     history,
     join(resourceRoot, 'templates', 'ME01_Source_List_Template.xlsx'),
     settingsService,
-    guided
+    guided,
+    intelligence
   )
   const apqpRunner = new ApqpRunner({
     executable: sharedEngine,
@@ -141,8 +155,18 @@ app.whenReady().then(async () => {
     script: join(resourceRoot, 'rpa', 'apqp_plan_closure.py'),
     preferScript: !app.isPackaged
   })
-  registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'), guided)
-  registerHistoryHandlers(history)
+  registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'), guided, intelligence)
+  registerHistoryHandlers(history, intelligence, () => guided.isRunning() || rfqRunner.isRunning())
+  // Run locally at startup and daily while idle; no external scheduler needed.
+  const pruneOldLogs = async (): Promise<void> => {
+    if (guided.isRunning() || rfqRunner.isRunning() || history.isCleaning()) return
+    try { await history.clear(Date.now() - 60 * 24 * 60 * 60 * 1000) }
+    catch (error) { console.warn('Automatic log retention skipped; existing data preserved:', error) }
+  }
+  await pruneOldLogs()
+  const retentionTimer = setInterval(() => { void pruneOldLogs() }, 24 * 60 * 60 * 1000)
+  retentionTimer.unref()
+  app.once('will-quit', () => clearInterval(retentionTimer))
   await logger.info({
     category: 'application',
     event: 'application.started',

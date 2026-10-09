@@ -1,4 +1,6 @@
 export const IPC_CHANNELS = {
+  getLocalIntelligence: 'intelligence:get',
+  automationEta: 'intelligence:eta',
   downloadApqpTemplate: 'apqp:download-template',
   selectApqpExcel: 'apqp:select-excel',
   previewApqp: 'apqp:preview',
@@ -12,6 +14,7 @@ export const IPC_CHANNELS = {
   getDiagnosticLogs: 'diagnostics:get-logs',
   openLogFolder: 'diagnostics:open-log-folder',
   getExecutionHistory: 'history:get',
+  deleteExecutionHistory: 'history:delete',
   selectMe12ExcelFile: 'me12:select-excel-file',
   downloadMe12Template: 'me12:download-template',
   previewMe12Batch: 'me12:preview',

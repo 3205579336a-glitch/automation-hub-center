@@ -46,13 +46,23 @@ Settings and structured logs are in the hidden per-user .local-data folder. Real
 
 All result-open requests are limited to files issued by the current automation session.
 
+## Local smart ordering and remaining-time estimates
+
+Home shortcuts and Operations now prioritize tasks from this device's last 60 days of execution history. A page takes one ranking snapshot on entry; cards do not rearrange while it is open. New devices and unreadable history retain the original business order.
+
+Each automation learns its own active timings from existing progress events. The remaining-time panel combines bounded historical EWMA with the current batch speed and actual worker count. A new device shows a built-in estimate marked **Learning**. Human-action and verification pauses show a waiting/checking message instead of a countdown and are excluded from learning. Cancelled/crashed runs are not clean samples; safely completed units from failed runs can still be used.
+
+Everything stays in the existing local `execution-history.json`. At most 100 timing summaries per function are retained, without pruning normal history for ETA purposes. There are no analytics services, extra dependencies or personalization settings. Ranking/ETA errors never authorize or stop a SAP operation. See [implementation and test handoff](docs/LOCAL_INTELLIGENCE.md).
+
 ## Create RFQ validation and launch
 
-Open **Operations → Create RFQ**: download the template, fill and save Excel, upload, review validation and Parma groups, then confirm Production VCE / Client 100 once. No `.env`, Python path, SAP password or technical settings are required. The source workbook is not modified; a local working copy receives the supplied engine's status columns and RFQ numbers.
+Open **Operations → Create RFQ**: download the template, fill and save Excel, upload, review validation and Parma groups, then confirm Production VCE [949] / Client 100 once. `[949]` is the SAP Logon entry code, not the client. Existing signed-in, ready target sessions are reused; an existing mismatched or not-ready target connection stops the run instead of creating another login. No `.env`, Python path, SAP password or technical settings are required. The source workbook is not modified; a local working copy receives the supplied engine's status columns and RFQ numbers.
 
 The supplied native SAP GUI RFQ v32 engine performs NPL → Buyer Receipt → RFQ in `ZMFM050072`. Plant + Project + Parma grouping (up to 50 materials), green Buyer Receipt verification, existing-RFQ skips, PPAP handling, recovery, number extraction and workbook saving are retained. Validation never opens SAP. Modified inputs require a new preview. Exact normalized business duplicates are automatically skipped; rows with different input values retain validation errors showing the differences. The original upload remains unchanged.
 
 User-fixable SAP issues pause execution with a shared application modal, attention sound and taskbar flashing. Continue verifies the original SAP session and current checkpoint before resuming; failed verification stays paused. Supported boundaries are the current PROD RFQ staging screen and a manually saved-green Buyer Receipt. Unknown or uncertain RFQ creation outcomes offer Stop only. Stop while paused saves current results and cancels unfinished groups immediately; normal running Stop completes the current group before stopping. No created SAP object is rolled back.
+
+RFQ runtime hooks check `ZCOMCODE` on freshly matched NPL rows using project field `ZPSPID` before creating a Buyer Receipt. Empty Commodity pauses for manual maintenance; technical read failures have a separate message and never imply missing master data. An exact NPL re-query is required before resuming. Ordinary slow SAP responses show a waiting status; a hard limit pauses instead of replaying Save/Create. All four task pages show Running while active, including across navigation, with paused/checking states taking precedence. Execution history (25/page) and diagnostics (20/page) support pagination and confirmed Clear All, not individual delete buttons. Completed history and identified logs older than 60 days are cleaned at startup and daily while idle; source/result workbooks, backups and unfinished records are protected. See [runtime improvements and acceptance limits](docs/RFQ_RUNTIME_IMPROVEMENTS.md).
 
 See [RFQ integration handoff](docs/RFQ_V32_INTEGRATION.md) for defaults, file inventory, offline tests, runtime folders and manual release checks. Production has **not** been tested by this implementation. Packaging is paused at the owner's request.
 
@@ -75,6 +85,9 @@ npm run test:rfq-fields
 npm run test:rfq-recovery
 npm run test:rfq-material-reset
 npm run test:rfq-runner
+npm run test:rfq-runtime
+npm run test:history-deletion
+npm run smoke:rfq-runtime
 npm run test:apqp
 py -3 scripts/test-me01-source-list.py
 ```

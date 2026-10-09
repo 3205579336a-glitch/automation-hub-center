@@ -62,8 +62,12 @@ export type RfqProgressStage =
 export interface RfqBatchProgress {
   automation?: string
   requestId?: string
-  state?: 'WAITING_FOR_USER' | 'RECOVERING' | 'RUNNING' | 'CANCELLED'
-  allowedActions?: ('continue' | 'stop')[]
+  state?: 'WAITING_FOR_USER' | 'RECOVERING' | 'RUNNING' | 'CANCELLED' | 'SAP_SLOW'
+  allowedActions?: ('continue' | 'stop' | 'open-fix-session')[]
+  waitSeconds?: number
+  profile?: Record<string, { seconds: number; calls: number }>
+  instructions?: string
+  instructionsZh?: string
   recoveryPoint?: string
   issueSummary?: string
   issueSummaryZh?: string
@@ -134,6 +138,7 @@ export type RfqBatchResult =
       resultPath?: string
       diagnosticsPath?: string
       rfqNumbers?: string[]
+      logPath?: string
     }
 
 export interface RfqCancelResult {

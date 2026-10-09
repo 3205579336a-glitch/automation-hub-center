@@ -22,6 +22,7 @@ DEFAULTS = {
     "SAP_CONNECTION_INDEX": "0",
     "SAP_SESSION_INDEX": "0",
     "EXPECTED_SAP_SYSTEM": "VCE",
+    # [949] identifies the SAP Logon entry; its actual SAP client is 100.
     "EXPECTED_SAP_CLIENT": "100",
     "EXPECTED_SAP_USER": "",
     "SAP_ENVIRONMENT_GUARD": "true",

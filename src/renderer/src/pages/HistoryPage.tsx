@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronUp, Eye, RefreshCw, Search } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   ExecutionHistoryEntry,
   ExecutionHistoryStatus
@@ -8,6 +8,10 @@ import { StatusBadge } from '../components/common/StatusBadge'
 import { useLocalization } from '../i18n/use-localization'
 import styles from './HistoryPage.module.css'
 import { operationName } from './operation-name'
+import { ClearLogsButton } from '../components/common/ClearLogsButton'
+import { LogPagination } from '../components/common/LogPagination'
+
+const PAGE_SIZE = 25
 
 export function HistoryPage(): React.JSX.Element {
   const { language, t } = useLocalization()
@@ -16,22 +20,32 @@ export function HistoryPage(): React.JSX.Element {
   const [status, setStatus] = useState<ExecutionHistoryStatus | 'all'>('all')
   const [loading, setLoading] = useState(true)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [page, setPage] = useState(1)
+  const [total, setTotal] = useState(0)
+  const request = useRef(0)
 
   const loadHistory = useCallback(async () => {
+    const current = ++request.current
     setLoading(true)
     try {
       const result = await window.sapAutomation.getExecutionHistory({
         search,
         statuses: status === 'all' ? undefined : [status],
-        limit: 200
+        limit: PAGE_SIZE,
+        offset: (page - 1) * PAGE_SIZE,
+        operations: ['create-rfq', 'me12-batch', 'me01-source-list', 'apqp-plan-closure']
       })
-      setEntries(result.entries.filter(entry => entry.operation !== 'me52n-project-ref' && entry.operation !== 'open-sap'))
+      if (current !== request.current) return
+      setEntries(result.entries)
+      setTotal(result.total ?? result.entries.length)
+      const lastPage = Math.max(1, Math.ceil((result.total ?? result.entries.length) / PAGE_SIZE))
+      if (page > lastPage) setPage(lastPage)
     } catch {
-      setEntries([])
+      if (current === request.current) { setEntries([]); setTotal(0) }
     } finally {
-      setLoading(false)
+      if (current === request.current) setLoading(false)
     }
-  }, [search, status])
+  }, [search, status, page])
 
   useEffect(() => {
     void loadHistory()
@@ -43,19 +57,20 @@ export function HistoryPage(): React.JSX.Element {
       <div className="page-heading">
         <div>
           <h2>{t('executionHistory')}</h2>
-          <p>{zh ? '来自本机隐藏数据目录的真实自动化执行记录。' : 'Real automation runs stored in the hidden local data directory.'}</p>
+          <p>{zh ? '本机真实执行记录，每页 25 条；60 天前的已结束历史及日志自动清理，结果文件保留。' : 'Real local runs, 25 per page. Completed history/logs older than 60 days are automatically cleaned; result files are kept.'}</p>
         </div>
         <button className="button" onClick={() => void loadHistory()} disabled={loading}>
           <RefreshCw size={14} /> {zh ? '刷新' : 'Refresh'}
         </button>
       </div>
+      <ClearLogsButton onCleared={async () => { setPage(1); setExpanded(null); await loadHistory() }} />
       <section className={`card ${styles.container}`}>
         <div className={styles.toolbar}>
           <div className={styles.search}>
             <Search size={14} />
             <input
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => { setSearch(event.target.value); setPage(1); setExpanded(null) }}
               placeholder={zh ? '搜索操作、结果…' : 'Search operation, result…'}
               aria-label="Search operations"
             />
@@ -63,7 +78,7 @@ export function HistoryPage(): React.JSX.Element {
           <select
             className={`select ${styles.statusFilter}`}
             value={status}
-            onChange={(event) => setStatus(normalizeStatus(event.target.value))}
+            onChange={(event) => { setStatus(normalizeStatus(event.target.value)); setPage(1); setExpanded(null) }}
             aria-label="History status"
           >
             <option value="all">{zh ? '全部状态' : 'All statuses'}</option>
@@ -104,9 +119,11 @@ export function HistoryPage(): React.JSX.Element {
           </table>
         </div>
         <div className={styles.footer}>
-          <span>{zh ? `显示 ${entries.length} 条本地记录` : `Showing ${entries.length} local record(s)`}</span>
+          <span>{zh ? `共 ${total} 条，本页 ${entries.length} 条` : `${total} total, ${entries.length} on this page`}</span>
           <span>{zh ? '数据来源：.local-data/data/execution-history.json' : 'Source: .local-data/data/execution-history.json'}</span>
         </div>
+        <LogPagination page={page} totalPages={Math.ceil(total / PAGE_SIZE)} hasMore={page * PAGE_SIZE < total} loading={loading}
+          onPage={next => { setPage(next); setExpanded(null) }} />
       </section>
     </div>
   )

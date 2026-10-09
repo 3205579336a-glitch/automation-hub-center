@@ -38,6 +38,7 @@ test('Electron RFQ runner (mock child only)', async (t) => {
       assert.deepEqual(await readFile(input), before)
       assert.equal(runner.canOpen(result.resultPath), true)
       assert.equal(runner.canOpen(result.diagnosticsPath), true)
+      assert.match(await readFile(result.logPath, 'utf8'), /fixture diagnostic/)
       assert.equal(runner.canOpen(input), false)
       assert.match(await readFile(join(result.diagnosticsPath, 'engine.log'), 'utf8'), /离线模拟/)
       assert.equal(events.filter((e) => e.type === 'RFQ_CREATED').length, 2)
@@ -76,6 +77,7 @@ test('Electron RFQ runner (mock child only)', async (t) => {
       const result = await running
       assert.equal(result.errorCode, 'CANCELLED')
       assert.deepEqual(result.rfqNumbers, ['MOCK-1'])
+      assert.match(await readFile(result.logPath, 'utf8'), /fixture diagnostic/)
       assert.equal(runner.canOpen(result.resultPath), true)
       assert.equal(await runner.cancel(), false)
     })
@@ -112,12 +114,36 @@ test('Electron RFQ runner (mock child only)', async (t) => {
         const current = runner.getInteraction()
         tasks.push((async () => {
           assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'continue' }), false)
+          assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'open-fix-session' }), false)
           assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'stop' }), true)
         })())
       })
       await Promise.all(tasks)
       assert.equal(result.errorCode, 'CANCELLED')
       assert.deepEqual(result.rfqNumbers, ['KEEP-1'])
+    })
+    await t.test('Commodity fix-session response stays paused; failed opening still permits verified recheck', async () => {
+      const { runner, config } = await setup('commodity')
+      const replies = []
+      const result = await runner.run(config, event => {
+        const current = runner.getInteraction()
+        if (event.type === 'ACTION_REQUIRED') replies.push((async () => {
+          assert(current.allowedActions.includes('open-fix-session'))
+          assert.equal(await runner.respond({ runId: 'stale', requestId: current.requestId, action: 'open-fix-session' }), false)
+          assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'open-fix-session' }), true)
+          assert.equal(runner.getInteraction().state, 'WAITING_FOR_USER')
+        })())
+        else if (event.type === 'FIX_SESSION_RESULT') replies.push((async () => {
+          assert.equal(current.state, 'WAITING_FOR_USER')
+          assert.match(current.message, /Open Fix Session unavailable/)
+          assert.equal(current.allowedActions.includes('open-fix-session'), false)
+          assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'open-fix-session' }), false)
+          assert.equal(await runner.respond({ runId: current.runId, requestId: current.requestId, action: 'continue' }), true)
+        })())
+      })
+      await Promise.all(replies)
+      assert.equal(result.success, true)
+      assert.equal(runner.getInteraction(), null)
     })
     await t.test('notification callback failure cannot release or fail the paused engine', async () => {
       const { runner, config } = await setup('attention-failure')

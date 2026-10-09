@@ -78,12 +78,17 @@ export class RfqNativeRunner {
         if (event.type === 'ACTION_REQUIRED' && event.state === 'WAITING_FOR_USER' && event.runId === runId
             && typeof event.requestId === 'string' && /^[a-zA-Z0-9-]{1,100}$/.test(event.requestId)) {
           this.interaction = { automation: 'RFQ', runId, requestId: event.requestId, state: 'WAITING_FOR_USER',
-            allowedActions: event.allowedActions?.includes('continue') ? ['continue', 'stop'] : ['stop'],
+            allowedActions: event.allowedActions?.includes('continue') ? ['continue', 'stop', ...(event.allowedActions.includes('open-fix-session') && event.recoveryPoint === 'COMMODITY_MISSING' ? ['open-fix-session' as const] : [])] : ['stop'],
             message: event.message || 'SAP correction required.', step: event.step,
             issueSummary: event.issueSummary, issueSummaryZh: event.issueSummaryZh,
-            recoveryPoint: event.recoveryPoint, groupKey: event.groupKey, materials: event.materials, rows: event.rows }
+            recoveryPoint: event.recoveryPoint, groupKey: event.groupKey, materials: event.materials, rows: event.rows,
+            instructions: event.instructions, instructionsZh: event.instructionsZh }
           this.responding = false
           this.allowedPaths.add(resolve(diagnosticsPath))
+        } else if (event.type === 'FIX_SESSION_RESULT' && this.interaction && this.interaction.requestId === event.requestId && event.runId === runId) {
+          this.interaction = { ...this.interaction, message: event.message || this.interaction.message,
+            allowedActions: this.interaction.allowedActions.filter(action => action !== 'open-fix-session') }
+          this.responding = false
         } else if (event.type === 'RECOVERING' && this.interaction) {
           this.interaction = { ...this.interaction, state: 'RECOVERING' }
         } else if (['INTERACTION_RESOLVED', 'RUN_CANCELLED', 'RUN_FAILED', 'RUN_COMPLETED'].includes(event.type)) {
@@ -107,7 +112,7 @@ export class RfqNativeRunner {
       if (logPath && this.isInsideRun(logPath) && await exists(logPath)) await copyFile(logPath, join(diagnosticsPath, basename(logPath)))
       if (!completed) return { success: false, errorCode: terminal?.type === 'RUN_CANCELLED' ? 'CANCELLED' : 'EXECUTION_FAILED',
         message: terminal?.message || output.error || 'The engine stopped without a completion event. Review local logs before restarting.',
-        runId, resultPath, diagnosticsPath, rfqNumbers: terminal?.rfqNumbers,
+        runId, resultPath, logPath, diagnosticsPath, rfqNumbers: terminal?.rfqNumbers,
         processed: terminal?.processed, total: terminal?.total, succeeded: terminal?.succeeded,
         skipped: terminal?.skipped, failed: terminal?.failed }
       return { success: true, message: terminal.message || 'RFQ run completed.', runId,
@@ -151,7 +156,7 @@ export class RfqNativeRunner {
       const target = join(this.controlDirectory, current.requestId + '.json')
       await writeFile(target + '.tmp', JSON.stringify(input), 'utf8')
       await rename(target + '.tmp', target)
-      if (this.interaction?.requestId === current.requestId) this.interaction.state = 'RECOVERING'
+      if (input.action === 'continue' && this.interaction?.requestId === current.requestId) this.interaction.state = 'RECOVERING'
       return true
     } catch (error) {
       this.responding = false

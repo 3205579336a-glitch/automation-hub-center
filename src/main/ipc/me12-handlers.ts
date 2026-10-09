@@ -13,6 +13,7 @@ import type { Me12BatchRunner } from '../automation/me12-batch-runner'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import type { Me12ExcelService } from '../services/me12-excel-service'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
+import type { LocalIntelligenceService } from '../services/local-intelligence-service'
 import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
 import type { GuidedAutomationService } from '../services/guided-automation-service'
@@ -25,7 +26,8 @@ export function registerMe12Handlers(
   history: ExecutionHistoryService,
   templatePath: string,
   settingsService: SettingsService,
-  guided: GuidedAutomationService
+  guided: GuidedAutomationService,
+  intelligence?: LocalIntelligenceService
 ): void {
   ipcMain.handle(
     IPC_CHANNELS.downloadMe12Template,
@@ -146,7 +148,9 @@ export function registerMe12Handlers(
           message: 'The ME12 batch settings are invalid.'
         }
       }
+      let timingId: string | undefined
       const reportProgress = (progress: Me12BatchProgress): void => {
+        if (timingId) intelligence?.observe(timingId, progress)
         if (!event.sender.isDestroyed()) {
           event.sender.send(IPC_CHANNELS.me12Progress, progress)
         }
@@ -154,15 +158,9 @@ export function registerMe12Handlers(
       let runId: string
       try { runId = guided.begin() } catch (error) { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: getErrorMessage(error) } }
       try {
-      await logger.info({
-        category: 'automation',
-        event: 'me12.batch.started',
-        message: `ME12 ${input.infoCategory} batch started for Plant ${input.targetPlant} in ${input.dryRun ? 'dry-run' : 'live'} mode.`,
-        tcode: 'ME12',
-        details: { maxItems: input.maxItems, saveEvery: input.saveEvery, infoCategory: input.infoCategory }
-      })
       const historyEntry = await history.start({
         operation: 'me12-batch',
+        diagnosticRunId: runId,
         label: input.dryRun
           ? 'ME12 Supplier Lead Time — Dry Run'
           : `ME12 Supplier Lead Time — ${input.infoCategory === 'consignment' ? 'Consignment' : 'Standard'}`,
@@ -170,7 +168,14 @@ export function registerMe12Handlers(
         tcode: 'ME12',
         dryRun: input.dryRun
       })
-      const result = await runner.run(input, reportProgress, { service: guided, runId })
+      timingId = historyEntry.id
+      await logger.info({ category: 'automation', event: 'me12.batch.started',
+        message: `ME12 ${input.infoCategory} batch started for Plant ${input.targetPlant} in ${input.dryRun ? 'dry-run' : 'live'} mode.`, tcode: 'ME12',
+        details: { runId: historyEntry.id, maxItems: input.maxItems, saveEvery: input.saveEvery, infoCategory: input.infoCategory } })
+      intelligence?.begin(historyEntry.id, 'me12-batch', runId)
+      const work = () => runner.run(input, reportProgress, { service: guided, runId })
+      const result = await (logger.withRun?.(historyEntry.id, work) ?? work())
+      const timing = intelligence?.finish(historyEntry.id, result.success ? 'Success' : result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed')
       await history.finish(
         historyEntry.id,
         result.success
@@ -184,11 +189,12 @@ export function registerMe12Handlers(
               failed: result.failed,
               browserCount: result.browserCount,
               resultPath: result.resultPath,
-              backupPath: result.backupPath
+              backupPath: result.backupPath,
+              performance: timing
             }
           : {
               status: result.errorCode === 'CANCELLED' ? 'Cancelled' : 'Failed',
-              summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath
+              summary: result.message, processed: result.processed, succeeded: result.succeeded, skipped: result.skipped, failed: result.failed, resultPath: result.resultPath, backupPath: result.backupPath, performance: timing
             }
       )
       await (result.success ? logger.info.bind(logger) : logger.error.bind(logger))({
@@ -203,13 +209,14 @@ export function registerMe12Handlers(
               succeeded: result.succeeded,
               skipped: result.skipped,
               failed: result.failed,
-              browserCount: result.browserCount
+              browserCount: result.browserCount,
+              runId: historyEntry.id
             }
-          : undefined
+          : { runId: historyEntry.id }
       })
       guided.registerArtifacts(result.resultPath, result.backupPath)
       return result
-      } finally { guided.end(runId) }
+      } finally { if (timingId) intelligence?.finish(timingId, 'Cancelled'); guided.end(runId) }
     }
   )
 

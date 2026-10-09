@@ -24,7 +24,7 @@ await writeFile(fixture, bytes)
 const config = { excelPath: fixture, sheetName: '', plant: 'C100', system: '', client: '', maxWorkers: 3, createSessions: true, maxItems: 0, overwriteExisting: false, confirmed: false }
 let app
 try {
-  app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${directory}`] })
+  app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${directory}`], env: { ...process.env, LOCALAPPDATA: directory } })
   const window = await app.firstWindow()
   const errors = []
   window.on('pageerror', (error) => errors.push(error.message))
@@ -46,12 +46,12 @@ try {
     shell.showItemInFolder = () => undefined
   })
   await window.getByRole('button', { name: 'Operations', exact: true }).click()
-  const card = window.getByRole('heading', { name: 'APQP', exact: true }).locator('..')
+  const card = window.getByRole('heading', { name: 'Automatically Query APQP Plan Close Dates in Batch', exact: true }).locator('..')
   await card.getByRole('button', { name: 'Info', exact: true }).click()
   await window.getByRole('dialog').waitFor()
   await window.getByRole('button', { name: 'Close', exact: true }).last().click()
   await card.getByRole('button', { name: 'Open', exact: true }).click()
-  await window.getByRole('heading', { name: 'APQP Plan Close Dates', exact: true }).waitFor()
+  await window.getByRole('heading', { name: 'Automatically Query APQP Plan Close Dates in Batch', exact: true }).waitFor()
   const run = window.getByRole('button', { name: 'Start query', exact: true })
   assert.equal(await run.isEnabled(), false)
   await window.getByRole('button', { name: 'Download template', exact: true }).click()
@@ -83,6 +83,15 @@ try {
   await window.screenshot({ path: join(artifacts, 'apqp-operation.png'), fullPage: true })
   assert.deepEqual(errors, [])
   console.log('APQP smoke passed: download, guide, upload, real Excel preview, unchanged source, validation and authorization. No SAP query executed.')
+} catch (error) {
+  if (app) {
+    const page = await app.firstWindow()
+    console.error('APQP smoke page state:', await page.evaluate(() => ({ hash: globalThis.location.hash,
+      language: globalThis.document.documentElement.lang,
+      visibleButtons: [...globalThis.document.querySelectorAll('button')].filter(button => button.offsetParent !== null).map(button => button.textContent.trim()) })).catch(() => 'Renderer unresponsive'))
+    await page.screenshot({ path: join(artifacts, 'apqp-smoke-failure.png'), timeout: 5000, fullPage: true }).catch(() => undefined)
+  }
+  throw error
 } finally {
   if (app) await app.close()
   console.log(`Isolated test workbook and profile retained at ${directory}`)

@@ -10,7 +10,7 @@ await stat(executablePath)
 const userData = await mkdtemp(join(tmpdir(), 'sap-toolbox-packaged-'))
 let app
 try {
-  app = await electron.launch({ executablePath, args: [`--user-data-dir=${userData}`] })
+  app = await electron.launch({ executablePath, args: [`--user-data-dir=${userData}`], env: { ...process.env, LOCALAPPDATA: userData } })
   const window = await app.firstWindow({ timeout: 60_000 })
   const pageErrors = []
   window.on('pageerror', (error) => pageErrors.push(error.message))

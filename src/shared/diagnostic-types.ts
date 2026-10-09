@@ -16,12 +16,14 @@ export interface DiagnosticLogQuery {
   search?: string
   levels?: DiagnosticLevel[]
   limit?: number
+  offset?: number
 }
 
 export interface DiagnosticLogResult {
   entries: DiagnosticLogEntry[]
   logDirectory: string
   dataDirectory: string
+  hasMore?: boolean
 }
 
 export type OpenLogFolderResult =
@@ -47,5 +49,6 @@ export function isDiagnosticLogQuery(value: unknown): value is DiagnosticLogQuer
       candidate.levels.every(
         (level) => level === 'info' || level === 'warning' || level === 'error'
       ))
-  return validSearch && validLimit && validLevels
+  const validOffset = candidate.offset === undefined || Number.isInteger(candidate.offset) && Number(candidate.offset) >= 0 && Number(candidate.offset) <= 100_000
+  return validSearch && validLimit && validLevels && validOffset
 }

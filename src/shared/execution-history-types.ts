@@ -1,3 +1,5 @@
+import type { PerformanceSample } from './local-intelligence'
+
 export type ExecutionHistoryStatus =
   | 'Running'
   | 'Success'
@@ -12,6 +14,10 @@ export interface ExecutionHistoryEntry {
   startedAt: string
   completedAt?: string
   durationMs?: number
+  /** Advisory active timings only; old wall-clock durations are not ETA samples. */
+  performance?: PerformanceSample
+  /** App-owned interaction directory ID; never a renderer-provided path. */
+  diagnosticRunId?: string
   status: ExecutionHistoryStatus
   summary: string
   tcode?: string
@@ -32,10 +38,20 @@ export interface ExecutionHistoryQuery {
   search?: string
   statuses?: ExecutionHistoryStatus[]
   limit?: number
+  offset?: number
+  operations?: ExecutionHistoryEntry['operation'][]
 }
 
 export interface ExecutionHistoryResult {
   entries: ExecutionHistoryEntry[]
+  total?: number
+}
+
+export interface DeleteHistoryResult {
+  success: boolean
+  message?: string
+  warnings?: string[]
+  deleted?: number
 }
 
 export function isExecutionHistoryQuery(value: unknown): value is ExecutionHistoryQuery {
@@ -55,7 +71,10 @@ export function isExecutionHistoryQuery(value: unknown): value is ExecutionHisto
   const validStatuses =
     statuses === undefined ||
     (Array.isArray(statuses) && statuses.every(isExecutionHistoryStatus))
-  return validSearch && validLimit && validStatuses
+  const validOffset = candidate.offset === undefined || Number.isInteger(candidate.offset) && Number(candidate.offset) >= 0 && Number(candidate.offset) <= 100_000
+  const validOperations = candidate.operations === undefined || Array.isArray(candidate.operations) && candidate.operations.every(operation =>
+    ['open-sap', 'create-rfq', 'me12-batch', 'me01-source-list', 'me52n-project-ref', 'apqp-plan-closure'].includes(operation))
+  return validSearch && validLimit && validStatuses && validOffset && validOperations
 }
 
 function isExecutionHistoryStatus(value: unknown): value is ExecutionHistoryStatus {
