@@ -180,7 +180,7 @@ test('Guided adapters (no SAP or browsers)', async t => {
       const { Me12BatchRunner } = load('src/main/automation/me12-batch-runner.ts')
       const workbook = { savePath: join(folder, 'mock-result.xlsx'), backupPath: join(folder, 'mock-backup.xlsx'), tasks: [{ infoRecord: '1', excelRows: [2] }, { infoRecord: '2', excelRows: [3] }, { infoRecord: '3', excelRows: [4] }] }
       let saves = 0
-      const excel = { preview: async () => ({ selectedInfoRecords: 3 }), prepareRun: async () => workbook, writeTaskResult() {}, saveCheckpoint: async () => { saves++; return workbook.savePath } }
+      const excel = { preview: async () => ({ selectedInfoRecords: 3 }), prepareRun: async () => workbook, finishRun: async () => {}, writeTaskResult() {}, saveCheckpoint: async () => { saves++; return workbook.savePath } }
       const runner = new Me12BatchRunner({ getSettings: async () => ({ maxConcurrentBrowsers: 2, browser: 'chrome', sapWebGuiUrl: 'https://mock.sap/{tcode}' }) }, excel, folder, folder,
         { info: async () => {}, error: async () => {} }, { acquire: () => 1, release() {} })
       const config = { confirmed: true, saveEvery: 5, maxRetries: 0, targetLeadTime: '1' }

@@ -5,13 +5,14 @@ import { useLocalization } from '../../i18n/use-localization'
 import { stateLabel } from './state-label'
 import styles from './GuidedAutomation.module.css'
 
-export function AutomationPageLayout({ title, description, onBack, children }: {
-  title: string; description: string; onBack: () => void; children: React.ReactNode
+export function AutomationPageLayout({ title, description, onBack, toolbar, children }: {
+  title: string; description: string; onBack: () => void; toolbar?: React.ReactNode; children: React.ReactNode
 }): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
   return <div className="page"><button className={styles.back} onClick={onBack}><ArrowLeft size={15} />{zh ? '返回操作中心' : 'Back to Operations'}</button>
     <div className="page-heading"><div><h2>{title}</h2><p>{description}</p></div></div>
+    {toolbar}
     <div className={styles.workflow}><div className={styles.steps} aria-label={zh ? '操作步骤' : 'Workflow steps'}>
       {(zh ? ['下载并填写模板', '上传并核对', '运行并查看结果'] : ['Download & fill', 'Upload & review', 'Run & view result']).map((label, i) => <span key={label}><b>{i + 1}</b>{label}</span>)}
     </div>{children}</div>

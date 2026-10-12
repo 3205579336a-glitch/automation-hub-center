@@ -71,7 +71,7 @@ export function ActionRequiredModal({ request, onRespond }: Props): React.JSX.El
       {!!request.fields?.length && <UserInputModal fields={request.fields} values={values} disabled={checking || sending === 'stop'}
         onChange={(id, value) => setValues(current => ({ ...current, [id]: value }))} />}
       <details className={styles.details}><summary>{t('查看详情', 'View Details')}</summary>
-        <p>{request.message}</p><dl><dt>Run ID</dt><dd>{request.runId}</dd><dt>{t('分组', 'RFQ Group')}</dt><dd>{request.groupKey || '—'}</dd><dt>{t('Excel 行', 'Excel Row')}</dt><dd>{request.rows?.join(', ') || '—'}</dd><dt>{t('恢复点', 'Recovery Point')}</dt><dd>{request.recoveryPoint || request.step || '—'}</dd></dl>
+        <p>{request.message}</p>{!canContinue && request.instructions && <p>{t(request.instructionsZh || request.instructions, request.instructions)}</p>}<dl><dt>Run ID</dt><dd>{request.runId}</dd><dt>{t('分组', 'RFQ Group')}</dt><dd>{request.groupKey || '—'}</dd><dt>{t('Excel 行', 'Excel Row')}</dt><dd>{request.rows?.join(', ') || '—'}</dd><dt>{t('恢复点', 'Recovery Point')}</dt><dd>{request.recoveryPoint || request.step || '—'}</dd></dl>
       </details>
       {error && <p role="alert" className={styles.warning}>{error}</p>}
       {request.message.startsWith('Open Fix Session unavailable:') && <p className={styles.warning}>{t('未能打开额外会话，请使用另一个已有 SAP 会话人工修正，完成后重新检查。', 'An additional session is unavailable. Use another existing SAP session to correct master data, then Recheck.')}</p>}

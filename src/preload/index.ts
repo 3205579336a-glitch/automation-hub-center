@@ -10,6 +10,10 @@ import type { SapAutomationApi } from './types'
 import type { ApqpProgress } from '../shared/apqp-types'
 
 const sapAutomationApi: SapAutomationApi = {
+  getTimeSavings: () => ipcRenderer.invoke(IPC_CHANNELS.getTimeSavings),
+  getRfqRecovery: () => ipcRenderer.invoke(IPC_CHANNELS.getRfqRecovery),
+  openRecoveryResult: runId => ipcRenderer.invoke(IPC_CHANNELS.openRecoveryResult, runId),
+  resolveRfqRecovery: input => ipcRenderer.invoke(IPC_CHANNELS.resolveRfqRecovery, input),
   getLocalIntelligence: () => ipcRenderer.invoke(IPC_CHANNELS.getLocalIntelligence),
   onAutomationEta: listener => {
     const handler = (_event: Electron.IpcRendererEvent, eta: EtaSnapshot): void => listener(eta)

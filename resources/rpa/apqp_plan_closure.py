@@ -983,13 +983,6 @@ def worker_loop(
         safe_print(f"[W{worker_id}] 🏁 Worker结束")
 
 
-def create_log_path(excel_path: Path) -> Path:
-    return excel_path.with_name(
-        f"ZMFM050035_APQP_PlanClosure_"
-        f"{dt.datetime.now():%Y%m%d_%H%M%S}.csv"
-    )
-
-
 def emit(event: str, **payload) -> None:
     safe_print("APQP_EVENT " + json.dumps({"event": event, **payload}, ensure_ascii=False), flush=True)
 
@@ -1119,7 +1112,9 @@ def main() -> None:
             return
         # SaveCopyAs includes unsaved data from a workbook the user has open.
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        backup_path = excel_path.with_name(f"{excel_path.stem}_APQP_Backup_{stamp}{excel_path.suffix}")
+        from hub_artifacts import artifact_directory
+        artifacts = artifact_directory('apqp')
+        backup_path = artifacts / f"{excel_path.stem}_APQP_Backup_{stamp}{excel_path.suffix}"
         wb.SaveCopyAs(str(backup_path))
         emit("workers", message=f"Using {len(session_refs)} SAP GUI session(s) in {session_refs[0].system}/{session_refs[0].client}.",
              workers=len(session_refs), total=len(tasks),
@@ -1128,7 +1123,7 @@ def main() -> None:
         result_q = queue.Queue()
         for task in tasks:
             task_q.put(task)
-        log_path = excel_path.with_name(f"APQP_PlanClosure_{stamp}.csv")
+        log_path = artifacts / f"APQP_PlanClosure_{stamp}.csv"
         log_file = open(log_path, "w", newline="", encoding="utf-8-sig")
         writer = csv.writer(log_file)
         writer.writerow(["Timestamp", "Worker", "Excel Row", "Material", "Vendor", "Status", "APQP Plan Closure Date", "Message"])

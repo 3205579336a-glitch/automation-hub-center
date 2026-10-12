@@ -126,10 +126,130 @@ class RuntimeTests(unittest.TestCase):
     def test_stop_after_create_preserves_graceful_commit_writeback_boundary(self):
         Path(self.args.stop_file).touch()
         self.runtime.phase = 'Creating RFQ'
+        self.runtime.write_started = True  # An action, not just a stage label, was actually dispatched.
         self.assertTrue(self.runtime.wait(self.sap, lambda: True if self.clock.value >= .3 else None, .1, 'pending commit'))
         self.assertFalse(self.cancelled)
         self.runtime.phase = 'NPL'
+        self.runtime.write_started = False  # New group boundary, not a presentation-only phase change.
         with self.assertRaises(HubCancelled): self.runtime.stopped()
+
+    def test_stop_missing_create_button_at_five_seconds_does_not_wait_180_seconds(self):
+        self.runtime.install()
+        self.runtime.phase = 'Creating Buyer Receipt'
+        self.runtime.hard_seconds = 180
+        self.sap.find = lambda *a, **kw: None
+        def sleep(duration):
+            self.clock.sleep(duration)
+            if self.clock.value >= 5 and not Path(self.args.stop_file).exists():
+                Path(self.args.stop_file).touch()
+        self.runtime.sleep = sleep
+        with self.assertRaises(HubCancelled): self.sap.press(engine.ID_CREATE_BUYER_RECEIPT)
+        self.assertGreaterEqual(self.clock.value, 5)
+        self.assertLess(self.clock.value, 5.1)
+        self.assertFalse(self.runtime.write_started)
+        self.assertTrue(self.cancelled)
+        self.assertNotIn('ACTION_REQUIRED', [kind for kind, _ in self.events])
+        self.assertNotIn('SAP_SLOW', [kind for kind, _ in self.events])
+
+    def test_stop_wins_if_button_becomes_ready_during_the_same_poll(self):
+        self.runtime.install()
+        self.runtime.phase = 'Creating Buyer Receipt'
+        presses = []
+        button = SimpleNamespace(Press=lambda: presses.append('CREATE'))
+        def find(*a, **kw):
+            Path(self.args.stop_file).touch()
+            return button
+        self.sap.find = find
+        with self.assertRaises(HubCancelled): self.sap.press(engine.ID_CREATE_BUYER_RECEIPT)
+        self.assertEqual(presses, [])
+        self.assertFalse(self.runtime.write_started)
+
+    def test_stop_wins_between_ready_control_and_press_dispatch(self):
+        self.runtime.install()
+        self.runtime.phase = 'Creating Buyer Receipt'
+        presses = []
+        def located(*a, **kw):
+            Path(self.args.stop_file).touch()
+            return SimpleNamespace(Press=lambda: presses.append('CREATE'))
+        # Explicitly bypass the wait loop to exercise the last pre-dispatch check.
+        self.sap.wait_exists = located
+        with self.assertRaises(HubCancelled): self.sap.press(engine.ID_CREATE_BUYER_RECEIPT)
+        self.assertEqual(presses, [])
+
+    def test_dispatched_create_keeps_single_press_busy_wait_and_one_deferred_notice(self):
+        self.runtime.install()
+        self.runtime.phase = 'Creating Buyer Receipt'
+        calls = []
+        def press():
+            calls.append('PRESS')
+            self.assertTrue(self.runtime.write_started, 'Protect before COM dispatch, even if COM later throws')
+            self.sap.session.Busy = True
+        self.sap.find = lambda *a, **kw: SimpleNamespace(Press=press)
+        def sleep(duration):
+            calls.append('BUSY_WAIT')
+            self.clock.sleep(duration)
+            if self.clock.value >= .1 and not Path(self.args.stop_file).exists(): Path(self.args.stop_file).touch()
+            if self.clock.value >= .3: self.sap.session.Busy = False
+        self.runtime.sleep = sleep
+        with patch.object(engine, 'SAP_STEP_PAUSE_SEC', 0): self.sap.press(engine.ID_CREATE_BUYER_RECEIPT)
+        self.assertEqual(calls.count('PRESS'), 1)
+        self.assertEqual(calls[0], 'PRESS')
+        self.assertTrue(self.runtime.write_started)
+        self.assertFalse(self.cancelled)
+        self.assertEqual(sum(kind == 'STOP_DEFERRED' for kind, _ in self.events), 1)
+        self.runtime.phase = 'NPL'  # A back-navigation label cannot erase an issued action.
+        self.runtime.stopped()
+        self.assertFalse(self.cancelled)
+
+    def test_uncertain_press_exception_never_unprotects_or_replays_action(self):
+        self.runtime.install()
+        self.runtime.phase = 'Creating RFQ'
+        calls = []
+        def uncertain():
+            calls.append('PRESS')
+            raise ValueError('COM lost its reply; SAP may have received the action')
+        self.sap.find = lambda *a, **kw: SimpleNamespace(Press=uncertain)
+        with self.assertRaisesRegex(ValueError, 'COM lost'): self.sap.press(engine.ID_CREATE_RFQ_FINAL)
+        Path(self.args.stop_file).touch()
+        self.runtime.stopped()
+        self.assertEqual(calls, ['PRESS'])
+        self.assertTrue(self.runtime.write_started)
+        self.assertFalse(self.cancelled)
+
+    def test_protected_wait_timeout_stops_with_uncertain_review_instead_of_replay(self):
+        self.runtime.phase = 'Creating RFQ'
+        self.runtime.write_started = True
+        Path(self.args.stop_file).touch()
+        with self.assertRaises(HubCancelled): self.runtime.wait(self.sap, lambda: None, .1, 'pending SAP reply')
+        self.assertGreaterEqual(self.clock.value, self.runtime.hard_seconds)
+        self.assertTrue(self.cancelled)
+        notices = [data for kind, data in self.events if kind == 'ACTION_REQUIRED']
+        self.assertEqual(notices[0]['allowedActions'], ['stop'])
+        self.assertIn('No SAP action will be replayed', notices[0]['message'])
+        self.assertEqual(sum(kind == 'STOP_DEFERRED' for kind, _ in self.events), 1)
+
+    def test_next_group_clears_action_latch_but_stop_prevents_any_business_work(self):
+        work = []
+        self.replace(engine, 'process_group', lambda *a: work.append('NEXT_GROUP'))
+        self.runtime.install()
+        self.runtime.write_started = True
+        self.runtime.stop_deferred_notified = True
+        Path(self.args.stop_file).touch()
+        with self.assertRaises(HubCancelled): engine.process_group(self.sap, None, engine.TaskGroup('next', self.tasks))
+        self.assertEqual(work, [])
+        self.assertFalse(self.runtime.write_started)
+        self.assertFalse(self.runtime.stop_deferred_notified)
+
+    def test_standalone_without_controller_retains_original_press_order(self):
+        self.runtime.controller = None
+        self.runtime.install()
+        self.runtime.phase = 'Creating Buyer Receipt'
+        calls = []
+        self.sap.wait_exists = lambda *a, **kw: calls.append('LOCATE') or SimpleNamespace(Press=lambda: calls.append('PRESS'))
+        self.sap.wait_not_busy = lambda: calls.append('BUSY_WAIT')
+        with patch.object(engine, 'SAP_STEP_PAUSE_SEC', .1), patch('rfq_runtime_improvements.time.sleep', lambda duration: calls.append(('STEP_PAUSE', duration))):
+            self.sap.press(engine.ID_CREATE_BUYER_RECEIPT)
+        self.assertEqual(calls, ['LOCATE', 'PRESS', 'BUSY_WAIT', ('STEP_PAUSE', .1)])
 
     def test_npl_hard_recheck_verifies_same_session_and_expected_grid(self):
         self.runtime.install()

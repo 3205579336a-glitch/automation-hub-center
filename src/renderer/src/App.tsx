@@ -16,6 +16,7 @@ import { Me01SourceListPage } from './pages/Me01SourceListPage'
 import { setNotificationSoundsEnabled } from './hooks/notification-sound'
 import { ApqpPlanClosurePage } from './pages/ApqpPlanClosurePage'
 import { SettingsPage } from './pages/SettingsPage'
+import { SafeRecoveryPanel } from './components/automation/SafeRecoveryPanel'
 import type { PageId } from './types/navigation'
 
 const pageIds: PageId[] = [
@@ -96,6 +97,7 @@ export default function App(): React.JSX.Element {
   return (
     <LocalizationProvider language={preferences.language}>
       <AppShell activePage={activePage} onNavigate={navigate} statusLabel={interactionState === 'WAITING_FOR_USER' ? preferences.language === 'zh-CN' ? '已暂停，等待用户处理' : 'Paused — waiting for user' : interactionState === 'RECOVERING' ? preferences.language === 'zh-CN' ? '正在验证 SAP' : 'Checking SAP' : guidedBusy || rfqBusy || automation.busy ? preferences.language === 'zh-CN' ? '正在运行' : 'Running' : automation.statusLabel} isBusy={automation.busy || guidedBusy || rfqBusy || interactionState !== null}>
+          <SafeRecoveryPanel notify={notify} busy={automation.busy || guidedBusy || rfqBusy || interactionState !== null} />
           {renderPage()}
           <div hidden={activePage !== 'create-rfq'}>
             <CreateRfqPage notify={notify} onBack={() => navigate('operations')} onRunningChange={setRfqBusy} />

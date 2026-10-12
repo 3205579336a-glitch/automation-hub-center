@@ -32,7 +32,9 @@ if (-not $SkipDependencyInstall) {
   --hidden-import rfq_runtime_improvements `
   --hidden-import rfq_interaction `
   --hidden-import rfq_defaults `
+  --hidden-import hub_artifacts `
   --hidden-import me01_source_list `
+  --hidden-import me01_source_table `
   --hidden-import me52n_project_ref `
   --hidden-import apqp_plan_closure `
   --hidden-import win32com.client `

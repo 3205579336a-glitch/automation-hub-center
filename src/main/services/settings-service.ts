@@ -1,12 +1,15 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { AppSettings } from '../../shared/settings-types'
 import { isAppSettings } from '../../shared/settings-types'
+import { DEFAULT_MANUAL_SECONDS } from '../../shared/time-savings'
 import type { DiagnosticLogger } from './diagnostic-logger'
 import type { LocalStoragePaths } from './local-storage-paths'
 
 export class SettingsService {
-  private static readonly SETTINGS_SCHEMA_VERSION = 7
+  private saveQueue: Promise<void> = Promise.resolve()
+  private static readonly SETTINGS_SCHEMA_VERSION = 9
   private readonly settingsPath: string
   private readonly defaults: AppSettings
 
@@ -29,7 +32,9 @@ export class SettingsService {
       theme: 'light',
       notificationSounds: true,
       openResultAfterCompletion: false,
-      maxConcurrentSapSessions: 3
+      maxConcurrentSapSessions: 3,
+      manualTimeBaselines: { ...DEFAULT_MANUAL_SECONDS },
+      manualTimeCalibrated: false
     }
   }
 
@@ -50,12 +55,18 @@ export class SettingsService {
   }
 
   async saveSettings(settings: AppSettings): Promise<AppSettings> {
+    const result = this.saveQueue.catch(() => undefined).then(() => this.writeSettings(settings))
+    this.saveQueue = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  private async writeSettings(settings: AppSettings): Promise<AppSettings> {
     const normalized: AppSettings = {
       ...settings,
       sapWebGuiUrl: settings.sapWebGuiUrl.trim(),
       defaultDownloadFolder: settings.defaultDownloadFolder.trim()
     }
-    const temporaryPath = `${this.settingsPath}.tmp`
+    const temporaryPath = `${this.settingsPath}.${randomUUID()}.tmp`
 
     await mkdir(dirname(this.settingsPath), { recursive: true })
     const storedSettings = {
@@ -63,7 +74,13 @@ export class SettingsService {
       schemaVersion: SettingsService.SETTINGS_SCHEMA_VERSION
     }
     await writeFile(temporaryPath, `${JSON.stringify(storedSettings, null, 2)}\n`, 'utf8')
-    await rename(temporaryPath, this.settingsPath)
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporaryPath, this.settingsPath); break }
+      catch (error) {
+        if (attempt >= 3 || !isNodeError(error) || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code ?? '')) throw error
+        await new Promise(resolve => setTimeout(resolve, [25, 60, 120][attempt]))
+      }
+    }
     await this.logger.info({
       category: 'settings',
       event: 'settings.saved',
@@ -78,6 +95,12 @@ export class SettingsService {
     const parsed: unknown = JSON.parse(content)
     if (!isAppSettings(parsed)) {
       return migrateLegacySettings(parsed, this.defaults)
+    }
+    const legacy = { 'create-rfq': 600, 'me12-batch': 60, 'apqp-plan-closure': 60, 'me01-source-list': 90 }
+    // Replace only the previous untouched reference set. Never overwrite calibrated/custom values.
+    const raw = parsed as AppSettings & { schemaVersion?: number }
+    if ((raw.schemaVersion ?? 0) < 9 && !parsed.manualTimeCalibrated && Object.entries(legacy).every(([key, seconds]) => parsed.manualTimeBaselines?.[key as keyof typeof legacy] === seconds)) {
+      return { ...this.defaults, ...parsed, manualTimeBaselines: { ...DEFAULT_MANUAL_SECONDS }, manualTimeCalibrated: false }
     }
     return { ...this.defaults, ...parsed }
   }

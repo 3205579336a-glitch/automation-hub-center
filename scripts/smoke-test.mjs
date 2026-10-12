@@ -13,7 +13,7 @@ await mkdir(artifacts, { recursive: true })
 const modules = [
   { card: 'Automatically Update Supplier Lead Times (SLT) in Batch', title: 'Automatically Update Supplier Lead Times (SLT) in Batch', template: 'ME12_Supplier_Lead_Time_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['B', 'C100']], name: 'Info Record' },
   { card: 'Automatically Query APQP Plan Close Dates in Batch', title: 'Automatically Query APQP Plan Close Dates in Batch', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['D', '41889']], name: 'APQP' },
-  { card: 'Automatically Maintain Source Lists in Batch', title: 'Automatically Maintain Source Lists in Batch', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889']], name: 'Source List' }
+  { card: 'Automatically Maintain Source Lists in Batch', title: 'Automatically Maintain Source Lists in Batch', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889'], ['C', 'No']], name: 'Source List' }
 ]
 for (const module of modules) {
   const archive = unzipSync(await readFile(join('resources/templates', module.template)))
@@ -80,11 +80,25 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => ['Start Automation', 'Start query'].includes(button.textContent.trim()) && !button.disabled && button.offsetParent !== null), { timeout: 45000 })
     assert.deepEqual(await readFile(module.path), before, 'Real preview must not modify the uploaded workbook')
     assert.equal(await page.getByLabel(/Sheet name|Session|Python|Starting row|Retry/).count(), 0)
+    if (module.channel === 'me01') {
+      assert.equal(await page.getByLabel(/^Valid to/).inputValue(),'2099-12-31')
+      await page.getByLabel(/^Valid from/).fill('2026-10-12')
+      await page.getByRole('columnheader', {name:'Dual Sourcing', exact:true}).waitFor()
+      await page.getByRole('cell', {name:'No — switch source', exact:true}).waitFor()
+      const dismiss = page.getByRole('button', {name:'Dismiss notification',exact:true})
+      while (await dismiss.count()) await dismiss.first().click({timeout:1000}).catch(() => undefined)
+      await page.getByRole('columnheader', {name:'Dual Sourcing', exact:true}).scrollIntoViewIfNeeded()
+      await page.screenshot({path:join(artifacts,'source-list-dual-sourcing-preview.png'),fullPage:true})
+    }
     if (module.channel !== 'apqp') {
       await run.click()
       const confirmation = page.getByRole('dialog', { name: 'Ready to update', exact: true })
       await confirmation.waitFor()
       if (module.channel === 'me12') await confirmation.getByText(/Permission required: SAP ME12/).waitFor()
+      if (module.channel === 'me01') {
+        await confirmation.getByText(/No clears other Fix and MRP on ALL rows/).waitFor()
+        await confirmation.getByText('No — switch fixed source',{exact:true}).waitFor()
+      }
       await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click()
       assert.equal(await confirmation.isVisible(), false)
     }
@@ -100,6 +114,7 @@ try {
       const owner = BrowserWindow.getAllWindows()[0]
       ipcMain.handle('automation:interaction:get', () => current)
       ipcMain.handle(start, (_event, input) => {
+        if (module.channel === 'me01' && (input.validFrom !== '2026-10-12' || input.validTo !== '2099-12-31' || input.purchasingOrganization !== 'C100')) throw new Error('Source List business options did not reach the engine boundary.')
         if (module.channel !== 'apqp' && !input.confirmed) return { success: false, message: 'Mock confirmation required' }
         current = { automation: module.name, runId: 'GUIDED-MOCK', requestId: 'request-1', state: 'WAITING_FOR_USER',
           allowedActions: module.channel === 'me01' ? ['stop'] : ['continue', 'stop'],

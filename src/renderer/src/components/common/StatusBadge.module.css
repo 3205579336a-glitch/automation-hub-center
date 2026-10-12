@@ -15,7 +15,7 @@
   color: #18794e;
 }
 
-.partial {
+.partial, .interrupted {
   background: #fff6df;
   color: #a56614;
 }

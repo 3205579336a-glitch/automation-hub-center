@@ -11,6 +11,7 @@ interface ParsedWorksheet {
 
 const MATERIAL_HEADERS = ['material no.', 'material no', 'material', 'part number']
 const PARMA_HEADERS = ['parma', 'parma no.', 'parma no', 'supplier', 'supplier code', 'intended supplier']
+const DUAL_HEADERS = ['dual sourcing', 'dual sourcing (yes/no)', '是否双供', '双供']
 
 export class Me01ExcelService {
   async preview(filePath: string): Promise<Me01ExcelPreview> {
@@ -20,17 +21,19 @@ export class Me01ExcelService {
     if (!headers) throw new Error('The ME01 workbook does not contain a header row.')
     const materialColumn = findHeaderColumn(headers, MATERIAL_HEADERS)
     const parmaColumn = findHeaderColumn(headers, PARMA_HEADERS)
-    if (!materialColumn || !parmaColumn) {
-      throw new Error('Missing required column(s) "Material No." or "Parma". Please download a fresh ME01 template.')
+    const dualColumn = findHeaderColumn(headers, DUAL_HEADERS)
+    if (!materialColumn || !parmaColumn || !dualColumn) {
+      throw new Error('Required columns / 必填列: Material No., Parma, Dual Sourcing / 是否双供. Download the new ME01 template / 请下载新模板。')
     }
 
-    const assignments = new Map<string, { material: string; parma: string; excelRows: number[] }>()
+    const assignments = new Map<string, { material: string; parma: string; dualSourcing: boolean; excelRows: number[] }>()
     const supplierByMaterial = new Map<string, string>()
     let lastInputRow = 1
     for (let excelRow = 2; excelRow <= worksheet.maxRow; excelRow += 1) {
       const material = worksheet.rows.get(excelRow)?.get(materialColumn)?.trim() ?? ''
       const parma = worksheet.rows.get(excelRow)?.get(parmaColumn)?.trim() ?? ''
-      if (!material && !parma) {
+      const dualValue = worksheet.rows.get(excelRow)?.get(dualColumn)?.trim() ?? ''
+      if (!material && !parma && !dualValue) {
         continue
       }
       lastInputRow = excelRow
@@ -42,8 +45,11 @@ export class Me01ExcelService {
         throw new Error(`Material ${material} has more than one Parma in the workbook. Keep only the supplier that should be fixed.`)
       }
       supplierByMaterial.set(normalizeIdentifier(material), parma)
+      const dualSourcing = parseDualSourcing(dualValue, excelRow)
       const key = `${normalizeIdentifier(material)}\u0000${normalizeIdentifier(parma)}`
-      const assignment = assignments.get(key) ?? { material, parma, excelRows: [] }
+      const existing = assignments.get(key)
+      if (existing && existing.dualSourcing !== dualSourcing) throw new Error(`Excel row ${excelRow}: conflicting Dual Sourcing / 同一物料的双供选项不一致。`)
+      const assignment = existing ?? { material, parma, dualSourcing, excelRows: [] }
       assignment.excelRows.push(excelRow)
       assignments.set(key, assignment)
     }
@@ -58,18 +64,27 @@ export class Me01ExcelService {
 
     const sample: Me01PreviewRow[] = [...assignments.values()]
       .slice(0, 12)
-      .map(({ material, parma, excelRows }) => ({ material, parma, excelRows }))
+      .map(({ material, parma, dualSourcing, excelRows }) => ({ material, parma, dualSourcing, excelRows }))
     const totalDataRows = [...assignments.values()].reduce((sum, assignment) => sum + assignment.excelRows.length, 0)
     return {
       sheetName: worksheet.name,
       totalDataRows,
       uniqueMaterials: assignments.size,
+      dualSourcingMaterials: [...assignments.values()].filter(row => row.dualSourcing).length,
+      singleSourcingMaterials: [...assignments.values()].filter(row => !row.dualSourcing).length,
       uniqueSuppliers: new Set([...assignments.values()].map(row => normalizeIdentifier(row.parma))).size,
       duplicateRows: totalDataRows - assignments.size,
       skippedBlankRows,
       sample
     }
   }
+}
+
+function parseDualSourcing(value: string, row: number): boolean {
+  const text = value.toLowerCase()
+  if (['yes', 'true', '1', '是', '√', '✓', '☑'].includes(text)) return true
+  if (['no', 'false', '0', '否'].includes(text)) return false
+  throw new Error(`Excel row ${row}: Dual Sourcing / 是否双供 is required. Select Yes or No / 请选择 Yes 或 No，空白不等于 No。`)
 }
 
 function normalizeIdentifier(value: string): string {

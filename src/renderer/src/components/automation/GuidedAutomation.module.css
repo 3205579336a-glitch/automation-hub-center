@@ -3,6 +3,13 @@
 .steps span { display: flex; align-items: center; gap: .5rem; color: var(--text-muted); }
 .steps b { display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); border-radius: 50%; width: 1.65rem; height: 1.65rem; }
 .body { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 1.4rem; align-items: start; }
+.sectionTitle { display: flex; gap: .85rem; align-items: flex-start; }
+.sectionTitle h3 { color: var(--text-strong); margin-bottom: .3rem; }
+.sectionTitle p { font-size: .88rem; }
+.sectionIcon { display: grid; place-items: center; flex-shrink: 0; width: 2.6rem; height: 2.6rem; border-radius: 12px; background: var(--primary-soft); color: var(--primary); }
+.emptyPreview { display: grid; gap: .8rem; justify-items: center; padding: 2rem 1rem; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--surface-muted); color: var(--text-muted); text-align: center; }
+.emptyPreview strong { color: var(--text-strong); }
+.emptyPreview p { max-width: 28rem; }
 .section { padding: 1.4rem; display: grid; gap: 1rem; min-width: 0; }
 .section h3, .section p { margin: 0; }
 .section p { color: var(--text-muted); line-height: 1.65; }

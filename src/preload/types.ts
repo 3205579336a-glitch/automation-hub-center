@@ -1,4 +1,6 @@
 import type { AutomationProgress, AutomationResult, OpenSapRequest } from '../shared/automation-types'
+import type { TimeSavingsSummary } from '../shared/time-savings'
+import type { RfqRecoveryResult, RfqRecoveryView } from '../shared/rfq-safe-recovery'
 import type { AutomationInteraction, InteractionResponse } from '../shared/automation-interaction'
 import type { EtaSnapshot, LocalIntelligenceSnapshot } from '../shared/local-intelligence'
 import type {
@@ -43,6 +45,10 @@ import type {
 import type { ApqpConfig, ApqpFileResult, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../shared/apqp-types'
 
 export interface SapAutomationApi {
+  getTimeSavings: () => Promise<TimeSavingsSummary>
+  getRfqRecovery: () => Promise<RfqRecoveryView[]>
+  openRecoveryResult: (runId: string) => Promise<RfqRecoveryResult>
+  resolveRfqRecovery: (input: { runId: string; note?: string; verifiedInSap: true; engineStopped: true }) => Promise<RfqRecoveryResult>
   getLocalIntelligence: () => Promise<LocalIntelligenceSnapshot>
   onAutomationEta: (listener: (eta: EtaSnapshot) => void) => () => void
   downloadApqpTemplate: () => Promise<ApqpFileResult>

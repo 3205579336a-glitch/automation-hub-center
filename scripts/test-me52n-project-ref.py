@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shutil
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import openpyxl
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "resources" / "rpa" / "me52n_project_ref.py"
+sys.path.insert(0, str(SCRIPT.parent))
 spec = importlib.util.spec_from_file_location("me52n_project_ref_test", SCRIPT)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
@@ -100,6 +102,32 @@ class FakeComWorkbook:
 
 
 class Me52nSafetyTests(unittest.TestCase):
+    def test_legacy_checkpoint_preserved_when_default_location_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            legacy = root / "ME52N_ProjectRef_Checkpoint.xlsx"
+            workbook = openpyxl.Workbook()
+            workbook.active.title = module.CHECKPOINT_SHEET_NAME
+            workbook.active.append(module.CHECKPOINT_HEADERS)
+            workbook.active.append(["1001", module.RULE_VERSION, "SUCCESS"])
+            workbook.save(legacy)
+            original = legacy.read_bytes()
+            names = ["ENABLE_CHECKPOINT", "CHECKPOINT_PATH", "EXCEL_PATH", "_checkpoint_env"]
+            old = {name: getattr(module, name) for name in names}
+            try:
+                module.ENABLE_CHECKPOINT = True
+                module.CHECKPOINT_PATH = str(root / "logs" / "checkpoint.xlsx")
+                module.EXCEL_PATH = str(root / "input.xlsx")
+                module._checkpoint_env = ""
+                store = module.CheckpointStore()
+                self.assertEqual(store.get_record("1001")["Status"], "SUCCESS")
+                self.assertTrue(store.path.exists())
+                self.assertEqual(legacy.read_bytes(), original)
+                store.workbook.close()
+            finally:
+                for name, value in old.items():
+                    setattr(module, name, value)
+
     def test_event_paths_are_json_serializable(self):
         message = module.format_me52n_event({
             "status": "COMPLETE",
@@ -178,7 +206,7 @@ class Me52nSafetyTests(unittest.TestCase):
             fake_workbook = FakeComWorkbook(path)
             names = [
                 "EXCEL_PATH", "SOURCE_SHEET_NAME", "WRITEBACK_TO_SOURCE_EXCEL",
-                "CREATE_SOURCE_BACKUP", "find_open_excel_workbook",
+                "CREATE_SOURCE_BACKUP", "find_open_excel_workbook", "ME52N_ARTIFACT_DIR",
             ]
             old = {name: getattr(module, name) for name in names}
             try:
@@ -186,10 +214,12 @@ class Me52nSafetyTests(unittest.TestCase):
                 module.SOURCE_SHEET_NAME = ""
                 module.WRITEBACK_TO_SOURCE_EXCEL = True
                 module.CREATE_SOURCE_BACKUP = True
+                module.ME52N_ARTIFACT_DIR = Path(folder) / 'managed-logs'
                 module.find_open_excel_workbook = lambda _path: fake_workbook
                 writer = module.SourceStatusWriter()
                 self.assertEqual(writer.mode, "excel-com")
                 self.assertTrue(writer.backup_path and writer.backup_path.exists())
+                self.assertEqual(writer.backup_path.parent, module.ME52N_ARTIFACT_DIR)
                 writer.update_rows([2], "1001", "SUCCESS", 2, "Saved")
             finally:
                 for name, value in old.items():

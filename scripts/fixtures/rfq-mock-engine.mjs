@@ -10,11 +10,22 @@ console.log('📦 离线模拟 — ordinary output must not become a progress ev
 if (args.includes('--validate-only')) {
   emit('VALIDATION_COMPLETED', { preview: { validRows: 2, invalidRows: 0, groupCount: 1, sample: [], groups: [], plants: ['C100'], warnings: [] } })
 } else {
+  if (args.includes('--hub-ready-file')) {
+    emit('ENGINE_READY', { runId: value('--run-id'), pid: process.pid })
+    const deadline = Date.now() + 5000
+    while (true) {
+      let marker
+      try { marker = JSON.parse(await readFile(value('--hub-ready-file'), 'utf8')) } catch { /* gate not yet released */ }
+      if (marker?.runId === value('--run-id') && marker.pid === process.pid) break
+      if (Date.now() > deadline) throw new Error('Mock SAP launch stayed blocked')
+      await setTimeout(20)
+    }
+  }
   if (!args.includes('--production-confirmed')) throw new Error('Missing production confirmation')
   if (scenario.mode === 'silent') process.exit(0)
   const logPath = join(dirname(value('--excel-path')), 'mock_run_log.csv')
   await writeFile(logPath, 'fixture diagnostic\n')
-  emit('GROUP_STARTED', { current: 1, total: 1, message: 'mock ready' })
+  emit('GROUP_STARTED', { current: 1, total: 1, groupKey: 'MOCK-GROUP', project: '775773', message: 'mock ready' })
   if (['interaction', 'unknown', 'attention-failure', 'commodity'].includes(scenario.mode)) {
     const runId = value('--run-id')
     let attempt = 0
@@ -64,6 +75,7 @@ if (args.includes('--validate-only')) {
   }
   emit('RFQ_CREATED', { rfqNumber: 'MOCK-1' })
   emit('RFQ_CREATED', { rfqNumber: 'MOCK-1' })
+  emit('GROUP_COMPLETED', { groupKey: 'MOCK-GROUP', groupStatus: 'SUCCESS', current: 1, total: 1, succeeded: 1 })
   emit('RUN_COMPLETED', { current: 1, total: 1, processed: 1, succeeded: 1, skipped: 0, failed: 0,
     rfqNumbers: ['MOCK-1'], resultPath: value('--excel-path'), logPath, materials: 2 })
   if (scenario.mode === 'nonzero') process.exit(1)

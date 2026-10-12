@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline'
 import type { ApqpConfig, ApqpPreview, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../../shared/apqp-types'
 import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
 import type { AutomationInteraction } from '../../shared/automation-interaction'
+import type { GeneratedArtifacts } from '../services/generated-artifacts'
 
 interface EngineEvent extends ApqpProgress {
   interaction?: AutomationInteraction
@@ -30,7 +31,7 @@ export class ApqpRunner {
   private child: ChildProcessWithoutNullStreams | null = null
   private busy = false
   private previewing = false
-  constructor(private readonly enginePaths: ApqpEnginePaths) {}
+  constructor(private readonly enginePaths: ApqpEnginePaths, private readonly artifacts?: GeneratedArtifacts) {}
 
   async preview(config: ApqpConfig): Promise<ApqpPreviewResult> {
     try {
@@ -60,15 +61,18 @@ export class ApqpRunner {
     if (this.busy) throw new Error('An APQP preview or run is already active.')
     this.busy = true
     this.previewing = preview
+    let artifactDirectory = ''
     try {
       const launch = await this.resolveLaunch(preview)
       if (!launch) throw new Error('The packaged APQP engine is unavailable.')
+      if (!preview && this.artifacts) artifactDirectory = await this.artifacts.create('apqp-plan-closure', guidance?.runId)
       return await new Promise<EngineEvent>((resolve, reject) => {
         let final: EngineEvent | undefined
         const errors: string[] = []
         const child = spawn(launch.command, launch.args, {
-          shell: false, windowsHide: true,
+          shell: false, windowsHide: true, cwd: artifactDirectory || undefined,
           env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '',
+            HUB_ARTIFACT_DIR: artifactDirectory, ...(artifactDirectory ? { TEMP: artifactDirectory, TMP: artifactDirectory } : {}),
             SHEET_NAME: config.sheetName, PLANT: config.plant, TARGET_SYSTEM: config.system,
             TARGET_CLIENT: config.client, MAX_WORKERS: String(config.maxWorkers),
             CREATE_SESSIONS: String(config.createSessions), MAX_ITEMS: String(config.maxItems),
@@ -97,7 +101,10 @@ export class ApqpRunner {
           else resolve(final)
         })
       })
-    } finally { this.child = null; this.busy = false; this.previewing = false }
+    } finally {
+      if (artifactDirectory) await this.artifacts?.finish(artifactDirectory).catch(() => undefined)
+      this.child = null; this.busy = false; this.previewing = false
+    }
   }
 
   private async resolveLaunch(preview: boolean): Promise<{ command: string; args: string[] } | null> {

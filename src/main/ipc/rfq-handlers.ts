@@ -19,6 +19,7 @@ import type { SettingsService } from '../services/settings-service'
 import { downloadTemplateWithSaveDialog } from '../services/template-download-service'
 import type { GuidedAutomationService } from '../services/guided-automation-service'
 import { isTrustedRenderer } from './ipc-security'
+import type { RfqSafeRecoveryService } from '../services/rfq-safe-recovery-service'
 
 export function registerRfqHandlers(
   excelService: RfqExcelService,
@@ -28,7 +29,8 @@ export function registerRfqHandlers(
   templatePath: string,
   settingsService: SettingsService,
   guided?: GuidedAutomationService,
-  intelligence?: LocalIntelligenceService
+  intelligence?: LocalIntelligenceService,
+  recovery?: RfqSafeRecoveryService
 ): void {
   ipcMain.handle(
     IPC_CHANNELS.downloadRfqTemplate,
@@ -123,6 +125,10 @@ export function registerRfqHandlers(
         return { success: false, errorCode: 'INVALID_CONFIG', message: 'The RFQ run request is invalid.' }
       }
       if (guided?.isRunning()) return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Finish or stop the current automation first.' }
+      try {
+        if (recovery?.protectedIds().size) return { success: false, errorCode: 'OPERATION_IN_PROGRESS',
+          message: 'An unfinished or uncertain RFQ run needs review. Use Safe Recovery to verify in SAP and mark it resolved before starting another RFQ.' }
+      } catch { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Recovery records could not be checked. Ask a key user to inspect local recovery data before starting RFQ.' } }
       if (input.environment === 'PROD' && !input.productionConfirmed) {
         return { success: false, errorCode: 'INVALID_CONFIG', message: 'Confirm the Production warning before starting Create RFQ.' }
       }
@@ -217,7 +223,7 @@ export function registerRfqHandlers(
     return {
       success: accepted,
       message: accepted
-        ? 'Stop requested. The current RFQ group will finish and save before stopping.'
+        ? 'Stop requested. Read-only waits stop promptly. If a SAP action was already issued, the current group and saved results are protected before stopping; no next group starts.'
         : 'No Create RFQ run is currently active.'
     }
   })

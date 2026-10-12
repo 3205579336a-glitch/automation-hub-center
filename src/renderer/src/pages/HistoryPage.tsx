@@ -83,6 +83,7 @@ export function HistoryPage(): React.JSX.Element {
           >
             <option value="all">{zh ? '全部状态' : 'All statuses'}</option>
             <option value="Running">{zh ? '运行中' : 'Running'}</option>
+            <option value="Interrupted">{zh ? '已中断（请核查）' : 'Interrupted — review'}</option>
             <option value="Success">{zh ? '成功' : 'Success'}</option>
             <option value="Partial">{zh ? '部分成功' : 'Partial'}</option>
             <option value="Failed">{zh ? '失败' : 'Failed'}</option>
@@ -168,6 +169,8 @@ function HistoryRows({
               <Detail label={zh ? '跳过' : 'Skipped'} value={entry.skipped ?? '—'} />
               <Detail label={zh ? '失败' : 'Failed'} value={entry.failed ?? '—'} />
               <Detail label="Dry Run" value={entry.dryRun === undefined ? '—' : entry.dryRun ? 'Yes' : 'No'} />
+              {entry.recoveryResolvedAt && <><Detail label={zh ? '安全核查时间' : 'Safe Recovery review'} value={new Date(entry.recoveryResolvedAt).toLocaleString()} />
+                <Detail label={zh ? '人工核查结论（非执行成功）' : 'Manual verification note (not execution success)'} value={entry.recoveryResolutionNote || '—'} /></>}
             </div>
             {entry.resultPath && <PathLine label={zh ? '结果文件' : 'Result file'} value={entry.resultPath} />}
             {entry.backupPath && <PathLine label={zh ? '备份文件' : 'Backup file'} value={entry.backupPath} />}
@@ -208,7 +211,7 @@ function normalizeStatus(value: string): ExecutionHistoryStatus | 'all' {
     value === 'Success' ||
     value === 'Partial' ||
     value === 'Failed' ||
-    value === 'Cancelled'
+    value === 'Cancelled' || value === 'Interrupted'
   ) {
     return value
   }

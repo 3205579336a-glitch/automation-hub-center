@@ -84,6 +84,14 @@
   grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.8fr);
   gap: 16px;
 }
+.savings { display: grid; gap: 1rem; padding: 1.25rem; margin-bottom: 20px; }
+.savings h3 { margin: 0; color: var(--text-strong); }
+.savings p, .savings li { color: var(--text-muted); line-height: 1.65; }
+.savingsMetrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.savingsMetrics > div { display: grid; gap: .4rem; padding: 1rem; border-radius: 10px; background: var(--primary-soft); }
+.savingsMetrics strong { color: var(--primary); }
+.savingsMetrics span, .savingsMetrics small { color: var(--text-muted); }
+.savings summary { cursor: pointer; color: var(--primary); }
 
 .quickActions,
 .activity { padding: 18px; }

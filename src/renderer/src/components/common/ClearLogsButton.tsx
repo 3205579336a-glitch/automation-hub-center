@@ -36,6 +36,7 @@ export function ClearLogsButton({ onCleared }: { onCleared: () => Promise<void> 
       <h2>{zh ? '清空全部日志和执行历史？' : 'Clear all logs and execution history?'}</h2>
       <p>{zh ? '将永久删除本机全部已结束的执行历史及可识别的诊断日志、临时数据，不仅是当前页或筛选结果。保留原始上传文件、结果 Excel 和备份，不修改 SAP 数据。' : 'Permanently deletes all completed local execution history and identified diagnostic logs/temporary data, not just this page or filter. Original uploads, result workbooks and backups are kept. SAP data is unaffected.'}</p>
       <p>{zh ? '清理不可恢复，这些记录也将不再用于任务排序和预计耗时学习。运行中无法清理。' : 'This cannot be undone. These records will no longer contribute to ranking or ETA learning. Cleanup is blocked during automation.'}</p>
+      <p>{zh ? '尚未核查的 RFQ 记录及其诊断证据会保留；预计节省时间仅根据清理后仍保留的历史计算。' : 'Unresolved RFQ history and its diagnostic evidence are retained. Estimated time saved is recalculated from the remaining history.'}</p>
       {message && <p role="alert">{message}</p>}
       <div className={styles.actions}>
         <button className="button" disabled={busy} onClick={() => setConfirming(false)}>{zh ? '取消' : 'Cancel'}</button>

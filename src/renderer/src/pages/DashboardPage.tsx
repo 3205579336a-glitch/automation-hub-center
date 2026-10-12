@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { ExecutionHistoryEntry } from '../../../shared/execution-history-types'
+import type { TimeSavingsSummary } from '../../../shared/time-savings'
 import { StatusBadge } from '../components/common/StatusBadge'
 import { useLocalization } from '../i18n/use-localization'
 import type { PageId } from '../types/navigation'
@@ -27,23 +28,27 @@ export function DashboardPage({
   const { language, t } = useLocalization()
   const [history, setHistory] = useState<ExecutionHistoryEntry[]>([])
   const [loading, setLoading] = useState(true)
+  const [savings, setSavings] = useState<TimeSavingsSummary | null>(null)
+  const [savingsLoading, setSavingsLoading] = useState(true)
   const zh = language === 'zh-CN'
   const { ranking, loading: rankingLoading } = useTaskRanking()
 
   useEffect(() => {
-    let mounted = true
-    void window.sapAutomation.getExecutionHistory({ limit: 200 }).then((result) => {
-      if (mounted) {
-        setHistory(result.entries.filter(entry => entry.operation !== 'me52n-project-ref' && entry.operation !== 'open-sap'))
-        setLoading(false)
-      }
-    }).catch(() => {
-      if (mounted) {
-        setHistory([])
-        setLoading(false)
-      }
-    })
-    return () => { mounted = false }
+    let active = true
+    let request = 0
+    const load = (): void => {
+      const current = ++request
+      void Promise.allSettled([window.sapAutomation.getTimeSavings(), window.sapAutomation.getExecutionHistory({ limit: 200 })]).then(([estimate, result]) => {
+        if (!active || current !== request) return
+        setSavings(estimate.status === 'fulfilled' ? estimate.value : null)
+        setHistory(result.status === 'fulfilled' ? result.value.entries.filter(entry => entry.operation !== 'me52n-project-ref' && entry.operation !== 'open-sap') : [])
+        setSavingsLoading(false); setLoading(false)
+      })
+    }
+    load()
+    const guided = (event: Event): void => { if (!(event as CustomEvent).detail) load() }
+    window.addEventListener('rfq-run-finished', load); window.addEventListener('guided-running', guided); window.addEventListener('focus', load)
+    return () => { active = false; window.removeEventListener('rfq-run-finished', load); window.removeEventListener('guided-running', guided); window.removeEventListener('focus', load) }
   }, [])
 
   const metrics = useMemo(() => buildMetrics(history, zh, loading), [history, zh, loading])
@@ -78,6 +83,20 @@ export function DashboardPage({
         })}
       </section>
 
+      <section className={`card ${styles.savings}`} aria-label={zh ? '预计节省时间' : 'Estimated time saved'}>
+        <div><h3>{zh ? '预计节省时间' : 'Estimated time saved'}</h3><p>{zh ? '根据本机保留记录和当前人工耗时基准估算，不是实测人工效率。' : 'Estimated from retained local history and current manual-time assumptions, not measured human productivity.'}</p></div>
+        {savings && <span>{savings.calibrated ? zh ? '人工基准：Key User 已校准' : 'Manual baseline: key-user calibrated' : zh ? '人工基准：默认参考值，尚未校准' : 'Manual baseline: reference defaults, not yet calibrated'}</span>}
+        <div className={styles.savingsMetrics}>
+          <div><span>{zh ? '今日' : 'Today'}</span><strong>{savingsLoading ? '…' : savings ? savedTime(savings.today.savedMs, zh) : '—'}</strong><small>{savings ? `${savings.today.runs} ${zh ? '次已确认运行' : 'confirmed runs'}` : zh ? '统计暂不可用' : 'Statistics unavailable'}</small></div>
+          <div><span>{zh ? '最近 30 天' : 'Last 30 days'}</span><strong>{savingsLoading ? '…' : savings ? savedTime(savings.last30Days.savedMs, zh) : '—'}</strong><small>{savings ? `${savings.last30Days.successfulUnits} ${zh ? '个成功分组／记录' : 'successful groups / records'}` : '—'}</small></div>
+        </div>
+        {savings && <details><summary>{zh ? '计算依据与基准' : 'Calculation and baselines'}</summary>
+          <p>{zh ? '人工预计耗时 = 已确认成功数量 × 人工单次耗时；预计节省 = 人工预计耗时 − 整批实际耗时（包含 SAP 等待和人工暂停，下限为 0）。并发不会重复扣除实际耗时。' : 'Manual estimate = confirmed successful units × manual seconds per unit. Savings = manual estimate − full batch elapsed time, including SAP and human waits, floored at zero. Worker counts never multiply elapsed time.'}</p>
+          <p>{zh ? '失败、取消、演练、跳过、未核查和缺少数量／耗时的记录不计入成功量。删除历史或 60 天清理后，统计仅反映仍保留的记录。' : 'Failed, cancelled, dry-run, skipped, unresolved or incomplete records are not counted as successful work. Statistics reflect only retained history after history deletion or retention cleanup.'}</p>
+          <p>{savings.calibrated ? zh ? '基准：Key User 已标记校准。' : 'Baseline: marked calibrated by a key user.' : zh ? '基准：系统默认参考值，尚未校准。可在高级 / Key User 设置调整。' : 'Baseline: uncalibrated reference defaults. Adjust in Advanced / Key User Settings.'}</p>
+          <ul>{Object.entries(savings.baselines).map(([id, seconds]) => <li key={id}>{id === 'create-rfq' ? 'RFQ' : id === 'me12-batch' ? 'SLT' : id === 'me01-source-list' ? 'Source List' : 'APQP'}: {seconds} {zh ? '秒' : 'sec'} / {id === 'create-rfq' ? zh ? '分组' : 'group' : zh ? '记录' : 'record'}</li>)}</ul>
+        </details>}
+      </section>
       <div className={styles.dashboardGrid}>
         <section className={`card ${styles.quickActions}`}>
           <div className={styles.sectionHeader}>
@@ -133,6 +152,10 @@ export function DashboardPage({
       </div>
     </div>
   )
+}
+function savedTime(ms: number, zh: boolean): string {
+  const minutes = Math.floor(ms / 60000), hours = Math.floor(minutes / 60)
+  return hours ? zh ? `${hours} 小时 ${minutes % 60} 分` : `${hours}h ${minutes % 60}m` : zh ? `${minutes} 分钟` : `${minutes} min`
 }
 
 function buildMetrics(history: ExecutionHistoryEntry[], zh: boolean, loading: boolean) {

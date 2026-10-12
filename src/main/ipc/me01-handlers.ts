@@ -88,6 +88,7 @@ export function registerMe01Handlers(
     try { runId = guided.begin() } catch (error) { return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: getErrorMessage(error) } }
     try {
     // Re-read immediately before any SAP write; invalid inputs never launch the engine.
+    reportProgress({ stage: 'preparing', status: 'running', message: 'Checking the Source List workbook and preparing SAP. No SAP changes have started yet.' })
     const preview = await excelService.preview(input.excelPath)
     if (!preview.uniqueMaterials) return { success: false, errorCode: 'INVALID_CONFIG', message: 'No valid materials were found.' }
     const historyEntry = await history.start({ operation: 'me01-source-list', diagnosticRunId: runId, label: 'ME01 Source List — Plant C100', summary: 'ME01 source-list batch is running.', tcode: 'ME01' })

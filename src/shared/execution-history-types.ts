@@ -6,6 +6,7 @@ export type ExecutionHistoryStatus =
   | 'Partial'
   | 'Failed'
   | 'Cancelled'
+  | 'Interrupted'
 
 export interface ExecutionHistoryEntry {
   id: string
@@ -32,6 +33,8 @@ export interface ExecutionHistoryEntry {
   logPath?: string
   resultPath?: string
   backupPath?: string
+  recoveryResolvedAt?: string
+  recoveryResolutionNote?: string
 }
 
 export interface ExecutionHistoryQuery {
@@ -83,6 +86,6 @@ function isExecutionHistoryStatus(value: unknown): value is ExecutionHistoryStat
     value === 'Success' ||
     value === 'Partial' ||
     value === 'Failed' ||
-    value === 'Cancelled'
+    value === 'Cancelled' || value === 'Interrupted'
   )
 }

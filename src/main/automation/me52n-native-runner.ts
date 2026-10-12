@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import type { Me52nBatchConfig, Me52nBatchProgress, Me52nBatchResult } from '../../shared/me52n-types'
+import type { GeneratedArtifacts } from '../services/generated-artifacts'
 
 interface EnginePaths { executable: string; executableArgs?: string[]; script: string; preferScript?: boolean }
 interface FinalEvent {
@@ -22,13 +23,14 @@ export class Me52nNativeRunner {
   private child: ChildProcessWithoutNullStreams | null = null
   private cancelRequested = false
 
-  constructor(private readonly enginePaths: EnginePaths) {}
+  constructor(private readonly enginePaths: EnginePaths, private readonly artifacts?: GeneratedArtifacts) {}
 
   async run(config: Me52nBatchConfig, report: (progress: Me52nBatchProgress) => void): Promise<Me52nBatchResult> {
     if (this.child) return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Another ME52N run is already in progress.' }
     const launch = await this.resolveLaunch()
     if (!launch) return { success: false, errorCode: 'ENGINE_UNAVAILABLE', message: 'The ME52N Project Ref engine is unavailable.' }
     this.cancelRequested = false
+    const artifactDirectory = this.artifacts ? await this.artifacts.create('me52n-project-ref') : ''
     report({ stage: 'preparing', status: 'running', message: 'Reading the workbook and preparing ME52N workers.' })
 
     return await new Promise<Me52nBatchResult>((resolve) => {
@@ -40,10 +42,12 @@ export class Me52nNativeRunner {
       try {
         this.child = spawn(launch.command, launch.args, {
           shell: false,
-          windowsHide: true,
+          windowsHide: true, cwd: artifactDirectory || undefined,
           env: {
             ...process.env,
             PYTHONIOENCODING: 'utf-8',
+            HUB_ARTIFACT_DIR: artifactDirectory, ...(artifactDirectory ? { TEMP: artifactDirectory, TMP: artifactDirectory } : {}),
+            CHECKPOINT_PATH: '',
             EXCEL_PATH: config.excelPath,
             SOURCE_SHEET_NAME: config.sheetName,
             PR_COLUMN: String(config.prColumn),
@@ -114,7 +118,7 @@ export class Me52nNativeRunner {
         report({ stage: 'complete', status: failed > 0 ? 'failed' : 'success', current: processed, total: event.planned ?? planned, message })
         finish({ success: true, message, processed, succeeded, skipped, failed, browserCount: event.workers ?? 0, resultPath: event.logPath ?? config.excelPath, checkpointPath: event.checkpointPath ?? '', backupPath: event.backupPath ?? '' })
       })
-    })
+    }).finally(async () => { if (artifactDirectory) await this.artifacts?.finish(artifactDirectory).catch(() => undefined) })
   }
 
   cancel(): boolean { if (!this.child) return false; this.cancelRequested = true; return this.child.kill() }

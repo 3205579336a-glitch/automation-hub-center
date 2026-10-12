@@ -20,7 +20,8 @@ export class ExecutionHistoryService {
   constructor(
     private readonly historyPath: string,
     private readonly logger: DiagnosticLogger,
-    private readonly cleanup?: (entry: ExecutionHistoryEntry, protectedPaths?: string[]) => Promise<string[]>
+    private readonly cleanup?: (entry: ExecutionHistoryEntry, protectedPaths?: string[]) => Promise<string[]>,
+    private readonly protectedRuns: () => Set<string> = () => new Set()
   ) {}
 
   async start(
@@ -63,6 +64,18 @@ export class ExecutionHistoryService {
     return (await this.getPage(query)).entries
   }
 
+  async markRecoveryResolved(id: string, note: string): Promise<void> {
+    // Human review is not execution success. Preserve partial/failed outcomes and all counts.
+    await this.mutate(entries => entries.map(entry => entry.id !== id ? entry : { ...entry,
+      ...(entry.status === 'Running' ? { status: 'Interrupted' as const, summary: 'Interrupted RFQ run manually reviewed; not automatically resumed.' } : {}),
+      recoveryResolvedAt: new Date().toISOString(), recoveryResolutionNote: note }))
+  }
+  async markInterruptedRfqRuns(ids: Set<string>): Promise<void> {
+    if (!ids.size) return
+    await this.mutate(entries => entries.map(entry => entry.operation === 'create-rfq' && entry.status === 'Running' && ids.has(entry.id)
+      ? { ...entry, status: 'Interrupted' as const, summary: 'Hub restarted without a confirmed RFQ finish. Verify SAP through Safe Recovery before retrying.' } : entry))
+  }
+
   async getPage(query: ExecutionHistoryQuery): Promise<ExecutionHistoryResult> {
     await this.writeQueue.catch(() => undefined)
     const entries = await this.readOrMigrate()
@@ -95,19 +108,20 @@ export class ExecutionHistoryService {
     try {
       this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
         const entries = await this.readOrMigrate(true)
-        const removed = entries.filter(entry => entry.status !== 'Running' && (before === undefined ||
+        const protectedIds = this.protectedRuns()
+        const removed = entries.filter(entry => entry.status !== 'Running' && !protectedIds.has(entry.id) && (before === undefined ||
           Date.parse(entry.completedAt || entry.startedAt) < before))
         const ids = new Set(removed.map(entry => entry.id))
         await this.writeEntries(entries.filter(entry => !ids.has(entry.id)))
         deleted = removed.length
-        if (before === undefined && entries.some(entry => entry.status === 'Running')) warnings.push('Unfinished execution records and their diagnostics were kept.')
+        if (before === undefined && entries.some(entry => entry.status === 'Running' || protectedIds.has(entry.id))) warnings.push('Unfinished execution records and their diagnostics were kept.')
         const protectedPaths = entries.flatMap(entry => [entry.resultPath, entry.backupPath]).filter((path): path is string => Boolean(path))
         for (const entry of removed) {
           try { warnings.push(...await this.cleanup?.(entry, protectedPaths) ?? []) }
           catch { warnings.push('Some associated diagnostics could not be safely removed and were kept.') }
         }
         // Keep shared diagnostics attributed to unfinished runs, even on Clear All.
-        try { warnings.push(...await this.logger.purge(before, new Set(entries.filter(entry => entry.status === 'Running').map(entry => entry.id)))) }
+        try { warnings.push(...await this.logger.purge(before, new Set([...protectedIds, ...entries.filter(entry => entry.status === 'Running').map(entry => entry.id)]))) }
         catch { warnings.push('Some shared diagnostic logs could not be cleaned and were kept.') }
       })
       await this.writeQueue
@@ -121,7 +135,7 @@ export class ExecutionHistoryService {
       const entries = await this.readOrMigrate(true)
       const entry = entries.find(item => item.id === id)
       if (!entry) throw new Error('This execution record no longer exists.')
-      if (entry.status === 'Running') throw new Error('Running execution records cannot be deleted.')
+      if (entry.status === 'Running' || this.protectedRuns().has(id)) throw new Error('Running or unresolved execution records cannot be deleted.')
       // Commit the removal before cleanup; a failed history write never erases diagnostics.
       await this.writeEntries(entries.filter(item => item.id !== id))
       try { warnings = await this.cleanup?.(entry) ?? [] } catch { warnings.push('Some diagnostic files were kept because cleanup failed.') }
@@ -136,7 +150,8 @@ export class ExecutionHistoryService {
   ): Promise<void> {
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
       const entries = await this.readOrMigrate(true)
-      await this.writeEntries(retainPerformance(mutation(entries).slice(0, MAX_STORED_ENTRIES)))
+      const protectedIds = this.protectedRuns()
+      await this.writeEntries(retainPerformance(mutation(entries).filter((entry, index) => index < MAX_STORED_ENTRIES || entry.status === 'Running' || protectedIds.has(entry.id))))
     })
     return this.writeQueue
   }
@@ -270,7 +285,7 @@ function isHistoryEntry(value: unknown): value is ExecutionHistoryEntry {
       candidate.status === 'Success' ||
       candidate.status === 'Partial' ||
       candidate.status === 'Failed' ||
-      candidate.status === 'Cancelled')
+      candidate.status === 'Cancelled' || candidate.status === 'Interrupted')
   )
 }
 

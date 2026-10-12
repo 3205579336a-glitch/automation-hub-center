@@ -6,6 +6,8 @@ import { basename, dirname, join, resolve, relative, isAbsolute } from 'node:pat
 import { createInterface } from 'node:readline'
 import type { RfqBatchConfig, RfqBatchProgress, RfqBatchResult, RfqExcelPreview } from '../../shared/rfq-batch-types'
 import type { AutomationInteraction, InteractionResponse } from '../../shared/automation-interaction'
+import type { RfqRecoveryRecorder } from '../../shared/rfq-safe-recovery'
+import type { GeneratedArtifacts } from '../services/generated-artifacts'
 
 interface EnginePaths {
   executable: string
@@ -34,17 +36,20 @@ export class RfqNativeRunner {
   private launchPromise?: Promise<{ command: string; args: string[] }>
   private allowedPaths = new Set<string>()
 
-  constructor(private readonly enginePaths: EnginePaths, readonly runsDirectory: string, private readonly appVersion: string) {}
+  constructor(private readonly enginePaths: EnginePaths, readonly runsDirectory: string, private readonly appVersion: string,
+    private readonly recovery?: RfqRecoveryRecorder, private readonly artifacts?: GeneratedArtifacts) {}
 
   async preview(config: RfqBatchConfig): Promise<RfqExcelPreview> {
     const directory = await this.createRun('preview')
-    const path = join(directory, 'input', basename(config.excelPath))
-    await copyFile(config.excelPath, path)
-    const launch = await this.resolveLaunch()
-    const output = await this.invoke(launch, ['--hub', '--validate-only', '--excel-path', path, '--target-env', config.environment], directory)
-    const preview = output.events.find((event) => event.type === 'VALIDATION_COMPLETED')?.preview
-    if (output.code !== 0 || !preview) throw new Error(output.events.at(-1)?.message || output.error || 'Could not validate the RFQ workbook.')
-    return { ...preview, fingerprint: createHash('sha256').update(await readFile(path)).digest('hex') }
+    try {
+      const path = join(directory, 'input', basename(config.excelPath))
+      await copyFile(config.excelPath, path)
+      const launch = await this.resolveLaunch()
+      const output = await this.invoke(launch, ['--hub', '--validate-only', '--excel-path', path, '--target-env', config.environment], directory)
+      const preview = output.events.find((event) => event.type === 'VALIDATION_COMPLETED')?.preview
+      if (output.code !== 0 || !preview) throw new Error(output.events.at(-1)?.message || output.error || 'Could not validate the RFQ workbook.')
+      return { ...preview, fingerprint: createHash('sha256').update(await readFile(path)).digest('hex') }
+    } finally { await this.artifacts?.finish(directory).catch(() => undefined) }
   }
 
   async run(config: RfqBatchConfig, report: (progress: RfqBatchProgress) => void, runId: string = randomUUID()): Promise<RfqBatchResult> {
@@ -55,6 +60,9 @@ export class RfqNativeRunner {
     let resultPath = ''
     let last: EngineEvent | undefined
     let diagnosticsPath = ''
+    let recorded = false
+    let closed = false
+    let recoveryIssue = false
     try {
       directory = await this.createRun(runId)
       diagnosticsPath = join(directory, 'logs')
@@ -68,11 +76,32 @@ export class RfqNativeRunner {
         throw new Error('The workbook changed after preview. Upload it again and review the new group summary.')
       }
       await copyFile(input, resultPath)
+      // Failure to create durable review evidence blocks launch before SAP can be touched.
+      this.recovery?.begin(runId, config.environment, resultPath)
+      recorded = Boolean(this.recovery)
       report({ stage: 'preparing', status: 'running', runId, message: 'Validating a local working copy before connecting to SAP.' })
       const launch = await this.resolveLaunch()
       const args = ['--hub', '--excel-path', resultPath, '--run-id', runId, '--target-env', config.environment, '--event-mode', 'jsonl', '--stop-file', this.stopFile, '--control-dir', this.controlDirectory]
+      const readyFile = this.recovery ? join(directory, 'temp', 'hub-ready.json') : undefined
+      if (readyFile) args.push('--hub-ready-file', readyFile)
       if (config.productionConfirmed) args.push('--production-confirmed')
       const output = await this.invoke(launch, args, directory, (event) => {
+        if (event.type === 'ENGINE_READY' && this.recovery && readyFile) {
+          // py.exe/PyInstaller may launch a different PID. Track the actual engine before releasing the gate.
+          const pid = (event as EngineEvent & { pid?: number }).pid
+          if (!Number.isInteger(pid) || pid! <= 0) throw new Error('Invalid RFQ engine identity.')
+          this.recovery.launched(runId, pid!)
+          void writeFile(readyFile, JSON.stringify({ runId, pid }), 'utf8').catch(() => undefined)
+          return
+        }
+        try { this.recovery?.observe(runId, { ...event }) }
+        catch (error) {
+          // A lost boundary cannot later be healed by a clean terminal event. Request normal safe stopping,
+          // not a process kill or SAP rollback, and require review even if later ledger writes succeed.
+          recoveryIssue = true
+          void this.cancel().catch(() => undefined)
+          throw error
+        }
         last = event
         if (event.resultPath) resultPath = event.resultPath
         if (event.type === 'ACTION_REQUIRED' && event.state === 'WAITING_FOR_USER' && event.runId === runId
@@ -96,12 +125,18 @@ export class RfqNativeRunner {
           this.responding = false
         }
         try { report(toProgress(event)) } catch { /* Presentation must not affect engine state. */ }
-      }, true)
+      }, true, readyFile ? async pid => {
+        this.recovery!.launched(runId, pid)
+        // No marker yet: wait for the actual Python engine identity above.
+      } : undefined)
+      this.recovery?.close(runId, recoveryIssue ? null : output.code)
+      closed = true
       const terminal = [...output.events].reverse().find((event) => ['RUN_COMPLETED', 'RUN_FAILED', 'RUN_CANCELLED'].includes(event.type))
-      const completed = terminal?.type === 'RUN_COMPLETED' && output.code === 0
+      const completed = !recoveryIssue && terminal?.type === 'RUN_COMPLETED' && output.code === 0
+      const recoveryMessage = recoveryIssue ? 'Recovery evidence could not be stored reliably. Safe stop was requested. Verify SAP and review Safe Recovery before retrying.' : undefined
       const metadata = { appVersion: this.appVersion, engineVersion: '32', runId, automationType: 'RFQ',
         timestamp: new Date().toISOString(), environment: config.environment,
-        lastStage: last?.type, error: completed ? undefined : terminal?.message || output.error,
+        lastStage: last?.type, error: completed ? undefined : recoveryMessage || terminal?.message || output.error,
         terminal, resultPath }
       await writeFile(join(diagnosticsPath, 'run.json'), JSON.stringify(metadata, null, 2), 'utf8')
       for (const target of [resultPath, diagnosticsPath]) {
@@ -111,7 +146,7 @@ export class RfqNativeRunner {
       const logPath = [...output.events].reverse().find((event) => event.logPath)?.logPath
       if (logPath && this.isInsideRun(logPath) && await exists(logPath)) await copyFile(logPath, join(diagnosticsPath, basename(logPath)))
       if (!completed) return { success: false, errorCode: terminal?.type === 'RUN_CANCELLED' ? 'CANCELLED' : 'EXECUTION_FAILED',
-        message: terminal?.message || output.error || 'The engine stopped without a completion event. Review local logs before restarting.',
+        message: recoveryMessage || terminal?.message || output.error || 'The engine stopped without a completion event. Review local logs before restarting.',
         runId, resultPath, logPath, diagnosticsPath, rfqNumbers: terminal?.rfqNumbers,
         processed: terminal?.processed, total: terminal?.total, succeeded: terminal?.succeeded,
         skipped: terminal?.skipped, failed: terminal?.failed }
@@ -128,6 +163,8 @@ export class RfqNativeRunner {
       }
       return { success: false, errorCode: 'EXECUTION_FAILED', message, runId, diagnosticsPath }
     } finally {
+      if (recorded && !closed) { try { this.recovery?.close(runId, null) } catch { /* Preserve the existing uncertain ledger, never erase evidence. */ } }
+      if (directory) await this.artifacts?.finish(directory).catch(() => undefined)
       this.child = null
       this.busy = false
       this.stopFile = ''
@@ -174,7 +211,8 @@ export class RfqNativeRunner {
   }
 
   private async createRun(id: string): Promise<string> {
-    const directory = join(this.runsDirectory, id === 'preview' ? 'preview-' + randomUUID() : id)
+    const runId = id === 'preview' ? 'preview-' + randomUUID() : id
+    const directory = this.artifacts ? await this.artifacts.create('create-rfq', runId) : join(this.runsDirectory, runId)
     await Promise.all(['input', 'output', 'logs', 'temp'].map((name) => mkdir(join(directory, name), { recursive: true })))
     return directory
   }
@@ -206,7 +244,7 @@ export class RfqNativeRunner {
   }
 
   private async invoke(launch: { command: string; args: string[] }, args: string[], directory: string,
-    onEvent?: (event: EngineEvent) => void, active = false): Promise<{ code: number | null; events: EngineEvent[]; error: string }> {
+    onEvent?: (event: EngineEvent) => void, active = false, onLaunch?: (pid: number) => Promise<void>): Promise<{ code: number | null; events: EngineEvent[]; error: string }> {
     return await new Promise((resolveOutput, reject) => {
       const log = createWriteStream(join(directory, 'logs', 'engine.log'), { encoding: 'utf8' })
       const events: EngineEvent[] = []
@@ -218,6 +256,12 @@ export class RfqNativeRunner {
         env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', PYTHONUNBUFFERED: '1',
           TEMP: join(directory, 'temp'), TMP: join(directory, 'temp') } })
       if (active) this.child = child
+      if (onLaunch) child.once('spawn', () => {
+        void onLaunch(child.pid!).catch(reason => {
+          error = `Recovery launch handshake failed: ${String(reason)}`
+          // No marker is issued on failure; the engine must exit before any SAP access.
+        })
+      })
       const stdout = createInterface({ input: child.stdout })
       const stderr = createInterface({ input: child.stderr })
       stdout.on('line', (line) => {
@@ -228,7 +272,10 @@ export class RfqNativeRunner {
           if (typeof event.type !== 'string') return
           events.push(event)
           onEvent?.(event)
-        } catch { error = 'Invalid structured event from the RFQ engine.' }
+        } catch (reason) {
+          error = `RFQ event could not be processed: ${reason instanceof Error ? reason.message : String(reason)}`
+          log.write(error + '\n')
+        }
       })
       stderr.on('line', (line) => { error = line; log.write(line + '\n') })
       child.once('error', (reason) => { stdout.close(); stderr.close(); log.end(); reject(reason) })

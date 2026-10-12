@@ -1,0 +1,24 @@
+.panel { padding: 1.25rem; margin-bottom: 1.4rem; border-left: 4px solid var(--warning); }
+.header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+.header h3 { display: flex; gap: .5rem; align-items: center; color: var(--text-strong); margin: 0; }
+.panel p { color: var(--text-muted); line-height: 1.65; overflow-wrap: anywhere; }
+.record { border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem; }
+.record > strong { color: var(--text-strong); }
+.record dl { display: grid; grid-template-columns: minmax(150px, .35fr) minmax(0, 1fr); gap: .6rem 1rem; }
+.record dt { color: var(--text-muted); }
+.record dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.warning { padding: .8rem 1rem; border-radius: 8px; background: var(--warning-soft); color: var(--warning-text) !important; }
+.actions { display: flex; gap: .65rem; flex-wrap: wrap; }
+.record details { margin-top: .8rem; color: var(--text-muted); }
+.record summary { cursor: pointer; }
+.dialog { width: min(560px, calc(100vw - 2rem)); box-sizing: border-box; max-height: calc(100dvh - 2rem); overflow: auto; border: 1px solid var(--border); border-radius: 18px; padding: 1.5rem; background: var(--surface); color: var(--text); box-shadow: 0 22px 80px #0006; }
+.dialog::backdrop { background: #0008; }
+.dialog h2 { margin: 0 0 1rem; color: var(--text-strong); font-size: 1.35rem; }
+.dialog p, .steps { line-height: 1.65; overflow-wrap: anywhere; }
+.context { background: var(--surface-muted); border-radius: 10px; padding: .85rem 1rem; line-height: 1.7; overflow-wrap: anywhere; }
+.steps { padding-left: 1.4rem; }
+.steps li { padding: .35rem 0; }
+.dialog details { color: var(--text-muted); margin-top: 1rem; overflow-wrap: anywhere; }
+.dialog summary { cursor: pointer; }
+.dialogActions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: .75rem; padding-top: 1.25rem; }
+@media (max-width: 760px) { .record dl { grid-template-columns: 1fr; } }

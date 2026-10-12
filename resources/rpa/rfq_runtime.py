@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import traceback
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def initialize(env_path):
     parser.add_argument("--production-confirmed", action="store_true")
     parser.add_argument("--stop-file", default="")
     parser.add_argument("--control-dir", default="")
+    parser.add_argument("--hub-ready-file", default="")
     args, _ = parser.parse_known_args()
     if args.hub:
         for key in ENGINE_KEYS:
@@ -60,6 +62,24 @@ def initialize(env_path):
 def emit(args, event, **data):
     print("HUB_EVENT:" + json.dumps({"type": event, "runId": args.run_id,
           "engineVersion": ENGINE_VERSION, **data}, ensure_ascii=False, default=str), flush=True)
+
+
+def wait_for_hub_ready(args):
+    """Launch-only safety gate. Never resumes a prior SAP operation."""
+    marker = getattr(args, 'hub_ready_file', '')
+    if not marker:
+        return  # Standalone and validation behavior are unchanged.
+    emit(args, 'ENGINE_READY', pid=os.getpid())
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        try:
+            data = json.loads(Path(marker).read_text(encoding='utf-8'))
+            if data.get('runId') == args.run_id and data.get('pid') == os.getpid():
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.05)
+    raise RuntimeError('Hub did not confirm durable RFQ process tracking. SAP launch was blocked.')
 
 
 def validate_workbook(engine, path):
@@ -230,6 +250,7 @@ def run_hub(engine, args):
         event("VALIDATION_COMPLETED", preview=preview)
         if args.validate_only:
             return 0
+        wait_for_hub_ready(args)
         if preview["invalidRows"] or not preview["validRows"]:
             raise ValueError("Correct all invalid rows and provide at least one ready material before starting.")
         if args.target_env == "PROD" and not args.production_confirmed:

@@ -1,3 +1,4 @@
+import { isManualTimeBaselines, type ManualTimeBaselines } from './time-savings'
 export type SupportedBrowser = 'chrome' | 'msedge'
 export type AppLanguage = 'en' | 'zh-CN'
 export type AppFontSize = 'small' | 'medium' | 'large'
@@ -17,6 +18,8 @@ export interface AppSettings {
   notificationSounds?: boolean
   openResultAfterCompletion?: boolean
   maxConcurrentSapSessions?: number
+  manualTimeBaselines?: ManualTimeBaselines
+  manualTimeCalibrated?: boolean
 }
 
 export type SaveSettingsResult =
@@ -43,6 +46,8 @@ export function isAppSettings(value: unknown): value is AppSettings {
       candidate.fontSize === 'large') &&
     (candidate.theme === 'light' || candidate.theme === 'dark') &&
     (candidate.notificationSounds === undefined || typeof candidate.notificationSounds === 'boolean') &&
+    (candidate.manualTimeBaselines === undefined || isManualTimeBaselines(candidate.manualTimeBaselines)) &&
+    (candidate.manualTimeCalibrated === undefined || typeof candidate.manualTimeCalibrated === 'boolean') &&
     (candidate.openResultAfterCompletion === undefined || typeof candidate.openResultAfterCompletion === 'boolean') &&
     (candidate.maxConcurrentSapSessions === undefined || Number.isInteger(candidate.maxConcurrentSapSessions) && Number(candidate.maxConcurrentSapSessions) >= 1 && Number(candidate.maxConcurrentSapSessions) <= 5)
   )

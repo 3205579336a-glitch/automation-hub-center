@@ -7,6 +7,7 @@ interface StatusBadgeProps {
     | 'Running'
     | 'Failed'
     | 'Cancelled'
+    | 'Interrupted'
     | 'Active'
     | 'Coming Soon'
 }

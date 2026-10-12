@@ -39,6 +39,7 @@ class BatchCancelledError extends Error {}
 export class Me12BatchRunner {
   private running = false
   private cancelRequested = false
+  private artifactDirectory = ''
   private readonly contexts = new Set<BrowserContext>()
 
   constructor(
@@ -125,7 +126,8 @@ export class Me12BatchRunner {
         }
       }
       reportProgress({ stage: 'backing-up', message: 'Creating a timestamped Excel backup…' })
-      session = await this.excelService.prepareRun(config)
+      session = await this.excelService.prepareRun(config, guidance?.runId)
+      this.artifactDirectory = session.artifactDirectory ?? ''
       const workbookSession = session
 
       const browserName = settings.browser === 'chrome' ? 'Google Chrome' : 'Microsoft Edge'
@@ -146,7 +148,7 @@ export class Me12BatchRunner {
               headless: false,
               viewport: null,
               acceptDownloads: true,
-              downloadsPath: settings.defaultDownloadFolder || undefined
+              downloadsPath: this.artifactDirectory || settings.defaultDownloadFolder || undefined
             }
           )
           this.contexts.add(context)
@@ -369,6 +371,8 @@ export class Me12BatchRunner {
         [...this.contexts].map((context) => context.close().catch(() => undefined))
       )
       this.contexts.clear()
+      if (session) await this.excelService.finishRun(session).catch(() => undefined)
+      this.artifactDirectory = ''
       for (const slot of browserSlots) {
         this.slotManager.release(slot)
       }
@@ -399,7 +403,7 @@ export class Me12BatchRunner {
         }
         lastError = errorMessage(error)
         const screenshotPath = join(
-          this.screenshotDirectory,
+          this.artifactDirectory || this.screenshotDirectory,
           `ME12_${safeFilename(task.infoRecord)}_${timestampForFile()}_attempt-${attempt + 1}.png`
         )
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined)

@@ -2,8 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import type { Me01BatchConfig, Me01BatchProgress, Me01BatchResult } from '../../shared/me01-types'
+import { resolveMe01Business } from '../../shared/me01-types'
 import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
 import type { AutomationInteraction } from '../../shared/automation-interaction'
+import type { GeneratedArtifacts } from '../services/generated-artifacts'
 
 interface EnginePaths {
   executable: string
@@ -37,9 +39,11 @@ export class Me01NativeRunner {
   private child: ChildProcessWithoutNullStreams | null = null
   private cancelRequested = false
 
-  constructor(private readonly enginePaths: EnginePaths) {}
+  constructor(private readonly enginePaths: EnginePaths, private readonly artifacts?: GeneratedArtifacts) {}
 
   async run(config: Me01BatchConfig, reportProgress: (progress: Me01BatchProgress) => void, guidance?: GuidanceContext): Promise<Me01BatchResult> {
+    let business: ReturnType<typeof resolveMe01Business>
+    try { business = resolveMe01Business(config) } catch (error) { return { success: false, errorCode: 'INVALID_CONFIG', message: getErrorMessage(error) } }
     if (this.child) {
       return { success: false, errorCode: 'OPERATION_IN_PROGRESS', message: 'Another ME01 run is already in progress.' }
     }
@@ -48,6 +52,7 @@ export class Me01NativeRunner {
       return { success: false, errorCode: 'ENGINE_UNAVAILABLE', message: 'The ME01 SAP GUI engine is unavailable.' }
     }
     this.cancelRequested = false
+    const artifactDirectory = this.artifacts ? await this.artifacts.create('me01-source-list', guidance?.runId) : ''
     reportProgress({ stage: 'preparing', status: 'running', message: 'Preparing the ME01 source-list batch.' })
 
     return await new Promise<Me01BatchResult>((resolve) => {
@@ -63,8 +68,10 @@ export class Me01NativeRunner {
       try {
         this.child = spawn(launch.command, launch.args, {
           shell: false,
-          windowsHide: true,
-          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '' }
+          windowsHide: true, cwd: artifactDirectory || undefined,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '',
+            ME01_PURCH_ORG: business.purchasingOrganization, ME01_VALID_FROM: business.validFrom, ME01_VALID_TO: business.validTo,
+            HUB_ARTIFACT_DIR: artifactDirectory, ...(artifactDirectory ? { TEMP: artifactDirectory, TMP: artifactDirectory } : {}) }
         })
       } catch (error) {
         finish({ success: false, errorCode: 'ENGINE_UNAVAILABLE', message: getErrorMessage(error) })
@@ -128,7 +135,7 @@ export class Me01NativeRunner {
           backupPath: result.backupPath ?? ''
         })
       })
-    })
+    }).finally(async () => { if (artifactDirectory) await this.artifacts?.finish(artifactDirectory).catch(() => undefined) })
   }
 
   cancel(): boolean {

@@ -20,7 +20,7 @@ export class LocalStoragePaths {
     this.dataDirectory = join(this.rootDirectory, 'data')
     this.logsDirectory = join(this.rootDirectory, 'logs')
     this.browserProfilesDirectory = join(this.rootDirectory, 'browser-profiles')
-    this.me12ScreenshotsDirectory = join(this.rootDirectory, 'me12-error-screenshots')
+    this.me12ScreenshotsDirectory = join(this.logsDirectory, 'me12-error-screenshots')
     this.settingsPath = join(this.dataDirectory, 'settings.json')
     this.executionHistoryPath = join(this.dataDirectory, 'execution-history.json')
     this.legacySettingsPath = join(userDataDirectory, 'settings.json')

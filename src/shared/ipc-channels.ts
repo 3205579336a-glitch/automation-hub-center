@@ -1,4 +1,8 @@
 export const IPC_CHANNELS = {
+  getTimeSavings: 'dashboard:time-savings',
+  getRfqRecovery: 'rfq-recovery:list',
+  openRecoveryResult: 'rfq-recovery:open-result',
+  resolveRfqRecovery: 'rfq-recovery:resolve',
   getLocalIntelligence: 'intelligence:get',
   automationEta: 'intelligence:eta',
   downloadApqpTemplate: 'apqp:download-template',

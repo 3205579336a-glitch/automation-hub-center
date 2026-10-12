@@ -6,6 +6,7 @@ import type {
   Me12ExcelPreview,
   Me12PreviewRow
 } from '../../shared/me12-types'
+import type { GeneratedArtifacts } from './generated-artifacts'
 
 const STATUS_HEADER = 'ME12 Status'
 const OLD_VALUE_HEADER = 'Old Supplier Lead Time'
@@ -46,9 +47,14 @@ export interface Me12WorkbookSession {
   originalPath: string
   savePath: string
   backupPath: string
+  artifactDirectory?: string
 }
 
 export class Me12ExcelService {
+  constructor(private readonly artifacts?: GeneratedArtifacts) {}
+  async finishRun(session: Me12WorkbookSession): Promise<void> {
+    if (session.artifactDirectory) await this.artifacts?.finish(session.artifactDirectory)
+  }
   async preview(config: Me12BatchConfig): Promise<Me12ExcelPreview> {
     await validateExcelFile(config.excelPath)
     const workbook = await readWorkbook(config.excelPath, config.sheetName)
@@ -56,9 +62,10 @@ export class Me12ExcelService {
     return analyzeWorksheet(workbook.worksheet, effectiveConfig).preview
   }
 
-  async prepareRun(config: Me12BatchConfig): Promise<Me12WorkbookSession> {
+  async prepareRun(config: Me12BatchConfig, runId?: string): Promise<Me12WorkbookSession> {
     await validateExcelFile(config.excelPath)
-    const backupPath = createTimestampedPath(config.excelPath, 'backup')
+    const artifactDirectory = await this.artifacts?.create('me12-batch', runId)
+    const backupPath = createTimestampedPath(artifactDirectory ? join(artifactDirectory, parse(config.excelPath).base) : config.excelPath, 'backup')
     await copyFile(config.excelPath, backupPath)
 
     const workbook = await readWorkbook(config.excelPath, config.sheetName)
@@ -99,7 +106,7 @@ export class Me12ExcelService {
       updates,
       originalPath: config.excelPath,
       savePath: config.excelPath,
-      backupPath
+      backupPath, artifactDirectory
     }
   }
 
@@ -121,7 +128,7 @@ export class Me12ExcelService {
   async saveCheckpoint(session: Me12WorkbookSession): Promise<string> {
     const source = parse(session.originalPath)
     const temporaryPath = join(
-      dirname(session.savePath),
+      session.artifactDirectory || dirname(session.savePath),
       `.${source.name}.me12-write-${Date.now()}${source.ext}`
     )
     const updatedWorksheet = applyUpdates(
@@ -149,7 +156,7 @@ export class Me12ExcelService {
         throw error
       }
 
-      const fallbackPath = createTimestampedPath(session.originalPath, 'ME12_result')
+      const fallbackPath = createTimestampedPath(session.artifactDirectory ? join(session.artifactDirectory, source.base) : session.originalPath, 'ME12_result')
       await rename(temporaryPath, fallbackPath)
       session.savePath = fallbackPath
       return fallbackPath

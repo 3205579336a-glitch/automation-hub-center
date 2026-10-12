@@ -38,8 +38,8 @@ class HubUserInteraction:
             except ValueError:
                 pass
 
-    def wait(self, stage, issue, issue_zh, verify=None, **context):
-        message = issue
+    def wait(self, stage, issue, issue_zh, verify=None, detail=None, **context):
+        message = detail or issue
         while True:
             if self.stop_event.is_set():
                 raise HubStopped()

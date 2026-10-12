@@ -3,6 +3,7 @@ import importlib.util
 import io
 import os
 import sys
+import json
 import threading
 import queue
 import tempfile
@@ -106,40 +107,32 @@ class Tests(unittest.TestCase):
             self.assertIs(me01.find_hub_session(), idle)
         self.assertEqual(busy_task.findById.call_count, 1)  # wnd[1] read, no text/click writes
 
-    def test_source_supplier_recheck_checks_same_material_before_any_write(self):
-        session = sap_session()
-        fields = {
-            'wnd[0]/usr/ctxtEORD-MATNR': SimpleNamespace(Text=''),
-            'wnd[0]/usr/ctxtEORD-WERKS': SimpleNamespace(Text='', SetFocus=Mock()),
-            'wnd[0]/usr/tblSAPLMEORTC_0205': SimpleNamespace(RowCount=2),
-            'wnd[0]': SimpleNamespace(sendVKey=Mock()),
-            'wnd[0]/tbar[0]/btn[11]': SimpleNamespace(Press=Mock()),
-            'wnd[0]/sbar': SimpleNamespace(MessageType='', Text='')
-        }
-        session.findById = lambda name, *args: fields.get(name)
-        apply = Mock()
-        def pause(stage, issue, zh, verify, **context):
-            fields['wnd[0]/usr/ctxtEORD-MATNR'].Text = 'WRONG'
-            with self.assertRaises(RuntimeError): verify()
-            apply.assert_not_called()
-            fields['wnd[0]/usr/ctxtEORD-MATNR'].Text = '16808656'
-            return verify()
-        with patch.object(me01, 'HUB_INTERACTION', SimpleNamespace(wait=pause)), patch.object(me01, 'wait_ready'), patch.object(me01, 'locate_supplier_row', side_effect=[(-1, ['101']), (1, ['101', '41889'])]), patch.object(me01, 'apply_target_supplier', apply):
-            me01.maintain_material(session, '16808656', '41889')
-        apply.assert_called_once_with(session, 'wnd[0]/usr/tblSAPLMEORTC_0205', 1)
-        fields['wnd[0]/tbar[0]/btn[11]'].Press.assert_called_once()
 
     def test_source_unknown_error_saves_and_never_starts_next_material(self):
         session = sap_session()
-        results = SimpleNamespace(assignments={'a': {'material': '16808656', 'parma': '41889', 'rows': [2]}, 'b': {'material': 'NEXT', 'parma': '41889', 'rows': [3]}}, existing_statuses=Mock(return_value=set()), write=Mock(), save=Mock())
+        results = SimpleNamespace(mode='excel-com', assignments={'a': {'material': '16808656', 'parma': '41889', 'dualSourcing': False, 'rows': [2]}, 'b': {'material': 'NEXT', 'parma': '41889', 'dualSourcing': True, 'rows': [3]}}, existing_statuses=Mock(return_value={'SUCCESS'}), write=Mock(), save=Mock())
         hub = SimpleNamespace(start_listener=Mock(), stop_event=threading.Event(), wait=Mock(side_effect=HubStopped()))
         events = []
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'input.xlsx'
             path.write_bytes(b'mocked')
-            with patch.dict(os.environ, {'EXCEL_PATH': str(path), 'HUB_RUN_ID': 'MOCK'}), patch.object(me01, 'WorkbookResults', return_value=results), patch.object(me01, 'HubUserInteraction', return_value=hub), patch.object(me01, 'find_hub_session', return_value=session), patch.object(me01, 'open_me01'), patch.object(me01, 'maintain_material', side_effect=RuntimeError('unknown')) as maintain, patch.object(me01, 'emit', side_effect=lambda event, **payload: events.append((event, payload))):
+            with patch.dict(os.environ, {'EXCEL_PATH': str(path), 'HUB_RUN_ID': 'MOCK', 'HUB_ARTIFACT_DIR':folder, 'ME01_VALID_FROM':'2026-10-12', 'ME01_VALID_TO':'2099-12-31', 'ME01_PURCH_ORG':'C100'}), patch.object(me01, 'WorkbookResults', return_value=results), patch.object(me01, 'HubUserInteraction', return_value=hub), patch.object(me01, 'find_hub_session', return_value=session), patch.object(me01, 'open_me01'), patch.object(me01, 'maintain_material', side_effect=RuntimeError('unknown')) as maintain, patch.object(me01, 'emit', side_effect=lambda event, **payload: events.append((event, payload))):
                 self.assertEqual(me01.main(), 0)
             maintain.assert_called_once()
+            maintain.assert_called_once()
+            self.assertEqual(maintain.call_args.args[:7], (session, '16808656', '41889', False, '2026-10-12','2099-12-31','C100'))
+            self.assertEqual(maintain.call_args.args[7]['material'], '16808656')
+            self.assertEqual(maintain.call_args.args[7]['outcome'], 'failed')
+            self.assertIn('unknown', hub.wait.call_args.kwargs['detail'])
+            self.assertEqual(hub.wait.call_args.kwargs['rows'], [2])
+            self.assertTrue((Path(folder) / 'me01-errors.log').exists())
+            diagnostics = [json.loads(line) for line in (Path(folder)/'me01-performance.jsonl').read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(diagnostics[0]['phase'],'startup')
+            self.assertEqual(diagnostics[0]['workbookMode'],'excel-com')
+            self.assertEqual(diagnostics[0]['recordCount'],2)
+            self.assertGreaterEqual(diagnostics[0]['engineReadySeconds'],0)
+            self.assertEqual(diagnostics[-1]['outcome'],'failed')
+            results.existing_statuses.assert_not_called()
             self.assertGreaterEqual(results.save.call_count, 2)
             self.assertTrue(events[-1][1]['cancelled'])
             self.assertEqual(events[-1][1]['processed'], 1)

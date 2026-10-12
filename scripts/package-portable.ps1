@@ -1,10 +1,11 @@
+param([switch]$SkipDependencyInstall)
 $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $releaseRoot = Join-Path $projectRoot 'release'
 $unpackedPath = Join-Path $releaseRoot 'win-unpacked'
 $version = (Get-Content -Raw (Join-Path $projectRoot 'package.json') | ConvertFrom-Json).version
-$timestamp = Get-Date -Format 'yyyyMMdd-HHmm'
+$timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $zipPath = Join-Path $releaseRoot "SAP-Automation-Toolbox-$version-portable-$timestamp.zip"
 
 $engineExecutable = Join-Path $projectRoot 'resources\rpa-engine\automation-engine\automation-engine.exe'
@@ -15,7 +16,7 @@ if (-not $engineIsStale) {
   $engineIsStale = $null -ne ($engineSources | Where-Object { $_.LastWriteTimeUtc -gt $engineTimestamp } | Select-Object -First 1)
 }
 if ($engineIsStale) {
-  & (Join-Path $PSScriptRoot 'build-automation-engine.ps1')
+  & (Join-Path $PSScriptRoot 'build-automation-engine.ps1') -SkipDependencyInstall:$SkipDependencyInstall
 }
 Push-Location $projectRoot
 try {

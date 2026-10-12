@@ -6,27 +6,30 @@ import shutil
 import sys
 import subprocess
 import time
+ENGINE_IMPORT_STARTED = time.perf_counter()
+import traceback
 import winreg
 from collections import OrderedDict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import openpyxl
 import win32com.client
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hub_user_interaction import HubStopped, HubUserInteraction, session_identity, verify_session
+from me01_source_table import SourceListTable, parse_date
+ENGINE_IMPORT_SECONDS = time.perf_counter() - ENGINE_IMPORT_STARTED
 
 HUB_INTERACTION = None
 
 
 PLANT = "C100"
-SOURCE_LIST_USAGE = "1"
 SHEET_NAME = "ME01_Input"
 EVENT_PREFIX = "ME01_EVENT "
 MATERIAL_HEADERS = {"material no.", "material no", "material", "part number"}
 PARMA_HEADERS = {"parma", "parma no.", "parma no", "supplier", "supplier code", "intended supplier"}
+DUAL_HEADERS = {"dual sourcing", "dual sourcing (yes/no)", "是否双供", "双供"}
 RESULT_HEADERS = {"status": "ME01 Status", "error": "Error Message", "updated": "Updated At"}
 
 
@@ -47,6 +50,15 @@ def normalize_identifier(value: Any) -> str:
     if text.isdigit():
         return text.lstrip("0") or "0"
     return text.upper()
+
+
+def parse_dual_sourcing(value: Any, row: int) -> bool:
+    text = clean(value).lower()
+    if text in {"yes", "true", "1", "是", "√", "✓", "☑"}:
+        return True
+    if text in {"no", "false", "0", "否"}:
+        return False
+    raise RuntimeError(f"Excel row {row}: Dual Sourcing / 是否双供 is required. Select Yes or No; blank is not No.")
 
 
 def same_path(first: Any, second: Path) -> bool:
@@ -71,6 +83,33 @@ def find_open_excel_workbook(path: Path) -> Any | None:
     return None
 
 
+def excel_column(index: int) -> str:
+    text = ''
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        text = chr(65 + remainder) + text
+    return text
+
+
+def com_range_values(sheet: Any, first_row: int, last_row: int, columns: int) -> tuple:
+    """Read one Excel rectangle, not one COM round-trip per input cell."""
+    if first_row < 1 or last_row < first_row or columns < 1:
+        raise RuntimeError('Invalid Excel input range.')
+    try:
+        reader = sheet.Range
+    except AttributeError:
+        # Compatibility for old adapters; real Excel supports Range.Value2.
+        return tuple(tuple(sheet.Cells(row, column).Value for column in range(1, columns + 1))
+                     for row in range(first_row, last_row + 1))
+    values = reader(f'A{first_row}:{excel_column(columns)}{last_row}').Value2
+    if first_row == last_row and columns == 1:
+        values = ((values,),)
+    if (not isinstance(values, (tuple, list)) or len(values) != last_row-first_row+1
+            or any(not isinstance(row, (tuple, list)) or len(row) != columns for row in values)):
+        raise RuntimeError('Excel bulk input range is incomplete. No SAP record will be started.')
+    return tuple(tuple(row) for row in values)
+
+
 class WorkbookResults:
     def __init__(self, path: Path, backup_path: Path) -> None:
         self.path = path
@@ -87,6 +126,8 @@ class WorkbookResults:
             self._read_excel_com()
             emit("preparing", message="The workbook is open in Excel. Results will be written through Excel without closing it.")
         else:
+            # Do not pay openpyxl's import/load cost for an already-open workbook.
+            import openpyxl
             self.mode = "openpyxl"
             shutil.copy2(path, backup_path)
             self.workbook = openpyxl.load_workbook(path)
@@ -107,80 +148,89 @@ class WorkbookResults:
     def _excel_sheet(self) -> Any:
         try:
             preferred = self.workbook.Worksheets(SHEET_NAME)
-            titles = [clean(preferred.Cells(1, column).Value).lower() for column in range(1, max(1, int(preferred.UsedRange.Columns.Count)) + 1)]
+            titles = [clean(value).lower() for value in com_range_values(preferred, 1, 1, max(1, int(preferred.UsedRange.Columns.Count)))[0]]
             if MATERIAL_HEADERS.intersection(titles) and PARMA_HEADERS.intersection(titles):
                 return preferred
         except Exception:
             pass
         sheets = [self.workbook.Worksheets(index) for index in range(1, self.workbook.Worksheets.Count + 1)]
-        return self._input_sheet(sheets, lambda sheet: [clean(sheet.Cells(1, column).Value).lower() for column in range(1, max(1, int(sheet.UsedRange.Columns.Count)) + 1)])
+        return self._input_sheet(sheets, lambda sheet: [clean(value).lower() for value in com_range_values(sheet, 1, 1, max(1, int(sheet.UsedRange.Columns.Count)))[0]])
 
-    def _add_assignment(self, material: str, parma: str, row: int) -> None:
-        if not material and not parma:
+    def _add_assignment(self, material: str, parma: str, row: int, dual_value: Any) -> None:
+        if not material and not parma and not clean(dual_value):
             return
         if not material or not parma:
             raise RuntimeError(f"Excel row {row} must contain both Material No. and Parma.")
         material_key = normalize_identifier(material)
         parma_key = normalize_identifier(parma)
+        dual = parse_dual_sourcing(dual_value, row)
         existing = self.assignments.get(material_key)
         if existing and normalize_identifier(existing["parma"]) != parma_key:
             raise RuntimeError(f"Material {material} has more than one Parma. Keep only the supplier that should be fixed.")
         if existing:
+            if existing["dualSourcing"] != dual:
+                raise RuntimeError(f"Material {material} has conflicting Dual Sourcing values. Use the same Yes/No for duplicate rows.")
             existing["rows"].append(row)
         else:
-            self.assignments[material_key] = {"material": material, "parma": parma, "rows": [row]}
+            self.assignments[material_key] = {"material": material, "parma": parma, "dualSourcing": dual, "rows": [row]}
 
     def _read_excel_com(self) -> None:
         max_column = max(1, int(self.sheet.UsedRange.Columns.Count))
         max_row = max(1, int(self.sheet.UsedRange.Rows.Count))
         material_column = 0
         parma_column = 0
-        for column in range(1, max_column + 1):
-            title = clean(self.sheet.Cells(1, column).Value).lower()
+        dual_column = 0
+        headers = com_range_values(self.sheet, 1, 1, max_column)[0]
+        for column, value in enumerate(headers, start=1):
+            title = clean(value).lower()
             if title in MATERIAL_HEADERS:
                 material_column = column
             if title in PARMA_HEADERS:
                 parma_column = column
+            if title in DUAL_HEADERS:
+                dual_column = column
             for key, result_title in RESULT_HEADERS.items():
                 if title == result_title.lower():
                     self.result_columns[key] = column
-        if not material_column or not parma_column:
-            raise RuntimeError('Missing required column(s) "Material No." or "Parma". Download a fresh ME01 template.')
+        if not material_column or not parma_column or not dual_column:
+            raise RuntimeError('Required columns: Material No., Parma, Dual Sourcing / 是否双供. Download the new ME01 template.')
         for key, title in RESULT_HEADERS.items():
             if key not in self.result_columns:
                 max_column += 1
                 self.sheet.Cells(1, max_column).Value = title
                 self.result_columns[key] = max_column
-        for row in range(2, max_row + 1):
-            self._add_assignment(clean(self.sheet.Cells(row, material_column).Value), clean(self.sheet.Cells(row, parma_column).Value), row)
+        input_columns = max(material_column, parma_column, dual_column)
+        block_rows = min(4096, max(1, 100_000 // input_columns))
+        for first in range(2, max_row + 1, block_rows):
+            block = com_range_values(self.sheet, first, min(max_row, first + block_rows - 1), input_columns)
+            for offset, values in enumerate(block):
+                self._add_assignment(clean(values[material_column-1]), clean(values[parma_column-1]),
+                                     first+offset, values[dual_column-1])
 
     def _read_openpyxl(self) -> None:
         material_column = 0
         parma_column = 0
+        dual_column = 0
         for column in range(1, self.sheet.max_column + 1):
             title = clean(self.sheet.cell(1, column).value).lower()
             if title in MATERIAL_HEADERS:
                 material_column = column
             if title in PARMA_HEADERS:
                 parma_column = column
+            if title in DUAL_HEADERS:
+                dual_column = column
             for key, result_title in RESULT_HEADERS.items():
                 if title == result_title.lower():
                     self.result_columns[key] = column
-        if not material_column or not parma_column:
-            raise RuntimeError('Missing required column(s) "Material No." or "Parma". Download a fresh ME01 template.')
+        if not material_column or not parma_column or not dual_column:
+            raise RuntimeError('Required columns: Material No., Parma, Dual Sourcing / 是否双供. Download the new ME01 template.')
         for key, title in RESULT_HEADERS.items():
             if key not in self.result_columns:
                 column = self.sheet.max_column + 1
                 self.sheet.cell(1, column, title)
                 self.result_columns[key] = column
         for row in range(2, self.sheet.max_row + 1):
-            self._add_assignment(clean(self.sheet.cell(row, material_column).value), clean(self.sheet.cell(row, parma_column).value), row)
-
-    def existing_statuses(self, rows: list[int]) -> set[str]:
-        column = self.result_columns["status"]
-        if self.mode == "excel-com":
-            return {clean(self.sheet.Cells(row, column).Value).upper() for row in rows}
-        return {clean(self.sheet.cell(row, column).value).upper() for row in rows}
+            self._add_assignment(clean(self.sheet.cell(row, material_column).value), clean(self.sheet.cell(row, parma_column).value), row, self.sheet.cell(row, dual_column).value)
 
     def write(self, rows: list[int], status: str, message: str) -> None:
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -316,65 +366,27 @@ def open_me01(session: Any) -> None:
         raise RuntimeError(f"ME01 could not be opened: {error}")
 
 
-def supplier_at(session: Any, table_id: str, visible_row: int) -> str:
-    table = session.findById(table_id)
+def source_date(value: Any) -> date:
+    return parse_date(value)
+
+
+def check_source_stop() -> None:
+    if HUB_INTERACTION and HUB_INTERACTION.stop_event.is_set():
+        raise HubStopped()
+
+
+def write_run_diagnostic(directory: Path, diagnostics: dict) -> None:
+    # Audit failures must never cause SAP actions/Save to be replayed.
     try:
-        return clean(table.GetCell(visible_row, 2).Text)
-    except Exception:
+        with open(directory / 'me01-performance.jsonl', 'a', encoding='utf-8') as log:
+            log.write(json.dumps(diagnostics, ensure_ascii=False) + '\n')
+    except OSError:
         pass
-    for control_type in ("ctxt", "txt"):
-        try:
-            return clean(session.findById(f"{table_id}/{control_type}EORD-LIFNR[2,{visible_row}]").Text)
-        except Exception:
-            pass
-    return ""
 
 
-def scroll_table(session: Any, table_id: str, position: int) -> Any:
-    table = session.findById(table_id)
-    table.VerticalScrollbar.Position = position
-    wait_ready(session)
-    return session.findById(table_id)
-
-
-def locate_supplier_row(session: Any, table_id: str, target_parma: str) -> tuple[int, list[str]]:
-    table = session.findById(table_id)
-    total_rows = int(table.RowCount)
-    visible_rows = max(1, int(table.VisibleRowCount))
-    found_suppliers: list[str] = []
-    for start in range(0, total_rows, visible_rows):
-        scroll_table(session, table_id, start)
-        page_rows = min(visible_rows, total_rows - start)
-        for visible_row in range(page_rows):
-            supplier = supplier_at(session, table_id, visible_row)
-            if not supplier:
-                continue
-            if supplier not in found_suppliers:
-                found_suppliers.append(supplier)
-            if normalize_identifier(supplier) == normalize_identifier(target_parma):
-                return start + visible_row, found_suppliers
-    return -1, found_suppliers
-
-
-def apply_target_supplier(session: Any, table_id: str, target_absolute_row: int) -> None:
-    table = session.findById(table_id)
-    total_rows = int(table.RowCount)
-    visible_rows = max(1, int(table.VisibleRowCount))
-    for start in range(0, total_rows, visible_rows):
-        table = scroll_table(session, table_id, start)
-        page_rows = min(visible_rows, total_rows - start)
-        for visible_row in range(page_rows):
-            supplier = supplier_at(session, table_id, visible_row)
-            if not supplier:
-                continue
-            absolute_row = start + visible_row
-            if absolute_row == target_absolute_row:
-                session.findById(f"{table_id}/chkRM06W-FESKZ[8,{visible_row}]").Selected = True
-                table.GetAbsoluteRow(absolute_row).Selected = True
-                session.findById(f"{table_id}/ctxtEORD-AUTET[10,{visible_row}]").Text = SOURCE_LIST_USAGE
-
-
-def maintain_material(session: Any, material: str, parma: str) -> None:
+def maintain_material(session: Any, material: str, parma: str, dual_sourcing: bool,
+                      valid_from: str, valid_to: str, purchasing_org: str, diagnostics: dict | None = None) -> bool:
+    started = time.perf_counter()
     material_field = session.findById("wnd[0]/usr/ctxtEORD-MATNR")
     plant_field = session.findById("wnd[0]/usr/ctxtEORD-WERKS")
     material_field.Text = material
@@ -386,49 +398,70 @@ def maintain_material(session: Any, material: str, parma: str) -> None:
     error = status_error(session)
     if error:
         raise RuntimeError(error)
-
-    table_id = "wnd[0]/usr/tblSAPLMEORTC_0205"
-    table = session.findById(table_id)
-    if int(table.RowCount) < 1:
-        raise RuntimeError("No source-list row was available for this material and Plant C100.")
-    target_row, suppliers = locate_supplier_row(session, table_id, parma)
-    if target_row < 0:
-        supplier_list = ", ".join(suppliers) if suppliers else "none"
-        if HUB_INTERACTION is None:
-            raise RuntimeError(f"Parma {parma} was not found in the Source List. Suppliers shown: {supplier_list}.")
-        identity = session_identity(session)
-        def verify_supplier():
+    identity = session_identity(session) if HUB_INTERACTION else None
+    def verify_context():
+        if identity:
             verify_session(session, identity)
-            if clean(session.findById("wnd[0]/usr/ctxtEORD-MATNR").Text) != material or clean(session.findById("wnd[0]/usr/ctxtEORD-WERKS").Text).upper() != PLANT:
-                raise RuntimeError("Return to the same material and Plant C100 before continuing.")
-            row, _ = locate_supplier_row(session, table_id, parma)
-            if row < 0:
-                raise RuntimeError("The intended supplier is still missing.")
-            return row
-        target_row = HUB_INTERACTION.wait("SOURCE_SUPPLIER",
-            "The intended supplier is missing. Review the current Source List in SAP before continuing.",
-            "当前货源清单未找到指定供应商。请在 SAP 检查当前物料，确认后再继续。",
-            verify_supplier, materials=[material], rows=[], instructions="Review the same material and intended supplier. Do not delete other suppliers.",
-            instructionsZh="检查同一物料和指定供应商，不要删除其他供应商。")
-    apply_target_supplier(session, table_id, target_row)
-    session.findById("wnd[0]/tbar[0]/btn[11]").Press()
-    wait_ready(session)
-    error = status_error(session)
-    if error:
-        raise RuntimeError(error)
+        if (normalize_identifier(session.findById('wnd[0]/usr/ctxtEORD-MATNR').Text) != normalize_identifier(material)
+                or clean(session.findById('wnd[0]/usr/ctxtEORD-WERKS').Text).upper() != PLANT):
+            raise RuntimeError('The SAP material/Plant changed. No row will be guessed; return to the original record.')
+    adapter = SourceListTable(session, "wnd[0]/usr/tblSAPLMEORTC_0205", wait_ready, check_source_stop, verify_context)
+    navigation_finished = time.perf_counter()
+    save_started = None
+    saved = False
+    try:
+        changed = adapter.upsert(parma, dual_sourcing, valid_from, valid_to, purchasing_org)
+        if not changed:
+            return False
+        adapter.stage = "Save Source List"
+        save_started = time.perf_counter()
+        session.findById("wnd[0]/tbar[0]/btn[11]").Press()
+        wait_ready(session)
+        error = status_error(session)
+        if error:
+            raise RuntimeError(error)
+        if session.findById("wnd[1]", False) is not None or clean(session.findById("wnd[0]/sbar").MessageType).upper() != "S":
+            raise RuntimeError("SAP Save has no confirmed success response or has an open dialog. Stop and review SAP; Save will not be replayed.")
+        saved = True
+        return True
+    except Exception as error:
+        raise RuntimeError(f"[{adapter.stage}] {clean(error)}") from error
+    finally:
+        if diagnostics is not None:
+            finished = time.perf_counter()
+            diagnostics.update({
+                'sapNavigationSeconds': round(navigation_finished-started, 3),
+                'tableMaintenanceSeconds': round((save_started or finished)-navigation_finished, 3),
+                'sapSaveSeconds': round(finished-save_started, 3) if save_started is not None else 0,
+                'sapTotalSeconds': round(finished-started, 3),
+                'savedConfirmed': saved, 'lastStage': adapter.stage,
+                'reader': dict(adapter.metrics), 'readTrace': adapter.read_trace,
+                'existingRowsBefore': adapter.before_rows, 'plannedRowsAfter': adapter.expected_rows,
+                'existingRowPolicy': 'retain all row data; only Fix / MRP may change'
+            })
 
 
 def main() -> int:
     global HUB_INTERACTION
+    startup_started = time.perf_counter()
     HUB_INTERACTION = HubUserInteraction("Source List", emit) if os.environ.get("HUB_RUN_ID") else None
     if HUB_INTERACTION:
         HUB_INTERACTION.start_listener()
+    valid_from = os.environ.get('ME01_VALID_FROM', date.today().isoformat())
+    valid_to = os.environ.get('ME01_VALID_TO', '2099-12-31')
+    purchasing_org = os.environ.get('ME01_PURCH_ORG', 'C100').strip().upper()
+    if parse_date(valid_from) > parse_date(valid_to) or not purchasing_org or len(purchasing_org) > 4 or not purchasing_org.isalnum():
+        raise RuntimeError('Invalid Source List validity or purchasing organization.')
     excel_path = Path(os.environ.get("EXCEL_PATH", "")).expanduser().resolve()
     if not excel_path.is_file():
         raise RuntimeError("The selected ME01 workbook was not found.")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = excel_path.with_name(f"{excel_path.stem}_backup_{timestamp}{excel_path.suffix}")
+    from hub_artifacts import artifact_directory
+    run_artifacts = artifact_directory('me01')
+    backup_path = run_artifacts / f"{excel_path.stem}_backup_{timestamp}{excel_path.suffix}"
+    workbook_started = time.perf_counter()
     results = WorkbookResults(excel_path, backup_path)
+    workbook_seconds = time.perf_counter() - workbook_started
     emit("preparing", message=f"Backup created: {backup_path}", backupPath=str(backup_path))
 
     total = len(results.assignments)
@@ -436,6 +469,7 @@ def main() -> int:
     succeeded = failed = skipped = 0
     cancelled = False
     try:
+        connect_started = time.perf_counter()
         if HUB_INTERACTION:
             try:
                 session = find_hub_session()
@@ -452,44 +486,88 @@ def main() -> int:
         else:
             session = find_active_session()
         identity = session_identity(session) if HUB_INTERACTION else None
+        connect_seconds = time.perf_counter() - connect_started
+        navigation_started = time.perf_counter()
         open_me01(session)
+        write_run_diagnostic(run_artifacts, {
+            'phase': 'startup', 'timestamp': datetime.now().astimezone().isoformat(),
+            'importSeconds': round(ENGINE_IMPORT_SECONDS, 3),
+            'workbookSeconds': round(workbook_seconds, 3), 'workbookMode': results.mode,
+            'sapConnectSeconds': round(connect_seconds, 3),
+            'openMe01Seconds': round(time.perf_counter()-navigation_started, 3),
+            'engineReadySeconds': round(time.perf_counter()-startup_started+ENGINE_IMPORT_SECONDS, 3),
+            'recordCount': total,
+        })
         for current, assignment in enumerate(results.assignments.values(), start=1):
             if HUB_INTERACTION and HUB_INTERACTION.stop_event.is_set():
                 raise HubStopped()
             material = assignment["material"]
             parma = assignment["parma"]
             excel_rows = assignment["rows"]
-            if results.existing_statuses(excel_rows) == {"SUCCESS"}:
-                skipped += 1
-                emit("record", message=f"{material} / Parma {parma}: already SUCCESS; skipped.", material=material,
-                     parma=parma, current=current, total=total, status="skipped")
-                continue
+            dual = assignment["dualSourcing"]
+            record_started = time.perf_counter()
+            diagnostics = {'material': material, 'parma': parma, 'excelRows': excel_rows, 'dualSourcing': dual}
+            outcome = 'failed'
             emit("record", message=f"Material {material}: locating Parma {parma} in Plant {PLANT}.",
                  material=material, parma=parma, current=current, total=total, status="running")
             try:
                 if HUB_INTERACTION:
                     verify_session(session, identity)
-                maintain_material(session, material, parma)
-                succeeded += 1
+                changed = maintain_material(session, material, parma, dual, valid_from, valid_to, purchasing_org, diagnostics)
+                outcome = 'saved' if changed else 'already-matches'
+                if changed:
+                    succeeded += 1
+                else:
+                    skipped += 1
                 results.write(excel_rows, "SUCCESS", "")
-                emit("record", message=f"{material} / Parma {parma}: matching Source List row fixed and saved.",
-                     material=material, parma=parma, current=current, total=total, status="success")
+                mode = "Yes: other Fix / MRP retained" if dual else "No: other Fix / MRP cleared"
+                elapsed = time.perf_counter()-record_started
+                emit("record", message=f"{material} / Parma {parma} / Dual Sourcing {mode}: {'verified and saved' if changed else 'already matches SAP; no save needed'}. {elapsed:.1f}s.",
+                     material=material, parma=parma, current=current, total=total, status="success" if changed else "skipped")
+            except HubStopped:
+                outcome = 'cancelled'
+                raise
             except Exception as error:
                 failed += 1
                 message = clean(error) or error.__class__.__name__
+                try:
+                    with open(run_artifacts / 'me01-errors.log', 'a', encoding='utf-8') as log:
+                        log.write(f'Excel rows {excel_rows}; Material {material}; Parma {parma}; Dual Sourcing {dual}\n{traceback.format_exc()}\n')
+                except OSError as log_error:
+                    message += f'; technical log could not be written: {clean(log_error)}'
                 results.write(excel_rows, "ERROR", message)
                 emit("record", message=f"{material} / Parma {parma}: {message}", material=material,
                      parma=parma, current=current, total=total, status="failed")
                 if HUB_INTERACTION:
                     results.save()
                     HUB_INTERACTION.wait("UNVERIFIED_STATE",
-                        "SAP could not safely complete this record. Partial results were saved. Stop and review details.",
-                        "当前记录无法安全完成。已保存部分结果，请停止并查看详情。", materials=[material])
+                        f"Material {material} / Parma {parma} could not be completed. Stop and review SAP; the detailed error is below. Save will not be replayed.",
+                        f"物料 {material} / Parma {parma} 未完成。请停止并核查 SAP，具体原因见下方详情；不会自动重复保存。",
+                        detail=message,
+                        materials=[material], rows=excel_rows,
+                        instructions=f'Technical trace: {run_artifacts / "me01-errors.log"}',
+                        instructionsZh=f'完整错误记录：{run_artifacts / "me01-errors.log"}')
                 try:
                     open_me01(session)
                 except Exception:
                     pass
+            finally:
+                diagnostics['sapAndResultWriteSeconds'] = round(time.perf_counter()-record_started, 3)
+                diagnostics['outcome'] = outcome
+                diagnostics['timestamp'] = datetime.now().astimezone().isoformat()
+                # Failed/stopped records cannot reach the normal completion block.
+                if outcome in {'failed', 'cancelled'}:
+                    write_run_diagnostic(run_artifacts, diagnostics)
+            excel_save_started = time.perf_counter()
             results.save()
+            diagnostics['excelSaveSeconds'] = round(time.perf_counter()-excel_save_started, 3)
+            diagnostics['totalRecordSeconds'] = round(time.perf_counter()-record_started, 3)
+            diagnostics['targetSeconds'] = 20
+            diagnostics['overTarget'] = diagnostics['totalRecordSeconds'] > 20
+            if outcome in {'saved', 'already-matches'}:
+                write_run_diagnostic(run_artifacts, diagnostics)
+            emit('performance', material=material, elapsedSeconds=diagnostics['totalRecordSeconds'],
+                 excelSaveSeconds=diagnostics['excelSaveSeconds'], targetSeconds=20, overTarget=diagnostics['overTarget'])
 
     except HubStopped:
         cancelled = True

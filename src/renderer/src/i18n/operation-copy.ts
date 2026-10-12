@@ -33,8 +33,8 @@ const copy = {
     'me01-source-list': {
       title: 'Automatically Maintain Source Lists in Batch',
       shortTitle: 'Batch Source List Maintenance',
-      description: 'Upload materials and Supplier Parma codes to mark the matching supplier as fixed in Plant C100. Other supplier records and existing fixed selections are preserved; no source list rows are deleted.',
-      steps: ['Download the template and fill materials and Supplier Parma codes', 'Upload and review the target suppliers; Plant is fixed at C100', 'Confirm the update, start the batch and check each material in the result file']
+      description: 'Upload materials, Supplier Parma and Dual Sourcing (Yes/No). The target source is added or reused with Fix and MRP 1. Yes keeps other Fix/MRP; No clears them. Existing records and dates are retained.',
+      steps: ['Fill material, Parma and required Dual Sourcing Yes/No in the template', 'Review dates, purchasing organization and Yes/No; No clears other Fix/MRP on all rows', 'Confirm and run; open Excel to review results. Duplicate/overlapping target rows pause without replaying Save']
     }
   },
   'zh-CN': {
@@ -60,8 +60,8 @@ const copy = {
     'me01-source-list': {
       title: '自动批量 Source List 维护',
       shortTitle: '自动批量 Source List 维护',
-      description: '上传物料和 Supplier Parma，系统在工厂 C100 自动勾选对应供应商的固定货源（Fix）。保留其他供应商记录和已有勾选，不删除货源清单行。',
-      steps: ['下载模板，填写物料和 Supplier Parma 供应商代码', '上传并核对目标供应商，工厂固定为 C100', '确认更新后开始批量处理，在结果文件中查看每个物料的结果']
+      description: '上传物料、Supplier Parma 和是否双供（Yes/No）。自动新增或复用目标货源，勾选 Fix、MRP 填 1。Yes 保留其他 Fix/MRP，No 清空其他标识；保留所有记录及日期。',
+      steps: ['填写模板中的物料、Parma 和必填的是否双供 Yes/No', '核对有效期、采购组织及双供选择；No 清空所有其他行 Fix/MRP', '确认执行后查看 Excel 结果；目标重复或有效期重叠时暂停，不重复保存']
     }
   }
 }

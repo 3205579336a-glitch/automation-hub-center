@@ -216,10 +216,12 @@ ENABLE_CHECKPOINT = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 _checkpoint_env = os.getenv("CHECKPOINT_PATH", "").strip()
+from hub_artifacts import artifact_directory, checkpoint_path
+ME52N_ARTIFACT_DIR = artifact_directory('me52n', create=False)
 CHECKPOINT_PATH = (
     _checkpoint_env
     if _checkpoint_env
-    else str(Path(EXCEL_PATH).with_name("ME52N_ProjectRef_Checkpoint.xlsx"))
+    else str(checkpoint_path('me52n', EXCEL_PATH, "ME52N_ProjectRef_Checkpoint.xlsx"))
 )
 
 CHECKPOINT_SHEET_NAME = os.getenv(
@@ -3734,6 +3736,11 @@ class CheckpointStore:
 
         if self.path.exists():
             self.workbook = openpyxl.load_workbook(self.path)
+        elif not _checkpoint_env and Path(EXCEL_PATH).with_name("ME52N_ProjectRef_Checkpoint.xlsx").exists():
+            # Preserve the old skip/recovery evidence when changing the default location.
+            # Read only: never move/delete the user's legacy checkpoint. Invalid evidence
+            # raises before any SAP work, rather than silently rerunning completed PRs.
+            self.workbook = openpyxl.load_workbook(Path(EXCEL_PATH).with_name("ME52N_ProjectRef_Checkpoint.xlsx"))
         else:
             self.workbook = openpyxl.Workbook()
             self.workbook.active.title = CHECKPOINT_SHEET_NAME
@@ -3876,7 +3883,8 @@ class SourceStatusWriter:
             return
 
         if CREATE_SOURCE_BACKUP:
-            self.backup_path = self.path.with_name(
+            ME52N_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+            self.backup_path = ME52N_ARTIFACT_DIR / (
                 f"{self.path.stem}_RPA_Backup_"
                 f"{datetime.datetime.now():%Y%m%d_%H%M%S_%f}"
                 f"{self.path.suffix}"
@@ -3891,7 +3899,8 @@ class SourceStatusWriter:
             if open_workbook is not None:
                 self.mode = "excel-com"
                 if self.backup_path is None:
-                    self.backup_path = self.path.with_name(
+                    ME52N_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+                    self.backup_path = ME52N_ARTIFACT_DIR / (
                         f"{self.path.stem}_RPA_Snapshot_"
                         f"{datetime.datetime.now():%Y%m%d_%H%M%S_%f}"
                         f"{self.path.suffix}"
@@ -4263,7 +4272,8 @@ def create_log_writer(batch_stats: Dict[str, int]) -> Tuple[Any, csv.DictWriter,
     end_row = batch_stats.get("batch_end_row", start_row)
     batch_label = "ALL" if BATCH_SIZE == 0 else f"{BATCH_NUMBER:03d}"
 
-    log_path = source_path.with_name(
+    ME52N_ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = ME52N_ARTIFACT_DIR / (
         f"ME52N_ProjectRef_Batch{batch_label}_"
         f"Rows{start_row}-{end_row}_"
         f"{datetime.datetime.now():%Y%m%d_%H%M%S}.csv"

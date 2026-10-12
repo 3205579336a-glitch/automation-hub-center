@@ -104,6 +104,11 @@ class RuntimeImprovements:
         self.group = None
         self.tasks = []
         self.phase = 'NPL'
+        # Stage labels are presentation, not proof that Create/Save was issued.
+        # Once a non-NPL button action is dispatched, protect this entire group
+        # through RFQ-number capture and Excel writeback, including uncertain COM errors.
+        self.write_started = False
+        self.stop_deferred_notified = False
         self.profile = None
         self.step_profile = defaultdict(lambda: {'seconds': 0., 'calls': 0})
         self.hard_seconds = self.setting('RFQ_WAIT_HARD_TIMEOUT_SEC', 180, 30, 900)
@@ -139,6 +144,9 @@ class RuntimeImprovements:
                 raise  # Preserve recognized popup/business recovery signals.
             except Exception:
                 result = None
+            # Stop can arrive while a COM read is in flight. Check again before
+            # returning a newly found button to its caller for an action.
+            self.stopped()
             elapsed = self.clock() - start
             if result is not None:
                 if warned:
@@ -146,10 +154,14 @@ class RuntimeImprovements:
                 return result
             if elapsed >= soft:
                 if not warned or elapsed - last_notice >= 5:
-                    self.event('SAP_SLOW', state='SAP_SLOW', step=self.phase, waitSeconds=round(elapsed, 1), message='SAP is responding slowly. Still waiting for ' + detail + '. No action is required yet.')
+                    message = ('Stop is pending; preserving the issued SAP action and current-group writeback. Still waiting for '
+                               if self.stop_deferred_notified else 'SAP is responding slowly. Still waiting for ')
+                    self.event('SAP_SLOW', state='SAP_SLOW', step=self.phase, waitDetail=detail, waitSeconds=round(elapsed, 1),
+                               message=message + detail + ('. No Save/Create action will be replayed.' if self.stop_deferred_notified else '. No action is required yet.'))
                     last_notice = elapsed
                 warned = True
             self.sleep(self.poll_seconds)
+        self.stopped()
         issue = f'SAP has not reached the expected state after {hard:.0f}s: {detail}. No SAP action will be replayed.'
         if self.controller is not None and self.tasks:
             return self.controller.wait('SAP_SLOW_HARD_TIMEOUT', issue, self.tasks, verify,
@@ -160,22 +172,33 @@ class RuntimeImprovements:
         raise self.engine.SapRpaError('SAP_SLOW_HARD_TIMEOUT', issue)
 
     def stopped(self):
-        # Preserve the accepted graceful-stop contract after BR creation starts:
-        # do not interrupt a pending SAP commit / RFQ number / Excel writeback.
-        # At a hard-timeout pause the shared controller still permits Stop, with
-        # an explicit review warning, but never replays the uncertain action.
-        if self.phase == 'NPL' and self.controller and self.controller.args.stop_file and os.path.exists(self.controller.args.stop_file):
-            self.controller.cancel('SAP_WAIT')
-            from rfq_interaction import HubCancelled
-            raise HubCancelled()
+        if not self.controller or not self.controller.args.stop_file or not os.path.exists(self.controller.args.stop_file):
+            return
+        if self.write_started:
+            # Never abandon a dispatched/possibly committed action just because
+            # the UI stage changed. A hard timeout still exits via Stop-only review.
+            if not self.stop_deferred_notified:
+                self.stop_deferred_notified = True
+                self.event('STOP_DEFERRED', state='RUNNING', step=self.phase,
+                           message='Stop request received. A SAP action has already been issued; preserving current-group completion and saved results. No next group will start. If the state stays uncertain, review in SAP before retrying.')
+            return
+        self.controller.state = 'CANCELLED'
+        self.event('STOP_ACKNOWLEDGED', state='RUNNING', step=self.phase,
+                   message='Stop request received before a new SAP create/save action. Ending the read-only wait and saving local cancellation status.')
+        self.controller.cancel('SAP_WAIT_BEFORE_WRITE')
+        from rfq_interaction import HubCancelled
+        raise HubCancelled()
 
     def install(self):
         engine, runtime = self.engine, self
         original_process = engine.process_group
         def process(sap, excel, group):
             runtime.group, runtime.tasks, runtime.phase = group, list(group.tasks), 'NPL'
+            runtime.write_started = False
+            runtime.stop_deferred_notified = False
             runtime.step_profile = defaultdict(lambda: {'seconds': 0., 'calls': 0})
             try:
+                runtime.stopped()
                 return original_process(sap, excel, group)
             finally:
                 runtime.event('RUNTIME_PROFILE', profile={key: {'seconds': round(value['seconds'], 6), 'calls': value['calls']} for key, value in runtime.step_profile.items()},
@@ -210,6 +233,19 @@ class RuntimeImprovements:
                 return sap.find(control_id, required=False)
             return runtime.measure('locateGridOrControl', lambda: runtime.wait(sap, predicate, timeout, control_id))
         self.replace(engine.SapSession, 'wait_exists', wait_exists)
+
+        def press(sap, control_id):
+            # Same single Press -> busy wait -> step pause order as the original
+            # engine. Locate first: waiting for btn[13] is not itself a SAP write.
+            control = sap.wait_exists(control_id)
+            runtime.stopped()
+            if runtime.phase != 'NPL':
+                runtime.write_started = True  # Set BEFORE COM: an exception may still mean SAP received it.
+            control.Press()
+            sap.wait_not_busy()
+            if engine.SAP_STEP_PAUSE_SEC:
+                time.sleep(engine.SAP_STEP_PAUSE_SEC)
+        self.replace(engine.SapSession, 'press', press)
 
         def wait_grid_columns(sap, control_id, columns, timeout=engine.SAP_LONG_WAIT_SEC):
             identity = session_identity(sap)

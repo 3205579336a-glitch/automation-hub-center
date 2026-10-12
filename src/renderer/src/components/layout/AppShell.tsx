@@ -80,14 +80,14 @@ export function AppShell({
             <ShieldCheck size={16} />
             <span>{t('localSecure')}</span>
           </div>
-          <span className={styles.version}>Version 0.2.3</span>
+          <span className={styles.version}>Version 0.2.4</span>
         </div>
       </aside>
 
       <div className={styles.content}>
         <header className={styles.topbar}>
           <div>
-            <span className={styles.eyebrow}>SAP Automation Toolbox</span>
+            <span className={styles.eyebrow}>Purchasing Automation Hub</span>
             <h1>{t(pageTitleKeys[activePage])}</h1>
           </div>
           <div className={styles.topbarRight}>

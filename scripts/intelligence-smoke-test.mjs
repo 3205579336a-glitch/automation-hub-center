@@ -99,7 +99,7 @@ try {
   // A corrupt ETA is advisory only: Stop remains available and execution continues.
   await app.evaluate(() => globalThis.__emitEtaMock({ remainingMs: -1 }))
   await eta.getByText('ETA unavailable', { exact: true }).waitFor()
-  assert.equal(await page.getByRole('button', { name: 'Stop', exact: true }).isEnabled(), true)
+  assert.equal(await page.getByRole('button', { name: 'Stop safely', exact: true }).isEnabled(), true)
   await app.evaluate(() => globalThis.__emitEtaMock({ remainingMs: 300000, completed: 3, confidence: 'high', historicalRuns: 8 }))
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await page.getByLabel('Language', { exact: true }).selectOption('zh-CN')

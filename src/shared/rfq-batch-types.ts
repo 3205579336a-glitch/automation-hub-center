@@ -65,6 +65,7 @@ export interface RfqBatchProgress {
   state?: 'WAITING_FOR_USER' | 'RECOVERING' | 'RUNNING' | 'CANCELLED' | 'SAP_SLOW'
   allowedActions?: ('continue' | 'stop' | 'open-fix-session')[]
   waitSeconds?: number
+  waitDetail?: string
   profile?: Record<string, { seconds: number; calls: number }>
   instructions?: string
   instructionsZh?: string
