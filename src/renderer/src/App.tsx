@@ -37,6 +37,7 @@ function pageFromHash(): PageId {
 
 export default function App(): React.JSX.Element {
   const [activePage, setActivePage] = useState<PageId>(pageFromHash)
+  const [visitedPages, setVisitedPages] = useState<Set<PageId>>(() => new Set([pageFromHash()]))
   const [guidedBusy, setGuidedBusy] = useState(false)
   const [rfqBusy, setRfqBusy] = useState(false)
   const [interactionState, setInteractionState] = useState<AutomationInteraction['state'] | null>(null)
@@ -45,6 +46,7 @@ export default function App(): React.JSX.Element {
   >({ language: 'en', fontSize: 'medium', theme: 'light' })
   const { notifications, notify, dismiss } = useNotifications()
   const automation = useSapAutomation(notify)
+  useEffect(() => { setVisitedPages(current => current.has(activePage) ? current : new Set([...current, activePage])) }, [activePage])
 
   useEffect(() => {
     const onHashChange = (): void => setActivePage(pageFromHash())
@@ -100,11 +102,11 @@ export default function App(): React.JSX.Element {
           <SafeRecoveryPanel notify={notify} busy={automation.busy || guidedBusy || rfqBusy || interactionState !== null} />
           {renderPage()}
           <div hidden={activePage !== 'create-rfq'}>
-            <CreateRfqPage notify={notify} onBack={() => navigate('operations')} onRunningChange={setRfqBusy} />
+            {(activePage === 'create-rfq' || visitedPages.has('create-rfq')) && <CreateRfqPage notify={notify} onBack={() => navigate('operations')} onRunningChange={setRfqBusy} />}
           </div>
-          <div hidden={activePage !== 'me12-lead-time'}><Me12LeadTimePage notify={notify} onBack={() => navigate('operations')} /></div>
-          <div hidden={activePage !== 'me01-source-list'}><Me01SourceListPage notify={notify} onBack={() => navigate('operations')} /></div>
-          <div hidden={activePage !== 'apqp-plan-closure'}><ApqpPlanClosurePage notify={notify} onBack={() => navigate('operations')} /></div>
+          <div hidden={activePage !== 'me12-lead-time'}>{(activePage === 'me12-lead-time' || visitedPages.has('me12-lead-time')) && <Me12LeadTimePage notify={notify} onBack={() => navigate('operations')} />}</div>
+          <div hidden={activePage !== 'me01-source-list'}>{(activePage === 'me01-source-list' || visitedPages.has('me01-source-list')) && <Me01SourceListPage notify={notify} onBack={() => navigate('operations')} />}</div>
+          <div hidden={activePage !== 'apqp-plan-closure'}>{(activePage === 'apqp-plan-closure' || visitedPages.has('apqp-plan-closure')) && <ApqpPlanClosurePage notify={notify} onBack={() => navigate('operations')} />}</div>
         </AppShell>
         <NotificationCenter notifications={notifications} onDismiss={dismiss} />
         <AutomationInteractionManager notify={notify} onStateChange={setInteractionState} />

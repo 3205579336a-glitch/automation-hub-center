@@ -5,6 +5,7 @@ import type { ApqpConfig, ApqpPreview, ApqpPreviewResult, ApqpProgress, ApqpResu
 import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
 import type { AutomationInteraction } from '../../shared/automation-interaction'
 import type { GeneratedArtifacts } from '../services/generated-artifacts'
+import { ApqpTemplateError, checkApqpTemplateHeaders } from '../services/excel-template-header'
 
 interface EngineEvent extends ApqpProgress {
   interaction?: AutomationInteraction
@@ -35,10 +36,12 @@ export class ApqpRunner {
 
   async preview(config: ApqpConfig): Promise<ApqpPreviewResult> {
     try {
+      await checkApqpTemplateHeaders(config.excelPath, config.sheetName)
       const event = await this.execute(config, true, () => undefined)
       if (!event.preview) throw new Error('The engine did not return a workbook preview.')
       return { success: true, preview: event.preview }
-    } catch (error) { return { success: false, message: messageOf(error) } }
+    } catch (error) { return { success: false, message: messageOf(error),
+      ...(error instanceof ApqpTemplateError ? { errorCode: 'APQP_TEMPLATE_INVALID' as const } : {}) } }
   }
 
   async run(config: ApqpConfig, report: (event: ApqpProgress) => void, guidance?: GuidanceContext): Promise<ApqpResult> {

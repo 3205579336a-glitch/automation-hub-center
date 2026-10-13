@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Save } from 'lucide-react'
 import type { AppSettings } from '../../../shared/settings-types'
-import { DEFAULT_MANUAL_SECONDS } from '../../../shared/time-savings'
 import { DiagnosticsPanel } from '../components/settings/DiagnosticsPanel'
 import { useLocalization } from '../i18n/use-localization'
 import { setNotificationSoundsEnabled } from '../hooks/notification-sound'
@@ -20,7 +19,7 @@ export function SettingsPage({ notify, onPreferencesSaved }: {
   const [settings, setSettings] = useState<AppSettings>(defaults)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [advanced, setAdvanced] = useState(false)
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   useEffect(() => {
     let active = true
     void window.sapAutomation.getSettings().then(stored => { if (active) setSettings(stored) })
@@ -56,26 +55,9 @@ export function SettingsPage({ notify, onPreferencesSaved }: {
       <p>{zh ? '所有数据与日志保存在本机，不收集 SAP 密码或证书。' : 'Data and logs stay on this computer. SAP passwords and certificates are not collected.'}</p>
       <p>{zh ? '备份、截图和独立结果统一保存在本地 logs 目录，已结束任务的生成文件60天后自动清理。原 Excel 和未核查的 RFQ 不删除；重要结果请另存。' : 'Backups, screenshots and separate results stay under local logs. Finished generated files expire after 60 days. Original Excel and unresolved RFQ evidence are kept; export important results.'}</p>
     </section>
-    <details className={`card ${styles.section}`} onToggle={event => setAdvanced(event.currentTarget.open)}>
-      <summary>{zh ? '高级 / Key User 设置' : 'Advanced / Key User Settings'}</summary>
-      {advanced && <><p>{zh ? '仅在公司环境需要调整时使用。普通操作不需要打开这里。' : 'Only for company-specific adjustments. Normal tasks do not require this area.'}</p>
-        <div className={styles.fields}>
-          <label className="field"><span>SAP WebGUI URL Template</span><input className="input" value={settings.sapWebGuiUrl} onChange={event => setSettings({ ...settings, sapWebGuiUrl: event.target.value })} /></label>
-          <label className="field"><span>{zh ? '浏览器' : 'Browser'}</span><select className="select" value={settings.browser} onChange={event => setSettings({ ...settings, browser: event.target.value === 'msedge' ? 'msedge' : 'chrome' })}><option value="chrome">Google Chrome</option><option value="msedge">Microsoft Edge</option></select></label>
-          <label className="field"><span>{zh ? '信息记录并发窗口' : 'Info Record worker windows'}</span><input className="input" type="number" min={1} max={8} value={settings.maxConcurrentBrowsers} onChange={event => setSettings({ ...settings, maxConcurrentBrowsers: Number(event.target.value) })} /></label>
-          <label className="field"><span>{zh ? 'APQP 最大并发会话' : 'APQP maximum sessions'}</span><input className="input" type="number" min={1} max={5} value={settings.maxConcurrentSapSessions ?? 3} onChange={event => setSettings({ ...settings, maxConcurrentSapSessions: Number(event.target.value) })} /></label>
-          <label className="field"><span>{zh ? '模板默认保存位置' : 'Default template download location'}</span><input className="input" value={settings.defaultDownloadFolder} onChange={event => setSettings({ ...settings, defaultDownloadFolder: event.target.value })} /></label>
-        </div>
-        <h3>{zh ? '预计节省时间：人工耗时基准' : 'Estimated savings: manual-time baselines'}</h3>
-        <p>{zh ? 'RFQ 每组35分钟，SLT / APQP 每条5分钟（按业务提供的人工耗时）；Source List 每条5分钟暂为参考值。RFQ 按分组，其余按记录，可根据实测调整。系统扣除整批实际运行时间，不计跳过或失败数量。' : 'Business-provided manual effort: RFQ 35 min/group; SLT / APQP 5 min/record. Source List 5 min/record remains a reference. Adjust against observed work. Full batch runtime is deducted; skipped or failed units are not counted.'}</p>
-        <div className={styles.fields}>{Object.entries(DEFAULT_MANUAL_SECONDS).map(([id, fallback]) => <label className="field" key={id}>
-          <span>{id === 'create-rfq' ? 'RFQ' : id === 'me12-batch' ? 'SLT' : id === 'me01-source-list' ? 'Source List' : 'APQP'} · {zh ? '人工耗时（秒）' : 'Manual seconds'}</span>
-          <input className="input" type="number" min={1} max={86400} value={settings.manualTimeBaselines?.[id as keyof typeof DEFAULT_MANUAL_SECONDS] ?? fallback}
-            onChange={event => setSettings({ ...settings, manualTimeCalibrated: false, manualTimeBaselines: { ...(settings.manualTimeBaselines ?? DEFAULT_MANUAL_SECONDS), [id]: Number(event.target.value) } })} /></label>)}</div>
-        <label><input type="checkbox" checked={settings.manualTimeCalibrated === true} onChange={event => setSettings({ ...settings, manualTimeCalibrated: event.target.checked })} /> {zh ? 'Key User 已根据实测人工操作校准基准' : 'Key user calibrated these baselines against measured manual work'}</label>
-        <button className="button" onClick={() => void window.sapAutomation.openSapWebGui()}>{zh ? '检查浏览器连接' : 'Check browser connection'}</button>
-        <DiagnosticsPanel notify={notify} />
-      </>}
+    <details className={`card ${styles.section}`} onToggle={event => setDiagnosticsOpen(event.currentTarget.open)}>
+      <summary>{zh ? '支持与日志' : 'Support & logs'}</summary>
+      {diagnosticsOpen && <DiagnosticsPanel notify={notify} />}
     </details></div>
   </div>
 }

@@ -12,19 +12,32 @@ const templateBytes = await readFile('resources/templates/APQP_Plan_Closure_Temp
 const archive = unzipSync(templateBytes)
 const key = 'xl/worksheets/sheet1.xml'
 let xml = strFromU8(archive[key])
-for (const [ref, value] of [['A2', '00012345'], ['D2', '0041889'], ['A3', '00099999'], ['D3', '0041889'], ['E3', '14.09.2026'], ['A4', '00077777']]) {
-  const pattern = new RegExp(`<x:c\\b[^>]*\\br="${ref}"[^>]*?(?:/>|>[\\s\\S]*?</x:c>)`)
+for (const [ref, value] of [['A2', '00012345'], ['B2', '0041889'], ['A3', '00099999'], ['B3', '0041889'], ['C3', '14.09.2026'], ['A4', '00077777']]) {
+  const pattern = new RegExp(`<((?:\\w+:)?)c\\b[^>]*\\br="${ref}"[^>]*?(?:/>|>[\\s\\S]*?</\\1c>)`)
   assert(pattern.test(xml), `Fixture cell ${ref} exists`)
-  xml = xml.replace(pattern, `<x:c r="${ref}" t="inlineStr"><x:is><x:t>${value}</x:t></x:is></x:c>`)
+  xml = xml.replace(pattern, (_, prefix) => `<${prefix}c r="${ref}" t="inlineStr"><${prefix}is><${prefix}t>${value}</${prefix}t></${prefix}is></${prefix}c>`)
 }
 archive[key] = strToU8(xml)
 const fixture = join(directory, 'APQP_fixture.xlsx')
 const bytes = zipSync(archive)
 await writeFile(fixture, bytes)
+// A header-only incompatible workbook must fail before any native preview.
+const wrongArchive = unzipSync(bytes)
+wrongArchive[key] = strToU8(xml.replace('Part No.', 'Unrelated column'))
+const wrongFixture = join(directory, 'Wrong_headers.xlsx')
+await writeFile(wrongFixture, zipSync(wrongArchive))
+// Old five-column layout remains readable; generated only inside the isolated test directory.
+const oldArchive = unzipSync(templateBytes)
+const prefix = /<((?:\w+:)?)worksheet\b/.exec(strFromU8(oldArchive[key]))[1]
+const row = (r, values) => `<${prefix}row r="${r}">${values.map((value,c) => `<${prefix}c r="${String.fromCharCode(65+c)}${r}" t="inlineStr"><${prefix}is><${prefix}t>${value}</${prefix}t></${prefix}is></${prefix}c>`).join('')}</${prefix}row>`
+oldArchive[key] = strToU8(strFromU8(oldArchive[key]).replace(/<(?:\w+:)?sheetData\b[^>]*>[\s\S]*?<\/(?:\w+:)?sheetData>/,
+  `<${prefix}sheetData>${row(1,['Part No.','Ver','Description','Vendor','APQP plan closure date'])}${row(2,['00012345','01','Legacy part','0041889',''])}${row(3,['00099999','02','Dated part','0041889','14.09.2026'])}</${prefix}sheetData>`))
+const oldFixture = join(directory, 'Legacy_APQP.xlsx'), oldBytes = zipSync(oldArchive)
+await writeFile(oldFixture, oldBytes)
 const config = { excelPath: fixture, sheetName: '', plant: 'C100', system: '', client: '', maxWorkers: 3, createSessions: true, maxItems: 0, overwriteExisting: false, confirmed: false }
 let app
 try {
-  app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${directory}`], env: { ...process.env, LOCALAPPDATA: directory } })
+  app = await electron.launch({ args: ['.', `--user-data-dir=${directory}`], env: { ...process.env, LOCALAPPDATA: directory } })
   const window = await app.firstWindow()
   const errors = []
   window.on('pageerror', (error) => errors.push(error.message))
@@ -65,11 +78,23 @@ try {
   assert.equal(rejected.success, false, 'Invalid settings rejected without contacting SAP')
   const invalid = await window.evaluate((c) => window.sapAutomation.previewApqp({ ...c, maxWorkers: 6 }), config)
   assert.equal(invalid.success, false)
+  const headerStart = Date.now()
+  const wrong = await window.evaluate((c) => window.sapAutomation.previewApqp(c), {...config,excelPath:wrongFixture})
+  assert.equal(wrong.success,false); assert.equal(wrong.errorCode,'APQP_TEMPLATE_INVALID')
+  console.log(`Wrong headers rejected through desktop IPC in ${Date.now()-headerStart}ms.`)
+  const legacy = await window.evaluate((c) => window.sapAutomation.previewApqp(c), {...config,excelPath:oldFixture})
+  assert(legacy.success,legacy.message)
+  assert.equal(legacy.preview.selected,1); assert.equal(legacy.preview.skipped,1)
+  assert.equal(legacy.preview.sample[0].vendor,'0041889')
+  assert.deepEqual(new Uint8Array(await readFile(oldFixture)),oldBytes,'Legacy preview does not alter the old workbook')
   const preview = await window.evaluate((c) => window.sapAutomation.previewApqp(c), config)
   assert(preview.success, preview.message)
   assert.equal(preview.preview.selected, 1)
   assert.equal(preview.preview.skipped, 1)
   assert.equal(preview.preview.invalid, 1)
+  assert.equal(preview.preview.modes.keepExisting.selected, 1)
+  assert.equal(preview.preview.modes.refreshExisting.selected, 2)
+  assert.equal(preview.preview.modes.refreshExisting.skipped, 0)
   assert.equal(preview.preview.sample[0].material, '00012345')
   assert.equal(preview.preview.sample[0].vendor, '0041889')
   const overwrite = await window.evaluate((c) => window.sapAutomation.previewApqp({ ...c, overwriteExisting: true }), config)
@@ -80,7 +105,7 @@ try {
   await window.getByRole('button', { name: 'Upload completed template', exact: true }).click()
   await window.getByText('00012345', { exact: true }).waitFor({ timeout: 30000 })
   assert.equal(await run.isEnabled(), false)
-  await window.screenshot({ path: join(artifacts, 'apqp-operation.png'), fullPage: true })
+  await window.screenshot({ path: join(artifacts, 'apqp-operation.png'), animations: 'disabled', timeout: 10000 })
   assert.deepEqual(errors, [])
   console.log('APQP smoke passed: download, guide, upload, real Excel preview, unchanged source, validation and authorization. No SAP query executed.')
 } catch (error) {

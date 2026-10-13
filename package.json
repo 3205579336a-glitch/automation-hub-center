@@ -17,7 +17,7 @@
     "test:productivity-recovery": "node --test scripts/test-productivity-recovery.mjs && py -3 scripts/test-rfq-launch-gate.py",
     "test:artifacts": "node --test scripts/test-generated-artifacts.mjs && py -3 scripts/test-hub-artifacts.py",
     "smoke:safe-recovery": "npm run build && node scripts/safe-recovery-smoke-test.mjs",
-    "test:apqp": "py -3 scripts/test-apqp-plan-closure.py",
+    "test:apqp": "node --test scripts/test-apqp-template-header.mjs && py -3 scripts/test-apqp-plan-closure.py",
     "test:guided": "node --test scripts/test-guided-automation.mjs && py -3 scripts/test-hub-user-interaction.py",
     "test:intelligence": "node --test scripts/test-local-intelligence.mjs",
     "test:me52n": "py -3 scripts/test-me52n-project-ref.py",

@@ -1,9 +1,9 @@
 .shell {
   display: grid;
-  min-width: 1100px;
-  min-height: 700px;
+  min-width: 0;
+  min-height: 0;
   height: 100%;
-  grid-template-columns: 238px 1fr;
+  grid-template-columns: 238px minmax(0, 1fr);
   background: var(--app-bg);
 }
 
@@ -14,6 +14,7 @@
   flex-direction: column;
   background: var(--navy);
   color: #fff;
+  overflow-y: auto;
 }
 
 .brand {
@@ -126,14 +127,16 @@
 
 .topbar {
   display: flex;
-  height: 78px;
-  flex: 0 0 78px;
+  min-height: 78px;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   padding: 0 28px;
   border-bottom: 1px solid var(--border);
   background: var(--topbar-bg);
+  gap: 16px;
 }
+.topbar > div:first-child { min-width: 0; }
 
 .eyebrow {
   display: block;
@@ -151,6 +154,7 @@
   font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
 }
 
 .topbarRight {
@@ -228,9 +232,37 @@
 .profile div > span { margin-top: 2px; font-size: 9px; }
 
 .main {
+  flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 24px 28px 34px;
+}
+
+@media (max-width: 1100px) {
+  .shell { grid-template-columns: 72px minmax(0, 1fr); }
+  .sidebar { padding: 16px 8px 12px; }
+  .brand { justify-content: center; padding: 0 0 20px; }
+  .brand > div:last-child, .navLabel, .navItem > span, .security > span, .versionLabel { display: none; }
+  .navItem { justify-content: center; padding: 12px 8px; }
+  .sidebarFooter { padding: 0; align-items: center; gap: 8px; }
+  .security { justify-content: center; }
+  .version { white-space: nowrap; }
+  .topbar { padding: 12px 18px; }
+  .topbarRight { gap: 12px; flex-shrink: 0; }
+  .profile > div, .profile > svg { display: none; }
+  .main { padding: 18px; }
+}
+@media (max-width: 760px) {
+  .topbar { padding: 10px 14px; min-height: 68px; }
+  .topbarRight { gap: 8px; }
+  .profile, .appStatus > svg, .eyebrow { display: none; }
+  .main { padding: 14px; }
+}
+@media (max-height: 600px) {
+  .brand { padding-bottom: 14px; }
+  .sidebar { padding-top: 12px; }
+  .topbar { min-height: 64px; }
+  .main { padding-top: 14px; }
 }
 
 @keyframes pulse {

@@ -9,22 +9,22 @@ Sheet:
 
 列定义：
     A = Part No. / Material
-    B = Ver            （仅保留，不参与SAP查询）
-    C = Description    （仅保留，不参与SAP查询）
-    D = Vendor
-    E = APQP plan closure date（回写）
+    B = Vendor
+    C = APQP plan closure date（回写）
+    兼容旧五列模板：A=Material，B=Ver，C=Description，D=Vendor，E=日期。
+    每个工作表先校验表头，按对应的列映射读取和回写，不修改旧模板的可选列。
 
 SAP查询逻辑：
     T-code = ZMFM050035
     P_C3 = True
     Plant = C100
-    Vendor = Excel D列
+    Vendor = Excel供应商列（新模板B / 旧模板D）
     Material = Excel A列
     Execute
     结果Grid选择第0行
     Execute
     读取字段：GS_ITAB-M_PLNDAT
-    回写Excel E列
+    回写Excel日期列（新模板C / 旧模板E）
 
 多SAP支持：
     - 自动发现已经登录的 SAP GUI Session。
@@ -39,7 +39,7 @@ SAP查询逻辑：
 注意：
     1. SAP GUI Scripting 必须启用。
     2. 建议先 MAX_WORKERS=1、TEST_LIMIT=5 做测试。
-    3. 默认不会覆盖Excel E列已有日期；需要重查时把 OVERWRITE_EXISTING_DATE=True。
+    3. 默认不会覆盖Excel已有日期；需要重查时把 OVERWRITE_EXISTING_DATE=True。
 """
 
 from __future__ import annotations
@@ -73,9 +73,10 @@ EXCEL_PATH = os.getenv("EXCEL_PATH", "")
 SHEET_NAME = os.getenv("SHEET_NAME", "").strip()
 
 DATA_START_ROW = 2
+# Legacy defaults for standalone helper callers; main always passes validated per-sheet columns.
 MATERIAL_COL = 1       # A
-VENDOR_COL = 4         # D
-OUTPUT_DATE_COL = 5    # E
+VENDOR_COL = 4         # legacy D
+OUTPUT_DATE_COL = 5    # legacy E
 
 TCODE = "ZMFM050035"
 PLANT = os.getenv("PLANT", "C100").strip().upper()
@@ -848,20 +849,35 @@ def excel_last_row(ws, column: int) -> int:
     return int(ws.Cells(ws.Rows.Count, column).End(-4162).Row)
 
 
-def read_excel_tasks(ws) -> Tuple[List[Task], int, int]:
-    last_material_row = excel_last_row(ws, MATERIAL_COL)
-    last_vendor_row = excel_last_row(ws, VENDOR_COL)
+def iter_excel_input_rows(ws, columns=None):
+    """One COM Range read per chunk, instead of three COM reads per row.
+
+    New templates use A/B/C; legacy templates use A/D/E. Both preview modes use
+    the same snapshot. Runtime still reads the live workbook again before SAP.
+    """
+    material_col, vendor_col, date_col = columns or (MATERIAL_COL, VENDOR_COL, OUTPUT_DATE_COL)
+    last_material_row = excel_last_row(ws, material_col)
+    last_vendor_row = excel_last_row(ws, vendor_col)
     last_row = max(last_material_row, last_vendor_row, DATA_START_ROW)
+    for start in range(DATA_START_ROW, last_row + 1, 2000):
+        end = min(start + 1999, last_row)
+        block = ws.Range(f"A{start}:{chr(64 + date_col)}{end}").Value2
+        if not isinstance(block, (tuple, list)) or len(block) != end - start + 1:
+            raise RuntimeError("Excel returned an incomplete APQP input range. Save the workbook and upload again.")
+        for offset, values in enumerate(block):
+            if not isinstance(values, (tuple, list)) or len(values) != date_col:
+                raise RuntimeError("Excel returned unreadable APQP input columns. No SAP query was started.")
+            yield (start + offset, normalize_identifier(values[material_col - 1]),
+                   normalize_identifier(values[vendor_col - 1]), normalize_text(values[date_col - 1]))
+
+
+def select_excel_tasks(input_rows, overwrite_existing) -> Tuple[List[Task], int, int]:
 
     tasks: List[Task] = []
     skipped_existing = 0
     invalid_rows = 0
 
-    for row in range(DATA_START_ROW, last_row + 1):
-        material = normalize_identifier(ws.Cells(row, MATERIAL_COL).Value2)
-        vendor = normalize_identifier(ws.Cells(row, VENDOR_COL).Value2)
-        existing = normalize_text(ws.Cells(row, OUTPUT_DATE_COL).Value2)
-
+    for row, material, vendor, existing in input_rows:
         if not material and not vendor:
             continue
 
@@ -869,7 +885,7 @@ def read_excel_tasks(ws) -> Tuple[List[Task], int, int]:
             invalid_rows += 1
             continue
 
-        if existing and not OVERWRITE_EXISTING_DATE:
+        if existing and not overwrite_existing:
             skipped_existing += 1
             continue
 
@@ -881,11 +897,15 @@ def read_excel_tasks(ws) -> Tuple[List[Task], int, int]:
     return tasks, skipped_existing, invalid_rows
 
 
-def write_result_to_excel(ws, result: Result) -> None:
+def read_excel_tasks(ws, columns=None) -> Tuple[List[Task], int, int]:
+    return select_excel_tasks(iter_excel_input_rows(ws, columns), OVERWRITE_EXISTING_DATE)
+
+
+def write_result_to_excel(ws, result: Result, columns=None) -> None:
     if result.status != "SUCCESS":
         return
 
-    cell = ws.Cells(result.excel_row, OUTPUT_DATE_COL)
+    cell = ws.Cells(result.excel_row, columns[2] if columns else OUTPUT_DATE_COL)
     parsed = parse_sap_date(result.plan_closure_date_text)
 
     if parsed is not None:
@@ -1002,25 +1022,27 @@ def select_worksheet(wb, name: str):
         try:
             validate_headers(sheet)
             candidates.append(sheet)
-        except ValueError:
+        except (ValueError, RuntimeError):
             continue
     if len(candidates) != 1:
         raise ValueError("Keep exactly one APQP input worksheet with the template headers.")
     return candidates[0]
 
 
-def validate_headers(ws) -> None:
-    aliases = [
-        {"part no.", "part no", "material", "material no."},
-        {"ver", "version"},
-        {"description"},
-        {"vendor", "supplier", "parma"},
-        {"apqp plan closure date"},
-    ]
-    for column, allowed in enumerate(aliases, 1):
-        value = normalize_text(ws.Cells(1, column).Value2).lower()
-        if value not in allowed:
-            raise RuntimeError(f"Unexpected header in column {column}. Download the APQP template and keep A–E unchanged.")
+def validate_headers(ws):
+    """Return an explicit per-sheet mapping; never guess a writable output column."""
+    material = {"part no.", "part no", "material", "material no."}
+    vendor = {"vendor", "supplier", "parma"}
+    date = {"apqp plan closure date"}
+    headers = [normalize_text(ws.Cells(1, column).Value2).lower() for column in range(1, 6)]
+    if (headers[0] in material and headers[1] in {"ver", "version"} and
+            headers[2] == "description" and headers[3] in vendor and headers[4] in date):
+        return (1, 4, 5)
+    reserved = material | vendor | date | {"ver", "version", "description"}
+    if (headers[0] in material and headers[1] in vendor and headers[2] in date and
+            not any(header in reserved for header in headers[3:])):
+        return (1, 2, 3)
+    raise ValueError("APQP headers do not match. Keep A: Part No., B: Vendor, C: APQP plan closure date. Legacy A–E templates are also supported. Save the workbook and upload again.")
 
 
 def preview_payload(ws, tasks, skipped, invalid):
@@ -1035,22 +1057,31 @@ def listen_for_cancel() -> None:
             return
 
 
-def apply_result(ws, result: Result) -> None:
+def apply_result(ws, result: Result, columns=None) -> None:
     """Do not overwrite another row or a date changed while the workbook was open."""
     if result.status != "SUCCESS":
         return
-    material = normalize_identifier(ws.Cells(result.excel_row, MATERIAL_COL).Value2)
-    vendor = normalize_identifier(ws.Cells(result.excel_row, VENDOR_COL).Value2)
+    material_col, vendor_col, date_col = columns or (MATERIAL_COL, VENDOR_COL, OUTPUT_DATE_COL)
+    if columns is not None:
+        try:
+            if validate_headers(ws) != columns:
+                raise ValueError("APQP column mapping changed.")
+        except (ValueError, RuntimeError):
+            result.status = "EXCEL_CONFLICT"
+            result.message = "Template headers changed while querying; date was not written."
+            return
+    material = normalize_identifier(ws.Cells(result.excel_row, material_col).Value2)
+    vendor = normalize_identifier(ws.Cells(result.excel_row, vendor_col).Value2)
     if (material, vendor) != (result.material, result.vendor):
         result.status = "EXCEL_CONFLICT"
         result.message = "Material/Vendor changed while querying; date was not written."
         return
-    if not OVERWRITE_EXISTING_DATE and normalize_text(ws.Cells(result.excel_row, OUTPUT_DATE_COL).Value2):
+    if not OVERWRITE_EXISTING_DATE and normalize_text(ws.Cells(result.excel_row, date_col).Value2):
         result.status = "EXCEL_CONFLICT"
         result.message = "An existing date appeared while querying; date was not overwritten."
         return
     try:
-        write_result_to_excel(ws, result)
+        write_result_to_excel(ws, result, columns)
     except Exception as exc:
         result.status = "WRITE_ERROR"
         result.message = str(exc)
@@ -1071,11 +1102,17 @@ def main() -> None:
     skipped = 0
     try:
         excel, wb, ws, owns_excel = get_or_open_excel_workbook(excel_path, SHEET_NAME)
-        validate_headers(ws)
-        tasks, skipped, invalid = read_excel_tasks(ws)
+        columns = validate_headers(ws)
         if preview_only:
-            emit("preview", preview=preview_payload(ws, tasks, skipped, invalid))
+            input_rows = list(iter_excel_input_rows(ws, columns))
+            modes = {}
+            for name, overwrite in (("keepExisting", False), ("refreshExisting", True)):
+                mode_tasks, mode_skipped, mode_invalid = select_excel_tasks(input_rows, overwrite)
+                modes[name] = preview_payload(ws, mode_tasks, mode_skipped, mode_invalid)
+            current = modes["refreshExisting" if OVERWRITE_EXISTING_DATE else "keepExisting"]
+            emit("preview", preview={**current, "modes": modes})
             return
+        tasks, skipped, invalid = read_excel_tasks(ws, columns)
         if bool(wb.ReadOnly):
             raise RuntimeError("Workbook is read-only or open in another Excel instance. Close that copy and retry.")
         if not tasks:
@@ -1137,7 +1174,7 @@ def main() -> None:
                 result = result_q.get(timeout=0.3)
             except queue.Empty:
                 continue
-            apply_result(ws, result)
+            apply_result(ws, result, columns)
             completed += 1
             if result.status == "SUCCESS":
                 succeeded += 1

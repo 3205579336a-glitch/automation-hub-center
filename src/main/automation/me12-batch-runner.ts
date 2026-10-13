@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { chromium, type BrowserContext, type Frame, type Locator, type Page } from 'playwright-core'
+import type { BrowserContext, Frame, Locator, Page } from 'playwright-core'
 import type {
   Me12BatchConfig,
   Me12BatchProgress,
@@ -138,6 +138,7 @@ export class Me12BatchRunner {
       const launchResults = await Promise.allSettled(
         browserSlots.map(async (slot, index): Promise<BrowserWorker> => {
           const worker = index + 1
+          const { chromium } = await import('playwright-core')
           const context = await chromium.launchPersistentContext(
             join(
               this.browserProfilesDirectory,

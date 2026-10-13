@@ -192,3 +192,19 @@
 .emptyActivity { margin: 8px 0; padding: 18px 0; color: var(--text-subtle); text-align: center; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 1180px) {
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboardGrid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .actionsGrid { grid-template-columns: minmax(0, 1fr); }
+  .welcome { align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+  .catalogCta { grid-template-columns: auto minmax(0, 1fr); }
+  .catalogCta > button { grid-column: 1 / -1; justify-self: start; }
+}
+@media (max-width: 760px) {
+  .savingsMetrics { grid-template-columns: minmax(0, 1fr); }
+  .metricBody > span { white-space: normal; }
+  .activityDetails { min-width: 0; overflow-wrap: anywhere; }
+  .localBadge { display: none; }
+}

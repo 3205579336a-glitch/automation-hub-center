@@ -19,3 +19,9 @@
 .path { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; margin: 0; padding: 0 13px 10px; align-items: start; }
 .path strong { color: var(--text); font-size: 8px; }
 .path code { color: var(--text-muted); font-size: 8px; overflow-wrap: anywhere; }
+@media (max-width: 1100px) { .details { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .search { width: 100%; }
+  .statusFilter { flex: 1; width: auto; }
+}

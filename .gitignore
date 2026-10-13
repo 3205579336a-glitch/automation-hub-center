@@ -8,6 +8,7 @@ resources/rpa-engine/
 .codex-spreadsheet-work/
 artifacts/
 outputs/
+tmp/pdfs/
 __pycache__/
 *.py[cod]
 *.tsbuildinfo

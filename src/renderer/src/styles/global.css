@@ -59,8 +59,8 @@
 * { box-sizing: border-box; }
 
 html, body, #root {
-  min-width: 1100px;
-  min-height: 700px;
+  min-width: 0;
+  min-height: 0;
   height: 100%;
   margin: 0;
 }
@@ -112,8 +112,12 @@ button:disabled { cursor: not-allowed; }
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
   margin-bottom: 20px;
 }
+.page-heading > div:first-child { min-width: 0; flex: 1 1 260px; }
+.page-heading h2 { overflow-wrap: anywhere; }
 
 .page-heading h2 {
   margin: 0 0 5px;
@@ -226,7 +230,7 @@ button:disabled { cursor: not-allowed; }
 .input::placeholder, .textarea::placeholder { color: #9ba6b5; }
 
 .table-wrap {
-  overflow: hidden;
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 9px;
 }

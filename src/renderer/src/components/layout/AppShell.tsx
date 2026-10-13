@@ -66,6 +66,8 @@ export function AppShell({
               <button
                 key={item.id}
                 className={`${styles.navItem} ${activePage === item.id ? styles.active : ''}`}
+                aria-label={t(item.label)}
+                title={t(item.label)}
                 onClick={() => onNavigate(item.id)}
               >
                 <Icon size={18} />
@@ -80,7 +82,7 @@ export function AppShell({
             <ShieldCheck size={16} />
             <span>{t('localSecure')}</span>
           </div>
-          <span className={styles.version}>Version 0.2.4</span>
+          <span className={styles.version}><span className={styles.versionLabel}>Version </span>0.2.4</span>
         </div>
       </aside>
 

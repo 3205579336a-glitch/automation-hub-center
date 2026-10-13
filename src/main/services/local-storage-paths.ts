@@ -35,7 +35,8 @@ export class LocalStoragePaths {
     ])
 
     if (process.platform === 'win32') {
-      await execFileAsync('attrib', ['+H', this.rootDirectory]).catch(() => undefined)
+      // Cosmetic attribute only: do not block the window on a Windows helper.
+      void execFileAsync('attrib', ['+H', this.rootDirectory], { windowsHide: true }).catch(() => undefined)
     }
   }
 }

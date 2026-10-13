@@ -4,6 +4,7 @@ import type { Me12BatchConfig, Me12ExcelPreview } from '../../../../shared/me12-
 import type { Me01BatchConfig, Me01ExcelPreview } from '../../../../shared/me01-types'
 import { me01BusinessDefaults, resolveMe01Business } from '../../../../shared/me01-types'
 import type { ApqpConfig, ApqpPreview } from '../../../../shared/apqp-types'
+import { apqpPreviewForMode } from '../../../../shared/apqp-types'
 import type { AutomationOutcome, AutomationState } from '../../../../shared/guided-automation'
 import { outcomeOf } from '../../../../shared/guided-automation'
 import { useLocalization } from '../../i18n/use-localization'
@@ -39,7 +40,11 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
   const [downloaded, setDownloaded] = useState('')
   const [business, setBusiness] = useState(defaultBusiness)
   const [fileRevision, setFileRevision] = useState(0)
-  const [preview, setPreview] = useState<Preview | null>(null)
+  const [parsedPreview, setPreview] = useState<Preview | null>(null)
+  const preview = useMemo(() => module === 'apqp' && parsedPreview && 'selected' in parsedPreview
+    ? apqpPreviewForMode(parsedPreview, business.overwrite) : parsedPreview, [module, parsedPreview, business.overwrite])
+  const latestOverwrite = useRef(business.overwrite)
+  latestOverwrite.current = business.overwrite
   const [state, setState] = useState<AutomationState>('READY')
   const [error, setError] = useState('')
   const [technicalError, setTechnicalError] = useState('')
@@ -60,6 +65,9 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
         targetLeadTime: business.leadTime, infoCategory: business.category as Me12BatchConfig['infoCategory'] }
     : module === 'source-list' ? { excelPath: file, confirmed: false, purchasingOrganization: business.org, validFrom: business.validFrom, validTo: business.validTo }
     : { ...apqpDefaults, excelPath: file, plant: business.plant, overwriteExisting: business.overwrite }, [file, business, module])
+  // APQP refresh chooses rows from one upload snapshot. Plant/re-upload still
+  // invalidate it; the start handler/engine independently recheck live Excel.
+  const previewKey = module === 'apqp' ? JSON.stringify([file, business.plant]) : JSON.stringify(config)
 
   useEffect(() => {
     const report = (event: { message: string } & TimingProgress): void => {
@@ -94,9 +102,23 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
         : module === 'source-list' ? api.previewMe01Batch(config as Me01BatchConfig) : api.previewApqp(config as ApqpConfig)
       void request.then(response => {
         if (!active) return
-        if (!response.success) throw new Error(response.message)
+        if (!response.success) {
+          if ('errorCode' in response && response.errorCode === 'APQP_TEMPLATE_INVALID') {
+            setState('READY'); setTechnicalError(response.message)
+            setError(t('Excel headers do not match or the file cannot be read. Download the APQP template: A = Part No., B = Vendor, C = APQP plan closure date. Save before uploading. Previous five-column templates are still supported.',
+              'Excel 表头不匹配或文件无法读取。请下载 APQP 模板：A 列物料、B 列供应商、C 列计划关闭日期。保留表头并保存后上传；旧五列模板仍兼容。'))
+            return
+          }
+          throw new Error(response.message)
+        }
+        if (module === 'apqp' && 'selected' in response.preview && !response.preview.modes &&
+          (config as ApqpConfig).overwriteExisting !== latestOverwrite.current) {
+          // An older engine cannot answer a policy changed while it was reading.
+          setFileRevision(current => current + 1)
+          return
+        }
         setPreview(response.preview)
-        const count = 'selectedInfoRecords' in response.preview ? response.preview.selectedInfoRecords : 'uniqueMaterials' in response.preview ? response.preview.uniqueMaterials : response.preview.selected
+        const count = 'selectedInfoRecords' in response.preview ? response.preview.selectedInfoRecords : 'uniqueMaterials' in response.preview ? response.preview.uniqueMaterials : apqpPreviewForMode(response.preview, latestOverwrite.current).selected
         setState(count ? 'READY_TO_START' : 'READY')
         if (!count) setError(t('No pending records. Check your input and business choices, then upload again.', '没有待处理记录，请检查输入和业务选项后重新上传。'))
       }).catch((reason: unknown) => {
@@ -109,7 +131,7 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
     return () => { active = false; window.clearTimeout(timer) }
     // A language switch is presentation-only and must not reset an active task.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, config, file, fileRevision, module])
+  }, [api, previewKey, fileRevision, module])
   const records = preview ? 'selectedInfoRecords' in preview ? preview.selectedInfoRecords : 'uniqueMaterials' in preview ? preview.uniqueMaterials : preview.selected : 0
   const invalid = preview && 'invalid' in preview ? preview.invalid : 0
   const metrics: { label: string; value: string | number }[] = [{ label: t('Records to process', '待处理记录'), value: records }, { label: t('Plant', '工厂'), value: module === 'source-list' ? 'C100' : business.plant }]
@@ -184,7 +206,21 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
     if (module === 'apqp') void start()
     else { setConfirming(true); notify({ kind: 'warning', title: t('Ready to update', '准备更新'), message: t('Review the batch confirmation.', '请核对本次批量修改。') }) }
   }
-  const update = (key: keyof typeof business, value: string | boolean): void => { setBusiness(current => ({ ...current, [key]: value })); setState(file ? 'VALIDATING' : 'READY'); setPreview(null) }
+  const update = (key: keyof typeof business, value: string | boolean): void => {
+    setBusiness(current => ({ ...current, [key]: value }))
+    if (module === 'apqp' && key === 'overwrite' && parsedPreview && 'selected' in parsedPreview && parsedPreview.modes) {
+      const selected = apqpPreviewForMode(parsedPreview, value === true).selected
+      setOutcome(null); setConfirming(false); setTechnicalError('')
+      setState(selected ? 'READY_TO_START' : 'READY')
+      setError(selected ? '' : t('No pending records. Check your input and business choices, then upload again.', '没有待处理记录，请检查输入和业务选项后重新上传。'))
+      return
+    }
+    // Changing the policy while parsing must not cancel or restart that read.
+    if (module === 'apqp' && key === 'overwrite' && !parsedPreview) return
+    // Backward compatibility with a pre-update engine that has no mode snapshot.
+    if (module === 'apqp' && key === 'overwrite') setFileRevision(current => current + 1)
+    setState(file ? 'VALIDATING' : 'READY'); setPreview(null)
+  }
   return <AutomationPageLayout title={title} description={description} onBack={onBack} toolbar={
     <AutomationTaskToolbar status={canRun ? t(`${records} records ready to process`, `已就绪，待处理 ${records} 条记录`) : error ? t('Check your file', '请检查上传文件') : stateLabel(state, zh)}
       hint={running ? t('Keep SAP open. Stop safely preserves saved results.', '请保持 SAP 打开；安全停止会保留已保存的结果。') : outcome ? t('Open your result below, or clear this page for a new task.', '在下方打开结果，或清空本页准备新任务。') : file ? t('Review the preview below, then start from here.', '核对下方预览后，在这里开始执行。') : t('Download the template, fill it, then upload to get started.', '下载模板、填写并上传，即可开始。')}
@@ -203,7 +239,7 @@ export function GuidedAutomationPage({ module, notify, onBack }: { module: Modul
         <label className="field"><span>{t('Purchasing Type', '采购类型')}</span><select className="select" disabled={running} value={business.category} onChange={event => update('category', event.target.value)}><option value="standard">{t('Standard', '标准采购')}</option><option value="consignment">{t('Consignment', '寄售采购')}</option></select></label>
       </div></>}
       {module === 'apqp' && <><p className={styles.notice}>{t('Read-only SAP query. Dates are written to Excel, not SAP.', '只查询 SAP，日期回写到 Excel，不修改 SAP 数据。')}</p><div className={styles.fields}><label className="field"><span>{t('Plant', '工厂')}</span><input className="input" disabled={running} value={business.plant} onChange={event => update('plant', event.target.value.toUpperCase())} /></label>
-        <label className="field"><span>{t('Refresh dates already in Excel', '刷新 Excel 中已有日期')}</span><select className="select" value={business.overwrite ? 'yes' : 'no'} disabled={running} onChange={event => update('overwrite', event.target.value === 'yes')}><option value="no">{t('No — keep existing dates', '否，保留已有日期')}</option><option value="yes">{t('Yes — query again', '是，重新查询')}</option></select></label></div></>}
+        <label className="field"><span>{t('Refresh dates already in Excel', '刷新 Excel 中已有日期')}</span><select className="select" aria-label={t('Refresh dates already in Excel', '刷新 Excel 中已有日期')} value={business.overwrite ? 'yes' : 'no'} disabled={running} onChange={event => update('overwrite', event.target.value === 'yes')}><option value="no">{t('No — keep existing dates', '否，保留已有日期')}</option><option value="yes">{t('Yes — query again', '是，重新查询')}</option></select></label></div></>}
       {module === 'source-list' && <><h3>{t('New source row', '新增货源行')}</h3><div className={styles.fields}>
         <label className="field"><span>{t('Purchasing Organization', '采购组织')} *</span><input className="input" disabled={running || busy} value={business.org} onChange={event => update('org',event.target.value.toUpperCase())} /></label>
         <label className="field"><span>{t('Valid from', '有效起始日期')} *</span><input className="input" type="date" disabled={running || busy} value={business.validFrom} onChange={event => update('validFrom',event.target.value)} /></label>

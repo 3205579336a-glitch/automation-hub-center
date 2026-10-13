@@ -74,10 +74,14 @@ try {
   await interrupted.getByRole('button', { name: 'Open Result', exact: true }).click()
   assert.deepEqual(await app.evaluate(() => globalThis.recoveryOpenCalls), [output])
   assert.equal(await readFile(output, 'utf8'), 'protected saved-result fixture')
+  // Existing calibrated data is preserved; technical fields are no longer user-editable.
+  await page.evaluate(async () => {
+    const settings = await window.sapAutomation.getSettings()
+    await window.sapAutomation.saveSettings({ ...settings, manualTimeCalibrated: true,
+      manualTimeBaselines: { ...settings.manualTimeBaselines, 'create-rfq': 900 } })
+  })
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByText('Advanced / Key User Settings', { exact: true }).click()
-  await page.getByLabel(/^RFQ · Manual seconds/).fill('900')
-  await page.getByLabel('Key user calibrated these baselines against measured manual work', { exact: true }).check()
+  assert.equal(await page.getByText('Advanced / Key User Settings', { exact: true }).count(), 0)
   await page.getByLabel('Theme', { exact: true }).selectOption('dark')
   await page.getByLabel('Text Size', { exact: true }).selectOption('large')
   await page.getByRole('button', { name: 'Save Settings', exact: true }).click()

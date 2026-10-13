@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { chromium, type BrowserContext } from 'playwright-core'
+import type { BrowserContext } from 'playwright-core'
 import type {
   AutomationProgress,
   AutomationResult,
@@ -71,6 +71,7 @@ export class BrowserManager {
       )
 
       try {
+        const { chromium } = await import('playwright-core')
         launchedContext = await chromium.launchPersistentContext(profileDirectory, {
           channel: settings.browser,
           headless: false,

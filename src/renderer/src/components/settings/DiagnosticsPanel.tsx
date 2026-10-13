@@ -84,7 +84,7 @@ export function DiagnosticsPanel({ notify }: DiagnosticsPanelProps): React.JSX.E
         </div>
       </div>
 
-      <p className="section-copy">Logs older than 60 days are automatically cleaned while idle. Result Excel files are kept. / 60 天前的日志在空闲时自动清理，结果 Excel 保留。</p>
+      <p className="section-copy">Completed logs and managed working files expire after 60 days while idle. Save important results separately; original inputs and unresolved RFQ evidence are protected. / 空闲时自动清理60天前的已结束日志和工作文件。重要结果请另存；原始输入与未核查 RFQ 证据保留。</p>
       <ClearLogsButton onCleared={async () => { setPage(1); await loadLogs() }} />
 
       <div className={styles.paths}>

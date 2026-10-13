@@ -57,7 +57,7 @@ export function HistoryPage(): React.JSX.Element {
       <div className="page-heading">
         <div>
           <h2>{t('executionHistory')}</h2>
-          <p>{zh ? '本机真实执行记录，每页 25 条；60 天前的已结束历史及日志自动清理，结果文件保留。' : 'Real local runs, 25 per page. Completed history/logs older than 60 days are automatically cleaned; result files are kept.'}</p>
+          <p>{zh ? '本机真实执行记录，每页 25 条。已结束历史及工作文件60天后自动清理；重要结果请另存，原始输入与未核查 RFQ 证据保留。' : 'Real local runs, 25 per page. Completed history and managed working files expire after 60 days; save important results separately. Original inputs and unresolved RFQ evidence are protected.'}</p>
         </div>
         <button className="button" onClick={() => void loadHistory()} disabled={loading}>
           <RefreshCw size={14} /> {zh ? '刷新' : 'Refresh'}

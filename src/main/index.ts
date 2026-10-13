@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { app, BrowserWindow, shell } from 'electron'
+import { app, BrowserWindow, screen, shell } from 'electron'
 import { BrowserManager } from './automation/browser-manager'
 import { Me12BatchRunner } from './automation/me12-batch-runner'
 import { RfqNativeRunner } from './automation/rfq-native-runner'
@@ -31,17 +31,20 @@ import { registerSafeRecoveryHandlers } from './ipc/safe-recovery-handlers'
 import { GeneratedArtifacts } from './services/generated-artifacts'
 
 let mainWindow: BrowserWindow | null = null
+const startupStarted = performance.now()
 // Two Hubs must never independently control the same local SAP run ledger.
 const hasInstanceLock = app.requestSingleInstanceLock()
 if (!hasInstanceLock) app.quit()
 app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() } })
 
 function createMainWindow(): void {
+  // Electron sizes are logical pixels: account for small/high-DPI laptop work areas.
+  const workArea = screen.getPrimaryDisplay().workAreaSize
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1100,
-    minHeight: 700,
+    width: Math.min(1440, workArea.width),
+    height: Math.min(900, workArea.height),
+    minWidth: Math.min(640, workArea.width),
+    minHeight: Math.min(480, workArea.height),
     show: false,
     backgroundColor: '#f4f7fb',
     autoHideMenuBar: true,
@@ -75,8 +78,10 @@ function createMainWindow(): void {
 
 app.whenReady().then(async () => {
   if (!hasInstanceLock) return
+  const startupPhases: Record<string, number> = { electronReadyMs: Math.round(performance.now() - startupStarted) }
   const storagePaths = new LocalStoragePaths(app.getPath('userData'))
   await storagePaths.initialize()
+  startupPhases.storageReadyMs = Math.round(performance.now() - startupStarted)
   const logger = new DiagnosticLogger(storagePaths.logsDirectory)
   const legacyRunsDirectory = join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'SAP Automation Toolbox', 'runs')
   const runsDirectory = join(storagePaths.logsDirectory, 'rfq-runs')
@@ -93,6 +98,7 @@ app.whenReady().then(async () => {
     // Preserve malformed history, but still open the Hub so users can inspect its recovery evidence.
     console.warn('Interrupted history could not be updated; original history and recovery evidence were preserved.')
   })
+  startupPhases.recoveryReadyMs = Math.round(performance.now() - startupStarted)
   const intelligence = new LocalIntelligenceService(history, eta => {
     for (const window of BrowserWindow.getAllWindows()) {
       try { if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.automationEta, eta) } catch { /* Optional UI hint. */ }
@@ -202,17 +208,35 @@ app.whenReady().then(async () => {
     catch (error) { console.warn('Automatic log retention skipped; existing data preserved:', error) }
     finally { artifactCleanupActive = false }
   }
-  await pruneOldLogs()
+  // Retention is maintenance, not a prerequisite for opening the UI. Recovery
+  // checks above still complete before handlers/window are usable.
+  let initialRetentionTimer: NodeJS.Timeout
+  const initialRetention = (): void => {
+    if (guided.isRunning() || rfqRunner.isRunning() || history.isCleaning() || artifactCleanupActive) {
+      initialRetentionTimer = setTimeout(initialRetention, 60_000)
+      initialRetentionTimer.unref()
+      return
+    }
+    void pruneOldLogs()
+  }
+  initialRetentionTimer = setTimeout(initialRetention, 30_000)
+  initialRetentionTimer.unref()
   const retentionTimer = setInterval(() => { void pruneOldLogs() }, 24 * 60 * 60 * 1000)
   retentionTimer.unref()
-  app.once('will-quit', () => clearInterval(retentionTimer))
-  await logger.info({
+  app.once('will-quit', () => { clearTimeout(initialRetentionTimer); clearInterval(retentionTimer) })
+  startupPhases.servicesReadyMs = Math.round(performance.now() - startupStarted)
+  createMainWindow()
+  mainWindow?.once('ready-to-show', () => {
+    void logger.info({ category: 'application', event: 'application.window-ready',
+      message: 'Main window is ready.', details: { startupMs: Math.round(performance.now() - startupStarted),
+        processAgeMs: Math.round(process.uptime() * 1000), ...startupPhases, version: app.getVersion() } })
+  })
+  void logger.info({
     category: 'application',
     event: 'application.started',
     message: `SAP Automation Toolbox started on ${process.platform}.`,
     details: { version: app.getVersion() }
   })
-  createMainWindow()
 
   process.on('unhandledRejection', (reason) => {
     void logger.error({

@@ -11,14 +11,23 @@ export interface ApqpConfig {
   confirmed: boolean
 }
 
-export interface ApqpPreview {
-  sheetName: string
+export interface ApqpPreviewSelection {
   selected: number
   skipped: number
   invalid: number
   sample: { material: string; vendor: string; excelRow: number }[]
 }
-export type ApqpPreviewResult = { success: true; preview: ApqpPreview } | { success: false; message: string }
+export interface ApqpPreview extends ApqpPreviewSelection {
+  sheetName: string
+  modes?: { keepExisting: ApqpPreviewSelection; refreshExisting: ApqpPreviewSelection }
+}
+/** Same uploaded snapshot, different selection policy; never initiates another Excel read. */
+export function apqpPreviewForMode(preview: ApqpPreview, overwrite: boolean): ApqpPreview {
+  const selection = overwrite ? preview.modes?.refreshExisting : preview.modes?.keepExisting
+  return selection ? { ...preview, ...selection } : preview
+}
+export type ApqpPreviewResult = { success: true; preview: ApqpPreview } |
+  { success: false; message: string; errorCode?: 'APQP_TEMPLATE_INVALID' }
 export interface ApqpProgress {
   event: string
   message: string

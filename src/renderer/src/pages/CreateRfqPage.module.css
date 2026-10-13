@@ -11,6 +11,7 @@
 .scrollTable th, .scrollTable td { padding: 8px; text-align: left; border-bottom: 1px solid var(--border); }
 .confirmDialog { width: min(560px, 85vw); border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--text); padding: 28px; }
 .confirmDialog::backdrop { background: #0008; }
+.confirmDialog { max-height: calc(100vh - 32px); overflow: auto; }
 .section p { overflow-wrap: anywhere; line-height: 1.5; }
 .section summary { cursor: pointer; padding: 12px 0; }
 .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 16px; overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); }

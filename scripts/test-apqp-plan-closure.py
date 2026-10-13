@@ -40,6 +40,106 @@ class Sheet:
 class ApqpTests(unittest.TestCase):
     def setUp(self): M.STOP_EVENT.clear()
 
+    def header_sheet(self, headers):
+        ws = Sheet()
+        for col in range(1, 6):
+            ws.values[(1, col)] = SimpleNamespace(Value2=headers[col - 1] if col <= len(headers) else '')
+        return ws
+
+    def test_new_and_legacy_column_mapping(self):
+        new = self.header_sheet(['Part No.', 'Vendor', 'APQP plan closure date'])
+        old = self.header_sheet(['Part No.', 'Ver', 'Description', 'Vendor', 'APQP plan closure date'])
+        self.assertEqual(M.validate_headers(new), (1, 2, 3))
+        self.assertEqual(M.validate_headers(old), (1, 4, 5))
+
+    def test_incorrect_and_duplicate_headers_fail_closed(self):
+        for headers in [['Vendor', 'Part No.', 'APQP plan closure date'],
+                        ['Part No.', 'Vendor', 'APQP plan closure date', 'Vendor'],
+                        ['Part No.', 'Ver', 'Vendor', 'APQP plan closure date']]:
+            with self.assertRaises(ValueError): M.validate_headers(self.header_sheet(headers))
+
+    def test_new_template_bulk_read(self):
+        calls = []
+        ws = SimpleNamespace(Range=lambda address: calls.append(address) or SimpleNamespace(Value2=(('00012345', '0041889', None),)))
+        with patch.object(M, 'excel_last_row', return_value=2):
+            rows = list(M.iter_excel_input_rows(ws, (1, 2, 3)))
+        self.assertEqual(calls, ['A2:C2'])
+        self.assertEqual(rows, [(2, '00012345', '0041889', '')])
+
+    def test_new_template_writes_only_c_and_preserves_identifiers(self):
+        for old_epoch in [False, True]:
+            ws = self.header_sheet(['Part No.', 'Vendor', 'APQP plan closure date'])
+            ws.Parent.Date1904 = old_epoch
+            ws.values[(2, 2)] = SimpleNamespace(Value2='0041889')
+            ws.values[(2, 3)] = SimpleNamespace(Value2=None, Text='14.09.2026')
+            result = M.Result(2, '00012345', '0041889', 'SUCCESS', '14.09.2026')
+            M.apply_result(ws, result, (1, 2, 3))
+            self.assertEqual(result.status, 'SUCCESS')
+            self.assertEqual(ws.Cells(2, 3).Value2, M.excel_date_serial(dt.date(2026, 9, 14)) - (1462 if old_epoch else 0))
+            self.assertEqual(ws.Cells(2, 3).NumberFormat, 'dd.mm.yyyy')
+            self.assertEqual(ws.Cells(2, 2).Value2, '0041889')
+            self.assertIsNone(ws.Cells(2, 5).Value2)
+
+    def test_changed_headers_or_existing_date_prevent_new_template_write(self):
+        for change_header in [False, True]:
+            ws = self.header_sheet(['Part No.', 'Vendor', 'APQP plan closure date'])
+            ws.values[(2, 2)] = SimpleNamespace(Value2='0041889')
+            ws.values[(2, 3)] = SimpleNamespace(Value2=46000, Text='old date')
+            if change_header: ws.Cells(1, 3).Value2 = 'Changed'
+            result = M.Result(2, '00012345', '0041889', 'SUCCESS', '14.09.2026')
+            with patch.object(M, 'OVERWRITE_EXISTING_DATE', False): M.apply_result(ws, result, (1, 2, 3))
+            self.assertEqual(result.status, 'EXCEL_CONFLICT')
+            self.assertEqual(ws.Cells(2, 3).Value2, 46000)
+
+    def test_sheet_search_skips_wrong_headers(self):
+        invalid = self.header_sheet(['Not APQP'])
+        valid = self.header_sheet(['Part No.', 'Vendor', 'APQP plan closure date'])
+        def sheets(key):
+            if isinstance(key, str): raise ValueError('No preferred sheet')
+            return [invalid, valid][key - 1]
+        sheets.Count = 2
+        self.assertIs(M.select_worksheet(SimpleNamespace(Worksheets=sheets), ''), valid)
+
+    def test_bulk_snapshot_modes_and_identifiers(self):
+        rows = [("00012345", None, None, "0041889", None),
+                ("00099999", None, None, "0041889", 46000),
+                ("00077777", None, None, None, None),
+                (None, None, None, None, None)]
+        calls = []
+        ws = SimpleNamespace(Range=lambda address: calls.append(address) or SimpleNamespace(Value2=tuple(rows)))
+        with patch.object(M, 'excel_last_row', return_value=5):
+            snapshot = list(M.iter_excel_input_rows(ws))
+        keep = M.select_excel_tasks(snapshot, False)
+        refresh = M.select_excel_tasks(snapshot, True)
+        self.assertEqual(calls, ['A2:E5'])
+        self.assertEqual((len(keep[0]), keep[1], keep[2]), (1, 1, 1))
+        self.assertEqual((len(refresh[0]), refresh[1], refresh[2]), (2, 0, 1))
+        self.assertEqual((keep[0][0].material, keep[0][0].vendor), ('00012345', '0041889'))
+
+    def test_bulk_chunks_bound_com_calls(self):
+        calls = []
+        def read(address):
+            calls.append(address)
+            start, end = (int(part[1:]) for part in address.split(':'))
+            return SimpleNamespace(Value2=tuple((str(row), None, None, '0041889', None) for row in range(start, end + 1)))
+        with patch.object(M, 'excel_last_row', return_value=5001):
+            rows = list(M.iter_excel_input_rows(SimpleNamespace(Range=read)))
+        self.assertEqual(len(rows), 5000)
+        self.assertEqual(calls, ['A2:E2001', 'A2002:E4001', 'A4002:E5001'])
+
+    def test_incomplete_bulk_range_fails_closed(self):
+        ws = SimpleNamespace(Range=lambda _: SimpleNamespace(Value2=(("123", None),)))
+        with patch.object(M, 'excel_last_row', return_value=2):
+            with self.assertRaisesRegex(RuntimeError, 'unreadable APQP'):
+                list(M.iter_excel_input_rows(ws))
+
+    def test_task_limit_preserves_original_selection_order(self):
+        rows = [(2, '001', '004', 'date'), (3, '002', '004', ''), (4, '', '004', ''), (5, '003', '004', '')]
+        with patch.object(M, 'TEST_LIMIT', 1):
+            tasks, skipped, invalid = M.select_excel_tasks(rows, False)
+        self.assertEqual([t.excel_row for t in tasks], [3])
+        self.assertEqual((skipped, invalid), (1, 0))
+
     def test_date_safe(self):
         for text in ['14.09.2026', '14. 09. 2026', '2026-09-14', '14/09/2026']:
             self.assertEqual(M.parse_sap_date(text), dt.date(2026, 9, 14))

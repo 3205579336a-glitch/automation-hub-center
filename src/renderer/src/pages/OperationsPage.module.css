@@ -55,3 +55,7 @@
 .card > .button { margin-top: auto; }
 .card .permissionNotice { padding: .7rem .85rem; border-left: 4px solid #d69b37; border-radius: 8px; background: #d69b3718; color: var(--text-strong); font-size: .85rem; }
 .actions { display: flex; width: 100%; margin-top: auto; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 900px) {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+  .card { min-height: 0; }
+}

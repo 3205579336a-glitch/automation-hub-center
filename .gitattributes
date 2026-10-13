@@ -1,0 +1,4 @@
+# Preserve generated documents, screenshots and templates byte-for-byte on Windows.
+*.pdf binary
+*.png binary
+*.xlsx binary
