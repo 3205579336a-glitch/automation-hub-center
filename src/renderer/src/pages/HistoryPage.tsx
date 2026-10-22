@@ -33,7 +33,7 @@ export function HistoryPage(): React.JSX.Element {
         statuses: status === 'all' ? undefined : [status],
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
-        operations: ['create-rfq', 'me12-batch', 'me01-source-list', 'apqp-plan-closure']
+        operations: ['create-rfq', 'me12-batch', 'me01-source-list', 'apqp-plan-closure', 'apqp-date-management']
       })
       if (current !== request.current) return
       setEntries(result.entries)
@@ -150,7 +150,7 @@ function HistoryRows({
         <td>{new Date(entry.startedAt).toLocaleString()}</td>
         <td>{formatDuration(entry.durationMs)}</td>
         <td><StatusBadge status={entry.status} /></td>
-        <td className={styles.result}>{entry.processed !== undefined ? `${entry.succeeded ?? 0} ${zh ? '成功' : 'successful'} · ${entry.failed ?? 0} ${zh ? '失败' : 'failed'}` : zh ? '查看详情' : 'View details'}</td>
+        <td className={styles.result}>{entry.apqpStaged !== undefined ? `${entry.apqpStaged} ${zh ? '已填入 · 未保存' : 'staged · NOT SAVED'}` : entry.processed !== undefined ? `${entry.succeeded ?? 0} ${zh ? '成功' : 'successful'} · ${entry.failed ?? 0} ${zh ? '失败' : 'failed'}` : zh ? '查看详情' : 'View details'}</td>
         <td>
           <button className={styles.viewButton} aria-label={`View ${operationName(entry, zh)}`} onClick={onToggle}>
             <Eye size={14} /> {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}

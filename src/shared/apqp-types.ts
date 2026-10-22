@@ -19,6 +19,8 @@ export interface ApqpPreviewSelection {
 }
 export interface ApqpPreview extends ApqpPreviewSelection {
   sheetName: string
+  source?: 'saved-file' | 'live-excel'
+  parseMs?: number
   modes?: { keepExisting: ApqpPreviewSelection; refreshExisting: ApqpPreviewSelection }
 }
 /** Same uploaded snapshot, different selection policy; never initiates another Excel read. */
@@ -37,6 +39,8 @@ export interface ApqpProgress {
   status?: string
   material?: string
   vendor?: string
+  apqp?: string
+  step?: string
 }
 export type ApqpFileResult = { success: true; path: string } | { success: false; cancelled: boolean; message?: string }
 export type ApqpResult = {

@@ -82,7 +82,7 @@ export function AppShell({
             <ShieldCheck size={16} />
             <span>{t('localSecure')}</span>
           </div>
-          <span className={styles.version}><span className={styles.versionLabel}>Version </span>0.2.4</span>
+          <span className={styles.version} title="0.2.4-hotfix.2"><span className={styles.versionLabel}>Version </span>0.2.4<span className={styles.versionLabel}>-hotfix.2</span></span>
         </div>
       </aside>
 

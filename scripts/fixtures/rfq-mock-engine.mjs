@@ -10,6 +10,8 @@ console.log('📦 离线模拟 — ordinary output must not become a progress ev
 if (args.includes('--validate-only')) {
   emit('VALIDATION_COMPLETED', { preview: { validRows: 2, invalidRows: 0, groupCount: 1, sample: [], groups: [], plants: ['C100'], warnings: [] } })
 } else {
+  if (!args.includes('--source-excel-path') || !args.includes('--source-baseline-path')) throw new Error('Original workbook and baseline were not passed')
+  if (value('--source-excel-path') === value('--excel-path')) throw new Error('Working copy must remain separate')
   if (args.includes('--hub-ready-file')) {
     emit('ENGINE_READY', { runId: value('--run-id'), pid: process.pid })
     const deadline = Date.now() + 5000
@@ -76,7 +78,11 @@ if (args.includes('--validate-only')) {
   emit('RFQ_CREATED', { rfqNumber: 'MOCK-1' })
   emit('RFQ_CREATED', { rfqNumber: 'MOCK-1' })
   emit('GROUP_COMPLETED', { groupKey: 'MOCK-GROUP', groupStatus: 'SUCCESS', current: 1, total: 1, succeeded: 1 })
-  emit('RUN_COMPLETED', { current: 1, total: 1, processed: 1, succeeded: 1, skipped: 0, failed: 0,
+  const sourceWriteback = ['source-synced', 'source-pending', 'source-spoof'].includes(scenario.mode)
+    ? { sourcePath: scenario.mode === 'source-spoof' ? value('--excel-path') : value('--source-excel-path'),
+      status: scenario.mode === 'source-pending' ? 'pending' : 'synced', writtenRows: scenario.mode === 'source-pending' ? 0 : 2,
+      pendingRows: scenario.mode === 'source-pending' ? 2 : 0, message: scenario.mode === 'source-pending' ? 'Original Excel is read-only; use result copy.' : 'Original Excel updated.' } : undefined
+  emit('RUN_COMPLETED', { current: 1, total: 1, processed: 1, succeeded: 1, skipped: 0, failed: 0, sourceWriteback,
     rfqNumbers: ['MOCK-1'], resultPath: value('--excel-path'), logPath, materials: 2 })
   if (scenario.mode === 'nonzero') process.exit(1)
 }

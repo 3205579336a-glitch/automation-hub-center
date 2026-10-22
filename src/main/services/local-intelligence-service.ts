@@ -1,12 +1,12 @@
 import type { AutomationInteraction } from '../../shared/automation-interaction'
 import type { ExecutionHistoryStatus } from '../../shared/execution-history-types'
 import { estimateRemaining, fallbackModel, rankTasks, timingModel, validPerformance, workUnit,
-  type AutomationId, type EtaSnapshot, type LocalIntelligenceSnapshot, type PerformanceSample,
+  type TimingAutomationId, type EtaSnapshot, type LocalIntelligenceSnapshot, type PerformanceSample,
   type TimingModel, type TimingStep, type TimingProgress } from '../../shared/local-intelligence'
 import type { ExecutionHistoryService } from './execution-history-service'
 
 interface Run {
-  id: string; contextId: string; operation: AutomationId; model: TimingModel
+  id: string; contextId: string; operation: TimingAutomationId; model: TimingModel
   started: number; pauseStarted?: number; pausedMs: number; state: EtaSnapshot['state']
   total: number; completed: number; concurrency: number; startupMs?: number
   lastUnitActive: number; learned: number; learnedMs: number; observedUnitMs?: number; succeeded: number
@@ -25,7 +25,7 @@ export class LocalIntelligenceService {
     try { return { ranking: rankTasks(await this.history.getEntries({ limit: 500 })), eta: this.eta() } }
     catch { return { ranking: rankTasks([]), eta: this.eta() } }
   }
-  begin(id: string, operation: AutomationId, contextId: string, total = 0): void {
+  begin(id: string, operation: TimingAutomationId, contextId: string, total = 0): void {
     try {
       this.dispose()
       const run: Run = { id, contextId, operation, model: fallbackModel(operation), started: this.now(),
@@ -52,7 +52,7 @@ export class LocalIntelligenceService {
       const workers = progress.workers ?? progress.worker
       if (Number.isInteger(workers) && workers! > 0 && workers! <= 20) run.concurrency = Math.max(run.concurrency, workers!)
       const rfq = run.operation === 'create-rfq'
-      const apqp = run.operation === 'apqp-plan-closure'
+      const apqp = run.operation.startsWith('apqp-')
       const rowStart = progress.stage === 'processing' && progress.status === 'running'
       if (progress.type === 'GROUP_STARTED' || !rfq && rowStart || apqp && progress.event === 'workers') {
         this.startupDone()
@@ -73,7 +73,7 @@ export class LocalIntelligenceService {
           const delta = count! - run.completed
           const duration = Math.max(0, active - run.lastUnitActive)
           const clean = groupDone ? progress.type === 'GROUP_COMPLETED' && (progress.succeeded ?? 0) > run.succeeded
-            : itemDone ? ['SUCCESS', 'NO_DATE', 'NO_RESULT'].includes(progress.status ?? '') : progress.status !== 'failed'
+            : itemDone ? ['SUCCESS', 'NO_DATE', 'NO_RESULT', 'READ', 'VERIFIED', 'UNCHANGED'].includes(progress.status ?? '') : progress.status !== 'failed'
           if (clean && duration > 0 && run.pauseStarted === undefined) {
             const unit = duration / delta
             run.observedUnitMs = run.observedUnitMs === undefined ? unit : 0.3 * unit + 0.7 * run.observedUnitMs
@@ -102,7 +102,7 @@ export class LocalIntelligenceService {
       if (!run || run.id !== id) return undefined
       this.step(run.step)
       const active = this.activeMs(run)
-      const sample: PerformanceSample = { version: 1, activeDurationMs: active,
+      const sample: PerformanceSample = { version: 1, modelId: run.operation, activeDurationMs: active,
         waitingForUserMs: Math.max(0, this.now() - run.started - active), startupMs: run.startupMs ?? 0,
         unitDurationMs: run.learned ? run.learnedMs / run.learned : 0, concurrency: run.concurrency,
         workUnits: { kind: workUnit(run.operation), total: run.total, completed: run.completed, learned: run.learned },

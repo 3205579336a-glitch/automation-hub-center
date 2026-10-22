@@ -8,7 +8,7 @@ import type {
 } from '../../shared/execution-history-types'
 import type { DiagnosticLogEntry } from '../../shared/diagnostic-types'
 import type { DiagnosticLogger } from './diagnostic-logger'
-import { DEFAULT_TASK_ORDER, MAX_PERFORMANCE_SAMPLES } from '../../shared/local-intelligence'
+import { isTimingAutomationId, MAX_PERFORMANCE_SAMPLES } from '../../shared/local-intelligence'
 
 const MAX_STORED_ENTRIES = 500
 
@@ -215,9 +215,10 @@ function retainPerformance(entries: ExecutionHistoryEntry[]): ExecutionHistoryEn
   const counts = new Map<string, number>()
   // Entry order is newest-started first; only one supported batch runs at a time.
   return entries.map(entry => {
-    if (!entry.performance || !DEFAULT_TASK_ORDER.includes(entry.operation as typeof DEFAULT_TASK_ORDER[number])) return entry
-    const count = (counts.get(entry.operation) ?? 0) + 1
-    counts.set(entry.operation, count)
+    const modelId = entry.performance?.modelId ?? entry.operation
+    if (!entry.performance || !isTimingAutomationId(modelId)) return entry
+    const count = (counts.get(modelId) ?? 0) + 1
+    counts.set(modelId, count)
     if (count <= MAX_PERFORMANCE_SAMPLES) return entry
     const normalHistory = { ...entry }
     delete normalHistory.performance
@@ -280,7 +281,8 @@ function isHistoryEntry(value: unknown): value is ExecutionHistoryEntry {
       candidate.operation === 'me12-batch' ||
       candidate.operation === 'me01-source-list' ||
       candidate.operation === 'me52n-project-ref' ||
-      candidate.operation === 'apqp-plan-closure') &&
+      candidate.operation === 'apqp-plan-closure' ||
+      candidate.operation === 'apqp-date-management') &&
     (candidate.status === 'Running' ||
       candidate.status === 'Success' ||
       candidate.status === 'Partial' ||

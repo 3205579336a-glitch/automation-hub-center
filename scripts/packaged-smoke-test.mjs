@@ -8,7 +8,7 @@ import { unzipSync, strFromU8 } from 'fflate'
 import { readFile } from 'node:fs/promises'
 import { URL } from 'node:url'
 
-const executablePath = process.argv[2]
+const executablePath = process.argv[2] ? resolve(process.argv[2]) : undefined
 if (!executablePath) throw new Error('Packaged executable path is required.')
 await stat(executablePath)
 
@@ -22,6 +22,7 @@ try {
   const pageErrors = []
   window.on('pageerror', (error) => pageErrors.push(error.message))
   await window.getByText('Welcome back', { exact: true }).waitFor({ timeout: 20_000 })
+  assert.equal(await window.getByTitle(expectedVersion, { exact: true }).count(), 1, 'The UI must identify the packaged hotfix version')
 
   const bridge = await window.evaluate(() => ({
     rfq: typeof window.sapAutomation?.startRfqBatch,
@@ -74,13 +75,14 @@ try {
   const modules = [
     ['Automatically Create Buyer Receipts and RFQs in Batch from NPL', 'Start Automation'],
     ['Automatically Update Supplier Lead Times (SLT) in Batch', 'Start Automation'],
-    ['Automatically Query APQP Plan Close Dates in Batch', 'Start query'],
+    ['APQP Date Management', 'Start query'],
     ['Automatically Maintain Source Lists in Batch', 'Start Automation']
   ]
   for (const [title, action] of modules) {
     await window.getByRole('button', { name: 'Operations', exact: true }).click()
     await window.getByRole('heading', { name: title, exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
     await window.getByRole('heading', { name: title, level: 2, exact: true }).waitFor()
+    if (title === 'APQP Date Management') await window.getByRole('tab', { name: 'Query Plan Closure Date', exact: true }).click()
     assert(await window.getByRole('button', { name: action, exact: true }).isDisabled(), `${title}: no live run without a validated input`)
   }
   const savedSettings = await window.evaluate(() => window.sapAutomation.getSettings())

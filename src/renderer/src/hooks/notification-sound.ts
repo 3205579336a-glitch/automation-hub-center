@@ -3,6 +3,11 @@ import type { NotificationKind } from '../types/notifications'
 let audio: AudioContext | undefined
 let enabled = true
 export function setNotificationSoundsEnabled(value: boolean): void { enabled = value }
+/** Unlock audio in the Run/Preview click, before a long async SAP read completes. */
+export function prepareNotificationAudio(): void {
+  if (!enabled) return
+  try { audio ??= new AudioContext(); void audio.resume().catch(() => undefined) } catch { /* Optional audio. */ }
+}
 export function playNotificationSound(kind: NotificationKind): void {
   if (!enabled || kind === 'info') return
   try {

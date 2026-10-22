@@ -15,7 +15,7 @@ await writeFile(output, 'protected result fixture')
 const modules = [
   { channel: 'rfq', title: 'Automatically Create Buyer Receipts and RFQs in Batch from NPL' },
   { channel: 'me12', title: 'Automatically Update Supplier Lead Times (SLT) in Batch' },
-  { channel: 'apqp', title: 'Automatically Query APQP Plan Close Dates in Batch' },
+  { channel: 'apqp', title: 'APQP Date Management' },
   { channel: 'me01', title: 'Automatically Maintain Source Lists in Batch' }
 ]
 let app
@@ -47,6 +47,13 @@ try {
       replace(channel + ':start', (_event, config) => {
         assertGuard(config, channel)
         globalThis.controls.calls[channel] = (globalThis.controls.calls[channel] || 0) + 1
+        if (channel === 'me01' && globalThis.controls.mode === 'run-error') return { success: false, errorCode: 'EXECUTION_FAILED', message: 'ME01_TEST_ERROR: supplier 41889 could not be read; no Save was replayed. C:\\owned-logs\\automation-runs\\7007e773-2918-4ec5-8002-75050a458ca3\\me01-errors.log' }
+        if (channel === 'me01' && globalThis.controls.mode === 'cancelled') return { success: false, errorCode: 'CANCELLED', message: 'Stopped after the blocking error was acknowledged.', processed: 1, succeeded: 0, failed: 1, skipped: 0, resultPath: output }
+        if (channel === 'me01' && ['copy', 'skip'].includes(globalThis.controls.mode)) return {
+          success: true, message: globalThis.controls.mode === 'skip' ? 'SOURCE_EXISTS: target supplier already exists; no SAP changes.' : 'Results preserved',
+          processed: 1, succeeded: 0, skipped: 1, failed: 0, resultPath: output, backupPath: input,
+          ...(globalThis.controls.mode === 'copy' ? { warning: 'EXCEL_TEST_LOCKED: completed results saved in the log folder; do not rerun SAP.' } : {})
+        }
         return new Promise(resolve => { globalThis.controls.pending[channel] = () => {
           owner.webContents.send(channel + ':progress', { type: 'RUN_COMPLETED', stage: 'complete', message: 'Mock finished', current: 1, total: 1 })
           resolve({ success: true, message: 'Mock finished', processed: 1, total: 1, succeeded: 1, failed: 0, skipped: 0, resultPath: output, rfqNumbers: ['MOCK-RFQ'] })
@@ -68,6 +75,10 @@ try {
     await page.getByRole('button', { name: 'Operations', exact: true }).click()
     await page.getByRole('heading', { name: module.title, exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
     await page.getByRole('heading', { name: module.title, exact: true, level: 2 }).waitFor()
+    if (module.channel === 'apqp') {
+      const tab = page.getByRole('tab', { name: 'Query Plan Closure Date', exact: true })
+      if (await tab.getAttribute('aria-selected') !== 'true') await tab.click()
+    }
   }
   const toolbar = page.getByRole('region', { name: 'Task controls', exact: true })
   const clear = toolbar.getByRole('button', { name: 'Clear this page', exact: true })
@@ -168,7 +179,41 @@ try {
   await reset()
   assert.equal(await page.getByRole('alert').filter({ hasText: 'We could not validate' }).count(), 0)
   await app.evaluate(() => { globalThis.controls.mode = '' })
+  // Source List errors and Excel fallback notices must show full reasons without View Details.
+  await open(modules[3])
+  await app.evaluate(() => { globalThis.controls.mode = 'error' })
+  await upload.click()
+  let notice = page.getByRole('dialog', { name: 'Source List file could not be validated', exact: true })
+  await notice.getByText(/MOCK_INVALID/).waitFor()
+  assert.equal(await notice.locator('details').count(), 0)
+  await notice.getByRole('button', { name: 'OK, understood', exact: true }).click()
+  await reset()
+  for (const mode of ['run-error', 'copy', 'skip', 'cancelled']) {
+    await app.evaluate((_electron, mode) => { globalThis.controls.mode = mode }, mode)
+    await upload.click()
+    await toolbar.getByText('1 records ready to process', { exact: true }).waitFor()
+    await toolbar.getByRole('button', { name: 'Start Automation', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Ready to update', exact: true }).getByRole('button', { name: 'Start Automation', exact: true }).click()
+    await page.getByRole('region', { name: 'Automation result', exact: true }).waitFor()
+    if (mode === 'skip' || mode === 'cancelled') {
+      assert.equal(await page.getByRole('dialog').count(), 0, 'Existing-target skips and acknowledged stops do not prompt again')
+      await page.getByRole('region', { name: 'Automation result', exact: true }).getByText(mode === 'skip' ? /SOURCE_EXISTS/ : /Stopped after/).waitFor()
+    } else {
+      notice = page.getByRole('dialog', { name: mode === 'copy' ? 'Results saved in the log folder' : 'Source List could not finish', exact: true })
+      await notice.getByText(mode === 'copy' ? /EXCEL_TEST_LOCKED/ : /ME01_TEST_ERROR/).waitFor()
+      assert.equal(await notice.locator('details').count(), 0)
+      if (mode === 'copy') await notice.getByText(output, { exact: false }).waitFor()
+      await page.setViewportSize({ width: 1024, height: 768 })
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false)
+      assert.equal(await notice.evaluate(dialog => dialog.scrollWidth > dialog.clientWidth), false, 'Long error/log paths must wrap inside the popup')
+      await page.screenshot({ path: join(artifacts, `source-list-${mode}-popup.png`), fullPage: true })
+      await notice.getByRole('button', { name: 'OK, understood', exact: true }).click()
+    }
+    await reset()
+  }
+  await app.evaluate(() => { globalThis.controls.mode = '' })
   // Clearing one page must not clear another page's saved upload.
+  await open(modules[1])
   await upload.click()
   await toolbar.getByText('1 records ready to process', { exact: true }).waitFor()
   await open(modules[3]); await upload.click()

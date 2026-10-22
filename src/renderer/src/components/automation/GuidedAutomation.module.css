@@ -26,13 +26,14 @@
 .progress i { display: block; height: 100%; background: var(--primary); transition: width .2s; }
 .details { border-top: 1px solid var(--border); padding-top: 1rem; }
 .details summary { cursor: pointer; color: var(--primary); font-weight: 600; }
-.details pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; max-height: 20rem; overflow: auto; }
+.details pre, pre.details { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.65; max-height: 20rem; overflow: auto; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: .65rem .35rem; border-bottom: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
 .badge { justify-self: start; border-radius: 30px; padding: .35rem .75rem; background: var(--primary-soft); color: var(--primary); font-weight: 600; }
 .dialog { width: min(540px, calc(100vw - 3rem)); color: var(--text); background: var(--surface); padding: 1.6rem; border: 1px solid var(--border); border-radius: 16px; max-height: calc(100vh - 4rem); overflow: auto; }
 .dialog::backdrop { background: #08152799; }
 .dialog h2 { margin-top: 0; }
+.dialog p { overflow-wrap: anywhere; white-space: pre-wrap; }
 .dialog .actions { justify-content: flex-end; margin-top: 1.4rem; }
 .back { border: 0; background: none; color: var(--primary); display: flex; align-items: center; gap: .4rem; padding: 0; margin-bottom: 1rem; cursor: pointer; font: inherit; }
 @media (max-width: 1180px) { .body { grid-template-columns: 1fr; } }

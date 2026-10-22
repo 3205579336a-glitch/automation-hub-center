@@ -116,6 +116,9 @@ class InteractionController:
                 result = verify()
             except Exception as exc:
                 issue = 'The issue is still present. / 问题仍未解决：' + str(exc)
+                if getattr(exc, 'issue_summary', None):
+                    extra = {**(extra or {}), 'issueSummary': exc.issue_summary,
+                             'issueSummaryZh': getattr(exc, 'issue_summary_zh', exc.issue_summary)}
                 # A fresh read may distinguish a technical failure from actual
                 # missing data. Keep WAITING while updating the same checkpoint.
                 stage = extra.get('recoveryPoint', stage) if extra else stage

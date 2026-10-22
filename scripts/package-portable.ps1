@@ -32,9 +32,26 @@ $packagedEngine = Join-Path $unpackedPath 'resources\rpa-engine\automation-engin
 if (-not (Test-Path -LiteralPath $packagedEngine)) {
   throw 'The shared offline automation engine is missing from the packaged application.'
 }
-& $packagedEngine --self-test
+$engineSelfTestOutput = & $packagedEngine --self-test
+Write-Output $engineSelfTestOutput
 if ($LASTEXITCODE -ne 0) {
   throw 'The packaged offline automation engine failed its self-test.'
+}
+$engineMetadata = ($engineSelfTestOutput | Select-Object -Last 1) | ConvertFrom-Json
+$apqpSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'resources\rpa\apqp_plan_closure.py')
+$policyMatch = [regex]::Match($apqpSource, '(?m)^APQP_SESSION_POLICY\s*=\s*"([^"]+)"')
+if (-not $policyMatch.Success -or $engineMetadata.apqpSessionPolicy -ne $policyMatch.Groups[1].Value) {
+  throw 'The packaged APQP engine does not contain the current session-policy hotfix.'
+}
+$connectionSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'resources\rpa\sap_gui_connection.py')
+$connectionPolicy = [regex]::Match($connectionSource, "(?m)^SAP_CONNECTION_POLICY\s*=\s*'([^']+)'")
+if (-not $connectionPolicy.Success -or $engineMetadata.sapConnectionPolicy -ne $connectionPolicy.Groups[1].Value) {
+  throw 'The packaged engine does not contain the RFQ/Source List connection hotfix.'
+}
+$writebackSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'resources\rpa\rfq_source_writeback.py')
+$writebackPolicy = [regex]::Match($writebackSource, "(?m)^SOURCE_WRITEBACK_POLICY\s*=\s*'([^']+)'")
+if (-not $writebackPolicy.Success -or $engineMetadata.rfqSourceWritebackPolicy -ne $writebackPolicy.Groups[1].Value) {
+  throw 'The packaged engine does not contain the verified RFQ original-workbook writeback.'
 }
 
 $guidePath = Join-Path $unpackedPath 'README.txt'

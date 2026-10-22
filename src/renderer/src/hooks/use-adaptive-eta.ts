@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { AutomationId, EtaSnapshot } from '../../../shared/local-intelligence'
+import type { TimingAutomationId, EtaSnapshot } from '../../../shared/local-intelligence'
 
-function validEta(eta: EtaSnapshot | null, id: AutomationId): eta is EtaSnapshot {
+function validEta(eta: EtaSnapshot | null, id: TimingAutomationId): eta is EtaSnapshot {
   return !!eta && eta.automationId === id && typeof eta.runId === 'string'
     && ['running', 'waiting', 'recovering', 'saving'].includes(eta.state)
     && ['learning', 'estimated', 'high'].includes(eta.confidence)
@@ -10,7 +10,7 @@ function validEta(eta: EtaSnapshot | null, id: AutomationId): eta is EtaSnapshot
     && Number.isInteger(eta.historicalRuns) && eta.historicalRuns >= 0 && eta.historicalRuns <= 100
     && (eta.remainingMs === null || Number.isFinite(eta.remainingMs) && eta.remainingMs >= 0)
 }
-export function useAdaptiveEta(id: AutomationId, active: boolean): { eta: EtaSnapshot | null; unavailable: boolean } {
+export function useAdaptiveEta(id: TimingAutomationId, active: boolean): { eta: EtaSnapshot | null; unavailable: boolean } {
   const [eta, setEta] = useState<EtaSnapshot | null>(null)
   const [unavailable, setUnavailable] = useState(false)
   useEffect(() => {

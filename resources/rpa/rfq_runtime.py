@@ -23,6 +23,8 @@ def initialize(env_path):
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--hub", action="store_true")
     parser.add_argument("--excel-path")
+    parser.add_argument("--source-excel-path", default="")
+    parser.add_argument("--source-baseline-path", default="")
     parser.add_argument("--run-id", default="")
     parser.add_argument("--target-env", choices=["PROD", "QA"], default="PROD")
     parser.add_argument("--event-mode", default="jsonl")
@@ -235,6 +237,9 @@ def run_hub(engine, args):
     current_group = None
     csv_handles = None
     paused_states = {}
+    source_writer = None
+    source_closed = False
+    last_source_notice = None
 
     def event(kind, **data):
         emit(args, kind, **{**context, **data})
@@ -242,6 +247,22 @@ def run_hub(engine, args):
     def replace(obj, name, value):
         originals.append((obj, name, getattr(obj, name)))
         setattr(obj, name, value)
+
+    def source_summary(final=False):
+        nonlocal source_closed, last_source_notice
+        if source_writer is None:
+            return {}
+        if final and not source_closed:
+            summary = source_writer.close()
+            source_closed = True
+        else:
+            summary = source_writer.summary()
+        notice = (summary['status'], summary['message'])
+        if notice != last_source_notice and summary['status'] != 'unchanged':
+            last_source_notice = notice
+            event('SOURCE_WRITEBACK_WARNING' if summary['status'] == 'pending' else 'SOURCE_WRITEBACK',
+                  sourceWriteback=summary, message=summary['message'])
+        return {'sourceWriteback': summary}
 
     try:
         if not args.excel_path:
@@ -255,6 +276,14 @@ def run_hub(engine, args):
             raise ValueError("Correct all invalid rows and provide at least one ready material before starting.")
         if args.target_env == "PROD" and not args.production_confirmed:
             raise ValueError("Production execution requires confirmation.")
+        if getattr(args, 'source_excel_path', ''):
+            from rfq_source_writeback import SourceWorkbookWriteback, path_key
+            if path_key(args.source_excel_path) == path_key(args.excel_path):
+                raise ValueError('Source writeback requires a separate durable working copy.')
+            if not getattr(args, 'source_baseline_path', ''):
+                raise ValueError('Source writeback requires the validated input snapshot.')
+            source_writer = SourceWorkbookWriteback(engine, args.source_excel_path,
+                                                    args.source_baseline_path, preview['sheetName'])
         engine.STOP_REQUESTED = False
         context["total"] = preview["groupCount"]
         event("RUN_STARTED", materials=preview["validRows"], message="Connecting to SAP. Complete SAP sign-in if requested.")
@@ -270,6 +299,12 @@ def run_hub(engine, args):
         def write_status(self, rows, **kw):
             rows = list(rows)
             old_write(self, rows, **kw)
+            if source_writer is not None:
+                fields = {'batch_key': 'RPA Batch Key', 'buyer_status': 'Buyer Receipt Status',
+                          'rfq_status': 'RFQ Status', 'rfq_number': 'RFQ Number',
+                          'error_stage': 'Error Stage', 'error_message': 'Error Message',
+                          'npl_row': 'NPL SAP Row', 'buyer_row': 'Buyer Receipt SAP Row', 'rfq_row': 'RFQ SAP Row'}
+                source_writer.record(self, rows, {fields[key]: value for key, value in kw.items() if key in fields})
             state = kw.get("rfq_status", "")
             buyer_state = kw.get("buyer_status", "")
             kind = None
@@ -299,6 +334,11 @@ def run_hub(engine, args):
             except Exception as exc:
                 save_error = str(exc)
                 raise
+            # The result copy is durable BEFORE attempting any original-file
+            # update. Excel failure never changes SAP success or replays SAP.
+            if source_writer is not None:
+                source_writer.flush()
+                source_summary()
             while pending:
                 kind, data = pending.pop(0)
                 if data.get("rfqNumber"):
@@ -363,6 +403,44 @@ def run_hub(engine, args):
                     target.write_text(json.dumps({**checkpoint, **context, **data, 'runId': args.run_id}, default=str, ensure_ascii=False), encoding='utf-8')
 
             controller = InteractionController(args, interaction_event, persist, cancel)
+
+            # Startup has no business writes to replay. Recheck the SAME
+            # connector after login, retaining its one-opening-attempt guard.
+            from sap_gui_connection import SapGuiConnector, SapGuiIssue
+
+            def connection_for(sap):
+                connector = getattr(sap, '_hub_connection', None)
+                if connector is None:
+                    connector = SapGuiConnector(engine.SAP_TARGET_CONNECTION_NAME,
+                        engine.EXPECTED_SAP_SYSTEM, engine.EXPECTED_SAP_CLIENT, engine.EXPECTED_SAP_USER,
+                        launch=sap._launch_sap_logon if engine.SAP_AUTO_LAUNCH else None,
+                        stop=lambda: bool(args.stop_file and Path(args.stop_file).exists()),
+                        cancelled=HubCancelled)
+                    sap._hub_connection = connector
+                return connector
+
+            def startup_check(verify):
+                try:
+                    return verify()
+                except SapGuiIssue as error:
+                    return controller.wait('SIGN_IN', str(error), [], verify, extra={
+                        'issueSummary': error.issue_summary, 'issueSummaryZh': error.issue_summary_zh,
+                        'instructions': 'Complete SAP sign-in or resolve the reported access/window issue, then Check Again. No business action has started.',
+                        'instructionsZh': '请完成 SAP 登录或按具体原因处理权限、窗口问题，再点击重新检查；尚未执行业务操作。'})
+
+            def start_application(sap):
+                return startup_check(connection_for(sap).application)
+
+            old_select_session = engine.SapSession._get_or_open_target_session
+
+            def select_session(sap, application):
+                connection_for(sap)
+                # Refresh the application on each recheck, not a stale COM
+                # handle left behind by an interrupted SAP Logon startup.
+                return startup_check(lambda: old_select_session(sap, connection_for(sap).application()))
+
+            replace(engine.SapSession, '_get_or_start_scripting_application', start_application)
+            replace(engine.SapSession, '_get_or_open_target_session', select_session)
 
             def pause_staging(sap, tasks, issue):
                 identity = session_identity(sap)
@@ -484,6 +562,7 @@ def run_hub(engine, args):
             event("RUN_CANCELLED", message="Cancelled before SAP started.")
             return 3
         engine.standalone_main()
+        source_summary(final=True)
         if save_error:
             raise RuntimeError("Result workbook could not be saved: " + save_error)
         stats = Counter(outcomes)
@@ -492,7 +571,8 @@ def run_hub(engine, args):
                    "withSkips": stats["SUCCESS_WITH_SKIPS"], "failed": stats["ERROR"],
                    "skipped": sum(v for k, v in stats.items() if not k.startswith("SUCCESS") and k != "ERROR"),
                    "materials": preview["validRows"], "rfqNumbers": sorted(numbers),
-                   "resultPath": str(result_store.output_path) if result_store else "", "logPath": log_path}
+                   "resultPath": str(result_store.output_path) if result_store else "", "logPath": log_path,
+                   **source_summary()}
         event("RESULT_FILE", **details)
         if engine.STOP_REQUESTED:
             event("RUN_CANCELLED", **details, message="Stopped after saving the current group. Review results before restarting.")
@@ -503,19 +583,23 @@ def run_hub(engine, args):
         event("RUN_COMPLETED", **details, message="RFQ run finished. Review the result workbook for any skipped or failed materials.")
         return 0
     except HubCancelled:
+        source_summary(final=True)
         event('RUN_CANCELLED', state='CANCELLED', message='Stopped safely. Existing SAP objects were preserved. Review results before retrying.',
               resultPath=str(result_store.output_path) if result_store else '', logPath=log_path,
               rfqNumbers=sorted(numbers), processed=len(outcomes), total=context['total'],
               succeeded=sum(s.startswith('SUCCESS') for s in outcomes), failed=outcomes.count('ERROR'),
-              skipped=sum(not s.startswith('SUCCESS') and s != 'ERROR' for s in outcomes))
+              skipped=sum(not s.startswith('SUCCESS') and s != 'ERROR' for s in outcomes), **source_summary())
         return 3
     except (Exception, SystemExit) as exc:
+        source_summary(final=True)
         traceback.print_exc()
         event("RUN_FAILED", message=str(exc), resultPath=str(result_store.output_path) if result_store else "", logPath=log_path,
               rfqNumbers=sorted(numbers), processed=len(outcomes),
               succeeded=sum(s.startswith("SUCCESS") for s in outcomes), failed=outcomes.count("ERROR"),
-              skipped=sum(not s.startswith("SUCCESS") and s != "ERROR" for s in outcomes))
+              skipped=sum(not s.startswith("SUCCESS") and s != "ERROR" for s in outcomes), **source_summary())
         return 1
     finally:
+        if source_writer is not None and not source_closed:
+            source_writer.close()
         for obj, name, value in reversed(originals):
             setattr(obj, name, value)

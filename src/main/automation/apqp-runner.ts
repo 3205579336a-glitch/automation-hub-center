@@ -1,11 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { ApqpConfig, ApqpPreview, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../../shared/apqp-types'
 import { NativeInteractionBridge, type GuidanceContext } from './native-interaction-bridge'
 import type { AutomationInteraction } from '../../shared/automation-interaction'
 import type { GeneratedArtifacts } from '../services/generated-artifacts'
-import { ApqpTemplateError, checkApqpTemplateHeaders } from '../services/excel-template-header'
+import { ApqpTemplateError } from '../services/excel-template-header'
+import { ApqpLivePreviewRequired, ApqpSavedPreview } from '../services/apqp-saved-preview'
+import type { ApqpNativeDateResult } from '../../shared/apqp-date-types'
 
 interface EngineEvent extends ApqpProgress {
   interaction?: AutomationInteraction
@@ -19,6 +22,7 @@ interface EngineEvent extends ApqpProgress {
   resultPath?: string
   backupPath?: string
   logPath?: string
+  dateResult?: ApqpNativeDateResult
 }
 
 interface ApqpEnginePaths {
@@ -32,14 +36,19 @@ export class ApqpRunner {
   private child: ChildProcessWithoutNullStreams | null = null
   private busy = false
   private previewing = false
+  private readonly savedPreview = new ApqpSavedPreview()
   constructor(private readonly enginePaths: ApqpEnginePaths, private readonly artifacts?: GeneratedArtifacts) {}
 
   async preview(config: ApqpConfig): Promise<ApqpPreviewResult> {
     try {
-      await checkApqpTemplateHeaders(config.excelPath, config.sheetName)
-      const event = await this.execute(config, true, () => undefined)
-      if (!event.preview) throw new Error('The engine did not return a workbook preview.')
-      return { success: true, preview: event.preview }
+      try {
+        return { success: true, preview: await this.savedPreview.read(config) }
+      } catch (error) {
+        if (!(error instanceof ApqpLivePreviewRequired)) throw error
+        const event = await this.execute(config, true, () => undefined)
+        if (!event.preview) throw new Error('The engine did not return a workbook preview.')
+        return { success: true, preview: { ...event.preview, source: 'live-excel' } }
+      }
     } catch (error) { return { success: false, message: messageOf(error),
       ...(error instanceof ApqpTemplateError ? { errorCode: 'APQP_TEMPLATE_INVALID' as const } : {}) } }
   }
@@ -60,25 +69,43 @@ export class ApqpRunner {
     return true
   }
 
-  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void, guidance?: GuidanceContext): Promise<EngineEvent> {
+  /** Shares process exclusion, Stop, progress and the native interaction bridge with the old query. */
+  async dates(request: Record<string, unknown>, report: (event: ApqpProgress) => void, guidance: GuidanceContext): Promise<ApqpNativeDateResult> {
+    try {
+      const event = await this.execute({ excelPath: '', sheetName: '', plant: 'C100', system: '', client: '',
+        maxWorkers: 1, createSessions: false, maxItems: 0, overwriteExisting: false, confirmed: false }, false, report, guidance, request)
+      return event.dateResult ?? { success: false, message: 'The APQP date engine did not return a supported result.', errorCode: 'APQP_DATE_ENGINE_UNAVAILABLE' }
+    } catch (error) { return { success: false, message: messageOf(error), errorCode: 'APQP_DATE_ENGINE_FAILED' } }
+  }
+
+  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void, guidance?: GuidanceContext, dates?: Record<string, unknown>): Promise<EngineEvent> {
     if (this.busy) throw new Error('An APQP preview or run is already active.')
     this.busy = true
     this.previewing = preview
     let artifactDirectory = ''
     try {
-      const launch = await this.resolveLaunch(preview)
+      const launch = await this.resolveLaunch(preview, Boolean(dates))
       if (!launch) throw new Error('The packaged APQP engine is unavailable.')
-      if (!preview && this.artifacts) artifactDirectory = await this.artifacts.create('apqp-plan-closure', guidance?.runId)
+      if (!preview && this.artifacts) artifactDirectory = await this.artifacts.create(dates ? 'apqp-date-management' : 'apqp-plan-closure', guidance?.runId)
+      const dateRequestPath = dates && artifactDirectory ? join(artifactDirectory, 'apqp-date-request.json') : ''
+      if (dates) {
+        if (!dateRequestPath) throw new Error('An owned log directory is required for APQP date requests.')
+        await writeFile(dateRequestPath, JSON.stringify(dates), { encoding: 'utf8', flag: 'wx' })
+      }
       return await new Promise<EngineEvent>((resolve, reject) => {
         let final: EngineEvent | undefined
         const errors: string[] = []
         const child = spawn(launch.command, launch.args, {
           shell: false, windowsHide: true, cwd: artifactDirectory || undefined,
           env: { ...process.env, PYTHONIOENCODING: 'utf-8', EXCEL_PATH: config.excelPath, HUB_RUN_ID: guidance?.runId ?? '',
+            APQP_DATE_REQUEST_PATH: dateRequestPath,
             HUB_ARTIFACT_DIR: artifactDirectory, ...(artifactDirectory ? { TEMP: artifactDirectory, TMP: artifactDirectory } : {}),
-            SHEET_NAME: config.sheetName, PLANT: config.plant, TARGET_SYSTEM: config.system,
-            TARGET_CLIENT: config.client, MAX_WORKERS: String(config.maxWorkers),
-            CREATE_SESSIONS: String(config.createSessions), MAX_ITEMS: String(config.maxItems),
+            SHEET_NAME: config.sheetName, PLANT: config.plant, TARGET_SYSTEM: preview ? config.system : 'VCE',
+            TARGET_CLIENT: preview ? config.client : '100', MAX_WORKERS: String(config.maxWorkers),
+            APQP_TARGET_CONNECTION_NAME: preview ? '' : 'VCE - One Digital Core [949]',
+            APQP_AUTO_OPEN_TARGET: String(!preview),
+            APQP_AUTO_NAVIGATE_TARGET: String(!preview),
+            CREATE_SESSIONS: 'false', MAX_ITEMS: String(config.maxItems),
             OVERWRITE_EXISTING_DATE: String(config.overwriteExisting) }
         })
         this.child = child
@@ -110,8 +137,8 @@ export class ApqpRunner {
     }
   }
 
-  private async resolveLaunch(preview: boolean): Promise<{ command: string; args: string[] } | null> {
-    const suffix = preview ? ['--preview'] : []
+  private async resolveLaunch(preview: boolean, dates = false): Promise<{ command: string; args: string[] } | null> {
+    const suffix = dates ? ['--dates'] : preview ? ['--preview'] : []
     if (!this.enginePaths.preferScript && await exists(this.enginePaths.executable)) {
       return { command: this.enginePaths.executable, args: [...(this.enginePaths.executableArgs ?? []), ...suffix] }
     }

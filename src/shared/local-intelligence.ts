@@ -2,12 +2,15 @@ import type { ExecutionHistoryEntry } from './execution-history-types'
 
 export const DEFAULT_TASK_ORDER = ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list'] as const
 export type AutomationId = typeof DEFAULT_TASK_ORDER[number]
+/** Separate timing models; these two phases still share a single Operations card. */
+export type TimingAutomationId = AutomationId | 'apqp-date-management' | 'apqp-date-preview' | 'apqp-date-update'
 export type WorkUnit = 'groups' | 'rows' | 'items'
 export type TimingStep = 'startup' | 'npl' | 'buyerReceipt' | 'rfq' | 'records' | 'resultWrite'
 export const TIMING_STEPS: TimingStep[] = ['startup', 'npl', 'buyerReceipt', 'rfq', 'records', 'resultWrite']
 
 export interface PerformanceSample {
   version: 1
+  modelId?: TimingAutomationId
   activeDurationMs: number
   waitingForUserMs: number
   startupMs: number
@@ -22,7 +25,7 @@ export interface TaskRanking {
   frequentlyUsed: AutomationId[]
 }
 export interface EtaSnapshot {
-  automationId: AutomationId
+  automationId: TimingAutomationId
   runId: string
   active: boolean
   state: 'running' | 'waiting' | 'recovering' | 'saving'
@@ -39,9 +42,9 @@ export interface TimingProgress {
   type?: string; event?: string; stage?: string; status?: string; state?: string
   current?: number; total?: number; worker?: number; workers?: number; succeeded?: number
 }
-export function completedUnits(id: AutomationId, progress: TimingProgress): number | undefined {
+export function completedUnits(id: TimingAutomationId, progress: TimingProgress): number | undefined {
   const completed = id === 'create-rfq' ? ['GROUP_COMPLETED', 'GROUP_FAILED'].includes(progress.type ?? '')
-    : id === 'apqp-plan-closure' ? progress.event === 'record'
+    : id.startsWith('apqp-') ? progress.event === 'record'
     : progress.stage === 'processing' && ['success', 'skipped', 'failed'].includes(progress.status ?? '')
   return completed && Number.isInteger(progress.current) && progress.current! >= 0 && progress.current! <= 100_000 ? progress.current : undefined
 }
@@ -50,19 +53,25 @@ const DAY = 86_400_000
 export const RANKING_WINDOW_MS = 60 * DAY
 export const MAX_PERFORMANCE_SAMPLES = 100
 const ALPHA = 0.3
-const FALLBACK: Record<AutomationId, { startupMs: number; unitMs: number; unit: WorkUnit }> = {
+const FALLBACK: Record<TimingAutomationId, { startupMs: number; unitMs: number; unit: WorkUnit }> = {
   'create-rfq': { startupMs: 15_000, unitMs: 60_000, unit: 'groups' },
   'me12-batch': { startupMs: 20_000, unitMs: 15_000, unit: 'rows' },
   'me01-source-list': { startupMs: 12_000, unitMs: 6_000, unit: 'rows' },
-  'apqp-plan-closure': { startupMs: 15_000, unitMs: 7_000, unit: 'items' }
+  'apqp-plan-closure': { startupMs: 15_000, unitMs: 7_000, unit: 'items' },
+  'apqp-date-management': { startupMs: 8_000, unitMs: 4_000, unit: 'items' },
+  'apqp-date-preview': { startupMs: 4_000, unitMs: 4_000, unit: 'items' },
+  'apqp-date-update': { startupMs: 4_000, unitMs: 8_000, unit: 'items' }
 }
 export function isAutomationId(value: unknown): value is AutomationId {
   return DEFAULT_TASK_ORDER.includes(value as AutomationId)
 }
-export function fallbackModel(id: AutomationId): TimingModel {
+export function isTimingAutomationId(value: unknown): value is TimingAutomationId {
+  return isAutomationId(value) || value === 'apqp-date-management' || value === 'apqp-date-preview' || value === 'apqp-date-update'
+}
+export function fallbackModel(id: TimingAutomationId): TimingModel {
   return { startupMs: FALLBACK[id].startupMs, unitMs: FALLBACK[id].unitMs, historicalRuns: 0 }
 }
-export function workUnit(id: AutomationId): WorkUnit { return FALLBACK[id].unit }
+export function workUnit(id: TimingAutomationId): WorkUnit { return FALLBACK[id].unit }
 
 /** Frequency/recency/success = 50/35/15. No negative penalty for SAP failures. */
 export function rankTasks(history: unknown, now = Date.now()): TaskRanking {
@@ -71,12 +80,13 @@ export function rankTasks(history: unknown, now = Date.now()): TaskRanking {
   const signals = DEFAULT_TASK_ORDER.map(id => ({ id, frequency: 0, recency: 0, success: 0, count: 0 }))
   const seen = new Set<string>()
   for (const entry of history as ExecutionHistoryEntry[]) {
-    if (!entry || typeof entry.id !== 'string' || seen.has(entry.id) || !isAutomationId(entry.operation)
+    const operation = entry?.operation === 'apqp-date-management' ? 'apqp-plan-closure' : entry?.operation
+    if (!entry || typeof entry.id !== 'string' || seen.has(entry.id) || !isAutomationId(operation)
         || !['Running', 'Success', 'Partial', 'Failed', 'Cancelled'].includes(entry.status)) continue
     seen.add(entry.id)
     const age = now - Date.parse(entry.startedAt)
     if (!Number.isFinite(age) || age < 0 || age > RANKING_WINDOW_MS) continue
-    const signal = signals.find(item => item.id === entry.operation)!
+    const signal = signals.find(item => item.id === operation)!
     signal.count++
     signal.frequency += Math.exp(-age / (30 * DAY))
     signal.recency = Math.max(signal.recency, Math.exp(-age / (14 * DAY)))
@@ -97,10 +107,10 @@ export function rankTasks(history: unknown, now = Date.now()): TaskRanking {
 
 const finite = (value: unknown, maximum = 86_400_000): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= maximum
-export function validPerformance(value: unknown, id: AutomationId): value is PerformanceSample {
+export function validPerformance(value: unknown, id: TimingAutomationId): value is PerformanceSample {
   if (!value || typeof value !== 'object') return false
   const p = value as PerformanceSample
-  return p.version === 1 && finite(p.activeDurationMs) && finite(p.waitingForUserMs, 30 * 86_400_000)
+  return p.version === 1 && (p.modelId === undefined || p.modelId === id) && finite(p.activeDurationMs) && finite(p.waitingForUserMs, 30 * 86_400_000)
     && finite(p.startupMs) && p.startupMs <= p.activeDurationMs && finite(p.unitDurationMs) && p.unitDurationMs > 0
     && Number.isInteger(p.concurrency) && p.concurrency >= 1 && p.concurrency <= 20
     && !!p.workUnits && p.workUnits.kind === workUnit(id)
@@ -123,10 +133,10 @@ function robustAverage(values: number[], fallback: number): number {
   return values.reduce((average, value, index) => index === 0 ? bounded(value) : ALPHA * bounded(value) + (1 - ALPHA) * average, fallback)
 }
 /** Legacy wall-clock durations are never learned: their manual waits are unknown. */
-export function timingModel(history: unknown, id: AutomationId): TimingModel {
+export function timingModel(history: unknown, id: TimingAutomationId): TimingModel {
   const fallback = fallbackModel(id)
   if (!Array.isArray(history)) return fallback
-  const samples = (history as ExecutionHistoryEntry[]).filter(entry => entry && entry.operation === id && !entry.dryRun
+  const samples = (history as ExecutionHistoryEntry[]).filter(entry => entry && (entry.performance?.modelId ?? entry.operation) === id && !entry.dryRun
     && ['Success', 'Partial', 'Failed'].includes(entry.status) && Number.isFinite(Date.parse(entry.completedAt ?? ''))
     && validPerformance(entry.performance, id)).sort((a, b) => Date.parse(a.completedAt!) - Date.parse(b.completedAt!))
     .slice(-MAX_PERFORMANCE_SAMPLES).map(entry => entry.performance!)

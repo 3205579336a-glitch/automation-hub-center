@@ -9,6 +9,9 @@ import { createRequire } from 'node:module'
 import { performance } from 'node:perf_hooks'
 import { strToU8, zipSync } from 'fflate'
 import ts from 'typescript'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
+import { setImmediate } from 'node:timers'
 
 const require = createRequire(import.meta.url), cache = new Map()
 function load(path) {
@@ -64,7 +67,7 @@ test('sheet selection matches native rules; ambiguous and external input is reje
   await assert.rejects(checkApqpTemplateHeaders(multiple,'Missing'), ApqpTemplateError)
   await assert.rejects(checkApqpTemplateHeaders(await fixture(compact,{external:true})), ApqpTemplateError)
 })
-test('invalid file fails without launching engine; valid header proceeds to live validation', async () => {
+test('invalid file fails early; normal saved preview never launches Python/Excel', async () => {
   const runner = new ApqpRunner({executable:'DO_NOT_LAUNCH',script:'DO_NOT_LAUNCH'})
   let executions = 0
   runner.execute = async () => { executions++; return {preview:{sheetName:'APQP_Input',selected:0,invalid:0,skipped:0,sample:[]}} }
@@ -75,7 +78,10 @@ test('invalid file fails without launching engine; valid header proceeds to live
   assert.equal(rejected.success,false); assert.equal(rejected.errorCode,'APQP_TEMPLATE_INVALID'); assert.equal(executions,0)
   assert.deepEqual(await readFile(wrong),before)
   const accepted = await runner.preview({excelPath:await fixture(compact),sheetName:''})
-  assert.equal(accepted.success,true); assert.equal(executions,1)
+  assert.equal(accepted.success,true); assert.equal(accepted.preview.source,'saved-file'); assert.equal(executions,0)
+  const formula = await fixture(compact,{extraRows:'<row r="2"><c r="A2"><f>1+1</f><v>2</v></c><c r="B2"><v>41889</v></c></row>'})
+  const live = await runner.preview({excelPath:formula,sheetName:''})
+  assert.equal(live.success,true); assert.equal(live.preview.source,'live-excel'); assert.equal(executions,1)
   const corrupt = join(root,'corrupt.xlsx'); await writeFile(corrupt,'not Excel')
   await assert.rejects(checkApqpTemplateHeaders(corrupt), ApqpTemplateError)
   await assert.rejects(checkApqpTemplateHeaders(join(root,'missing.xlsx')), ApqpTemplateError)
@@ -89,4 +95,35 @@ test('RFQ also rejects wrong headers before native preview while preserving lega
   assert.equal(executions,0)
   await service.preview({excelPath:await fixture(['Material No.','Supplier Parma','Plant','Project No'])})
   assert.equal(executions,1)
+})
+
+test('runner limits auto-open to execution and locks 949 to actual VCE/100 identity', async () => {
+  const launches = []
+  const module = { exports: {} }
+  const code = ts.transpileModule(readFileSync(resolve('src/main/automation/apqp-runner.ts'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
+  const spawn = (_command, _args, options) => {
+    launches.push(options.env)
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() })
+    void Promise.resolve().then(() => {
+      child.stdout.end('APQP_EVENT {"event":"complete","message":"mock only"}\n')
+      child.stderr.end()
+      setImmediate(() => child.emit('close', 0))
+    })
+    return child
+  }
+  new Function('require', 'module', 'exports', code)(name => name === 'node:child_process' ? { spawn } : name.startsWith('.') ? load(join(resolve('src/main/automation'), name + '.ts')) : require(name), module, module.exports)
+  const runner = new module.exports.ApqpRunner({executable:'DO_NOT_LAUNCH',script:'DO_NOT_LAUNCH'})
+  runner.resolveLaunch = async () => ({command:'MOCK',args:[]})
+  const config = {excelPath:'mock.xlsx',sheetName:'',plant:'C100',system:'CEQ',client:'949',maxWorkers:3,createSessions:true,maxItems:0,overwriteExisting:false}
+  await runner.execute(config, true, () => {})
+  await runner.execute(config, false, () => {})
+  assert.equal(launches[0].APQP_AUTO_OPEN_TARGET,'false')
+  assert.equal(launches[0].APQP_AUTO_NAVIGATE_TARGET,'false')
+  assert.equal(launches[0].APQP_TARGET_CONNECTION_NAME,'')
+  assert.equal(launches[1].APQP_AUTO_OPEN_TARGET,'true')
+  assert.equal(launches[1].APQP_AUTO_NAVIGATE_TARGET,'true')
+  assert.equal(launches[1].APQP_TARGET_CONNECTION_NAME,'VCE - One Digital Core [949]')
+  assert.equal(launches[1].TARGET_SYSTEM,'VCE')
+  assert.equal(launches[1].TARGET_CLIENT,'100')
+  assert.equal(launches[1].CREATE_SESSIONS,'false')
 })

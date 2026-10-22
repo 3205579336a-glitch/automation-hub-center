@@ -1,10 +1,11 @@
 import { mkdtemp, mkdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { _electron as electron } from 'playwright-core'
 
 const testUserData = await mkdtemp(join(tmpdir(), 'sap-rfq-smoke-'))
+if (dirname(testUserData) !== resolve(tmpdir()) || !basename(testUserData).startsWith('sap-rfq-smoke-')) throw new Error('Unexpected smoke-test cleanup target')
 const artifactDirectory = resolve('artifacts')
 const sampleWorkbook = join(testUserData, 'rfq-test.xlsx')
 execFileSync(process.env.SAP_RFQ_PYTHON || 'py', [...(process.env.SAP_RFQ_PYTHON ? [] : ['-3']), 'scripts/rfq-smoke-fixture.py', sampleWorkbook])
@@ -54,21 +55,26 @@ try {
   await window.screenshot({ path: join(artifactDirectory, 'rfq-v32-confirmation.png'), fullPage: true })
   // Never confirm PROD in a test. Cancel before injecting a purely UI mock.
   await window.getByRole('button', { name: 'Cancel', exact: true }).click()
-  await electronApp.evaluate(({ ipcMain }) => {
+  await electronApp.evaluate(({ ipcMain }, sourcePath) => {
+    let attempts = 0
     ipcMain.removeHandler('rfq:start')
     ipcMain.handle('rfq:start', (event) => {
+      const sourceWriteback = { sourcePath, status: ++attempts === 1 ? 'synced' : 'pending', writtenRows: attempts === 1 ? 2 : 0,
+        pendingRows: attempts === 1 ? 0 : 2, message: attempts === 1 ? 'Original Excel updated.' : 'Original Excel is read-only.' }
       for (const update of [
         { type: 'GROUP_STARTED', current: 1, total: 1, groupKey: 'test', supplier: '12345', plant: 'C100', project: 'TEST-P1', materials: ['10000001', '10000002'], message: 'Mock group started' },
         { type: 'RFQ_CREATED', current: 1, total: 1, rfqNumber: 'MOCK-10001', message: 'Mock result saved' },
         { type: 'RUN_COMPLETED', current: 1, total: 1, succeeded: 1, skipped: 0, failed: 0, message: 'Mock run completed' }
       ]) event.sender.send('rfq:progress', { stage: 'processing', status: 'running', ...update })
-      return { success: true, message: 'Mock run completed', processed: 1, succeeded: 1, skipped: 0, failed: 0, total: 1, withSkips: 0, materials: 2, rfqNumbers: ['MOCK-10001'], resultPath: '' }
+      return { success: true, message: 'Mock run completed', processed: 1, succeeded: 1, skipped: 0, failed: 0, total: 1, withSkips: 0, materials: 2, rfqNumbers: ['MOCK-10001'], resultPath: sourcePath + '.result-copy.xlsx', sourceWriteback }
     })
-  })
+  }, sampleWorkbook)
   await run.click()
   await window.getByRole('button', { name: 'Confirm and Start', exact: true }).click()
   await window.getByText(/MOCK-10001/).first().waitFor()
   await window.getByRole('button', { name: 'Run Another Task', exact: true }).waitFor()
+  await window.getByText('RFQ results saved to original Excel', { exact: true }).waitFor()
+  await window.getByRole('button', { name: 'Open Original Excel', exact: true }).waitFor()
   await window.screenshot({ path: join(artifactDirectory, 'rfq-v32-result-mock.png'), fullPage: true })
   await window.getByRole('button', { name: 'Operations', exact: true }).click()
   await window.getByRole('heading', { name: 'Automatically Create Buyer Receipts and RFQs in Batch from NPL', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
@@ -80,6 +86,17 @@ try {
   await window.setViewportSize({ width: 1100, height: 900 })
   if (await window.evaluate(() => globalThis.document.documentElement.scrollWidth > globalThis.document.documentElement.clientWidth)) throw new Error('RFQ layout overflows at large font size')
   await window.screenshot({ path: join(artifactDirectory, 'rfq-v32-dark-large.png'), fullPage: true })
+  await window.getByRole('button', { name: 'Run Another Task', exact: true }).click()
+  await window.getByRole('button', { name: 'Upload completed template', exact: true }).click()
+  await run.waitFor({ state: 'visible' })
+  await window.getByText(/Input rows: 3.*Unique ready rows: 2/).waitFor()
+  await run.click()
+  await window.getByRole('button', { name: 'Confirm and Start', exact: true }).click()
+  await window.getByText('Original Excel not updated — review the result copy', { exact: true }).waitFor()
+  if (await window.getByRole('button', { name: 'Open Original Excel', exact: true }).count()) throw new Error('Pending source must not appear saved')
+  await window.getByRole('button', { name: 'Open Result Copy', exact: true }).waitFor()
+  await window.getByText('Original Excel not updated — review the result copy', { exact: true }).scrollIntoViewIfNeeded()
+  await window.screenshot({ path: join(artifactDirectory, 'rfq-writeback-pending.png'), fullPage: true })
   // Shared app modal must remain visible outside the RFQ route, even when audio
   // is unavailable. These are UI-only requests; no native SAP engine is run.
   await window.getByRole('button', { name: 'Operations', exact: true }).click()
@@ -143,5 +160,5 @@ try {
   console.log('RFQ smoke passed: download, real offline validation, grouping, PROD guard, confirmation, mocked results, global action modal, failed check, Continue/Stop, unsafe error, audio failure, dark/large layout. No SAP writes.')
 } finally {
   if (electronApp) await electronApp.close()
-  await rm(testUserData, { recursive: true, force: true })
+  await rm(testUserData, { recursive: true, force: true, maxRetries: 15, retryDelay: 200 })
 }

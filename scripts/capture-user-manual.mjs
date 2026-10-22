@@ -167,7 +167,7 @@ try {
   await capture('11-history')
   await open('Automatically Update Supplier Lead Times (SLT) in Batch')
   await capture('12-slt')
-  await open('Automatically Query APQP Plan Close Dates in Batch'); await capture('13-apqp')
+  await open('APQP Date Management'); await page.getByRole('tab', { name: 'Query Plan Closure Date', exact: true }).click(); await capture('13-apqp')
   await open('Automatically Maintain Source Lists in Batch')
   await page.getByRole('button',{name:'Upload completed template',exact:true}).click()
   await page.getByRole('cell',{name:'No — switch source',exact:true}).waitFor()

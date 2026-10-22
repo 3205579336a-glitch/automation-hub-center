@@ -53,7 +53,12 @@ def self_test() -> int:
             os.environ.update(original_environment)
         loaded.append(name)
     from rfq_defaults import ENGINE_VERSION
-    print(json.dumps({"status": "ok", "engines": loaded, "rfqEngineVersion": ENGINE_VERSION}))
+    from apqp_plan_closure import APQP_SESSION_POLICY
+    from sap_gui_connection import SAP_CONNECTION_POLICY
+    from rfq_source_writeback import SOURCE_WRITEBACK_POLICY
+    print(json.dumps({"status": "ok", "engines": loaded, "rfqEngineVersion": ENGINE_VERSION,
+                      "apqpSessionPolicy": APQP_SESSION_POLICY, "sapConnectionPolicy": SAP_CONNECTION_POLICY,
+                      "rfqSourceWritebackPolicy": SOURCE_WRITEBACK_POLICY}))
     return 0
 
 

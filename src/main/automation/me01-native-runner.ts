@@ -31,6 +31,7 @@ interface EngineEvent {
   failed?: number
   resultPath?: string
   backupPath?: string
+  warning?: string
 }
 
 const EVENT_PREFIX = 'ME01_EVENT '
@@ -105,9 +106,9 @@ export class Me01NativeRunner {
         stderr.close()
         if (this.cancelRequested || finalEvent?.cancelled) {
           reportProgress({ stage: 'cancelled', status: 'skipped', message: 'ME01 source-list batch was cancelled.' })
-          finish({ success: false, errorCode: 'CANCELLED', message: 'Source List task stopped. Completed changes are preserved.',
+          finish({ success: false, errorCode: 'CANCELLED', message: ['Source List task stopped. Completed changes are preserved.', finalEvent?.warning].filter(Boolean).join('\n'),
             processed: finalEvent?.processed, succeeded: finalEvent?.succeeded, skipped: finalEvent?.skipped, failed: finalEvent?.failed,
-            resultPath: finalEvent?.resultPath, backupPath: finalEvent?.backupPath })
+            resultPath: finalEvent?.resultPath, backupPath: finalEvent?.backupPath, warning: finalEvent?.warning })
           return
         }
         if (code !== 0 || !finalEvent) {
@@ -121,9 +122,10 @@ export class Me01NativeRunner {
         const succeeded = result.succeeded ?? 0
         const skipped = result.skipped ?? 0
         const failed = result.failed ?? 0
-        const message = failed > 0
+        const summary = failed > 0
           ? `ME01 finished with ${succeeded} successful, ${skipped} skipped, and ${failed} failed material(s).`
           : `ME01 completed: ${succeeded} successful and ${skipped} skipped material(s).`
+        const message = [summary, result.warning].filter(Boolean).join('\n')
         finish({
           success: true,
           message,
@@ -132,7 +134,8 @@ export class Me01NativeRunner {
           skipped,
           failed,
           resultPath: result.resultPath ?? config.excelPath,
-          backupPath: result.backupPath ?? ''
+          backupPath: result.backupPath ?? '',
+          warning: result.warning
         })
       })
     }).finally(async () => { if (artifactDirectory) await this.artifacts?.finish(artifactDirectory).catch(() => undefined) })
@@ -160,6 +163,7 @@ function progressFromEvent(event: EngineEvent): Me01BatchProgress | null {
   if (event.event === 'preparing') return { stage: 'preparing', status: 'running', message }
   if (event.event === 'connecting') return { stage: 'connecting-sap', status: 'running', message, total: event.total }
   if (event.event === 'waiting-for-sap') return { stage: 'connecting-sap', status: 'running', message, total: event.total }
+  if (event.event === 'warning') return { stage: 'saving', status: 'running', message }
   if (event.event === 'record') return { stage: 'processing', message, current: event.current, total: event.total, material: event.material, status: event.status ?? 'running' }
   if (event.event === 'complete') return { stage: 'complete', status: (event.failed ?? 0) > 0 ? 'failed' : 'success', message, current: event.processed, total: event.processed }
   if (event.event === 'fatal') return { stage: 'failed', status: 'failed', message }

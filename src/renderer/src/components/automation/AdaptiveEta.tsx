@@ -1,10 +1,10 @@
-import type { AutomationId, EtaSnapshot } from '../../../../shared/local-intelligence'
+import type { TimingAutomationId, EtaSnapshot } from '../../../../shared/local-intelligence'
 import { estimateRemaining, fallbackModel } from '../../../../shared/local-intelligence'
 import { useLocalization } from '../../i18n/use-localization'
 import styles from './GuidedAutomation.module.css'
 
-export function AdaptiveEta({ eta, unavailable, automationId, total, waiting = false, recovering = false }: {
-  eta: EtaSnapshot | null; unavailable: boolean; automationId: AutomationId; total: number; waiting?: boolean; recovering?: boolean
+export function AdaptiveEta({ eta, unavailable, automationId, total, waiting = false, recovering = false, showFinishTime = false }: {
+  eta: EtaSnapshot | null; unavailable: boolean; automationId: TimingAutomationId; total: number; waiting?: boolean; recovering?: boolean; showFinishTime?: boolean
 }): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
@@ -13,6 +13,7 @@ export function AdaptiveEta({ eta, unavailable, automationId, total, waiting = f
   const initial = estimateRemaining(fallbackModel(automationId), { total, completed: 0, concurrency: 1,
     startupDone: false, startupElapsed: 0, unitElapsed: 0, learned: 0 })
   const remaining = eta?.remainingMs ?? (eta?.total ? null : initial)
+  const finishTime = remaining === null ? '' : new Date(Date.now() + remaining).toLocaleString(zh ? 'zh-CN' : 'en-GB', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const seconds = Math.max(1, Math.ceil((remaining ?? 0) / 1000))
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor(seconds % 3600 / 60)
@@ -26,6 +27,7 @@ export function AdaptiveEta({ eta, unavailable, automationId, total, waiting = f
       : eta && !eta.active ? zh ? '处理已结束' : 'Processing finished'
       : unavailable || remaining === null ? zh ? '暂时无法估算' : 'ETA unavailable' : `~${duration}`}</strong>
     {!paused && !rechecking && !unavailable && (!eta || eta.active) && remaining !== null && <small>
+      {showFinishTime && <>{zh ? '预计完成：' : 'Estimated finish: '}{finishTime} · </>}
       {(!eta?.total || eta.confidence === 'learning') ? zh ? '正在学习本机耗时，仅供参考。' : 'Learning from this device; approximate estimate.'
         : zh ? `根据本机 ${eta?.historicalRuns} 次历史运行，并结合本次速度估算。` : `Based on ${eta?.historicalRuns} local runs and current speed.`}
     </small>}

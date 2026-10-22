@@ -69,6 +69,14 @@ class HubUserInteraction:
                 return result
             except Exception as error:
                 message = 'The issue is still present. ' + str(error)
+                # Classified native checks may change after each attempt (e.g. login -> busy).
+                # Keep the visible reason current, not only the collapsed technical message.
+                summary = getattr(error, 'issue_summary', None)
+                summary_zh = getattr(error, 'issue_summary_zh', None)
+                if isinstance(summary, str) and summary.strip():
+                    issue = summary
+                if isinstance(summary_zh, str) and summary_zh.strip():
+                    issue_zh = summary_zh
 
 
 def session_identity(session):

@@ -95,7 +95,8 @@ class Session:
         self.focus=None; self.calendar=False; self.calendar_stuck=False
         def key(value):
             if value==4:self.calendar=True
-        self.fields={'wnd[0]':SimpleNamespace(sendVKey=Mock(side_effect=key)), 'wnd[0]/usr/ctxtEORD-MATNR':SimpleNamespace(Text=''),
+        self.fields={'wnd[0]':SimpleNamespace(sendVKey=Mock(side_effect=key),maximize=Mock()),
+                     'wnd[0]/tbar[0]/okcd':SimpleNamespace(Text=''), 'wnd[0]/usr/ctxtEORD-MATNR':SimpleNamespace(Text=''),
                      'wnd[0]/usr/ctxtEORD-WERKS':SimpleNamespace(Text='',SetFocus=Mock())}
     def findById(self,name,*args):
         self.find_calls+=1
@@ -342,9 +343,42 @@ class Tests(unittest.TestCase):
     def test_real_me01_existing_target_rechecks_with_boundary_probe_but_no_save(self):
         s=Session([old(fixed=False,usage=''),old('6587',True,'1',first='12.10.2026',last='31.12.2099')],
                   visible=25,materialized=25,scroll_maximum=24); s.virtual_growth=True
-        with patch.object(engine,'wait_ready'):
+        with patch.object(engine,'wait_ready'), patch.object(engine,'open_me01') as navigate:
             self.assertFalse(engine.maintain_material(s,'20503551','6587',False,FIRST,LAST,'C100'))
+        navigate.assert_called_once_with(s)
         self.assertEqual(s.writes,[]); self.assertTrue(all(position in (0,1) for position in s.scrolls)); s.save.assert_not_called()
+    def test_hub_skips_any_existing_target_without_changing_fix_mrp_dates_or_other_rows(self):
+        for dual in (True, False):
+            for targets in [[old('000006587',False,'',first='01.01.2000',last='01.01.2001',org='C200')],
+                            [old('6587'),old('6587',False,'2',last='31.12.2099')]]:
+                with self.subTest(dual=dual, targets=targets):
+                    s=Session([old(),*targets]); before=[dict(r) for r in s.rows]
+                    a=adapter(s)
+                    self.assertFalse(a.upsert('6587',dual,FIRST,LAST,'C100',skip_existing=True))
+                    self.assertEqual(a.skip_reason,'SOURCE_EXISTS')
+                    self.assertEqual(s.rows,before); self.assertEqual(s.writes,[]); s.save.assert_not_called()
+    def test_hub_finds_target_on_later_page_and_skips_without_writes(self):
+        s=Session([old(str(i)) for i in range(25)]+[old('000006587',False,'2')],visible=26,materialized=25)
+        before=[dict(r) for r in s.rows]; diagnostics={}
+        with patch.object(engine,'wait_ready'), patch.object(engine,'open_me01') as navigate:
+            self.assertFalse(engine.maintain_material(s,'20503551','6587',False,FIRST,LAST,'C100',diagnostics))
+        navigate.assert_called_once_with(s)
+        self.assertEqual(diagnostics['skipReason'],'SOURCE_EXISTS')
+        self.assertEqual(s.rows,before); self.assertEqual(s.writes,[]); s.save.assert_not_called()
+    def test_hub_missing_target_still_applies_dual_rules_and_preserves_other_records(self):
+        for dual in (True, False):
+            s=Session([old()]); before=dict(s.rows[0])
+            with patch.object(engine,'wait_ready'):
+                self.assertTrue(engine.maintain_material(s,'20503551','6587',dual,FIRST,LAST,'C100'))
+            self.assertEqual(len(s.rows),2)
+            self.assertEqual(s.rows[1][FIELDS['supplier']],'6587')
+            self.assertTrue(s.rows[1][FIELDS['fixed']]); self.assertEqual(s.rows[1][FIELDS['usage']],'1')
+            if dual:self.assertEqual(s.rows[0],before)
+            else:
+                self.assertFalse(s.rows[0][FIELDS['fixed']]); self.assertEqual(s.rows[0][FIELDS['usage']],'')
+                self.assertEqual(s.rows[0][FIELDS['from']],before[FIELDS['from']])
+                self.assertEqual(s.rows[0][FIELDS['to']],before[FIELDS['to']])
+            s.save.assert_called_once()
     def test_real_me01_yes_keeps_other_source_and_avoids_virtual_scroll(self):
         s=Session([old()],visible=25,materialized=25,scroll_maximum=24); s.virtual_growth=True
         before=dict(s.rows[0]); adapter(s).upsert('6587',True,FIRST,LAST,'C100')

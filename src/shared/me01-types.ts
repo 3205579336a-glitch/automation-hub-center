@@ -64,8 +64,9 @@ export type Me01BatchResult =
       failed: number
       resultPath: string
       backupPath: string
+      warning?: string
     }
-  | { success: false; errorCode: Me01BatchErrorCode; message: string; processed?: number; succeeded?: number; skipped?: number; failed?: number; resultPath?: string; backupPath?: string }
+  | { success: false; errorCode: Me01BatchErrorCode; message: string; processed?: number; succeeded?: number; skipped?: number; failed?: number; resultPath?: string; backupPath?: string; warning?: string }
 
 export type Me01ProgressStage =
   | 'preparing'

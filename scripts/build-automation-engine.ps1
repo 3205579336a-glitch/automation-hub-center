@@ -29,16 +29,24 @@ if (-not $SkipDependencyInstall) {
   --paths $sourceRoot `
   --hidden-import rfq_engine `
   --hidden-import rfq_runtime `
+  --hidden-import rfq_source_writeback `
   --hidden-import rfq_runtime_improvements `
   --hidden-import rfq_interaction `
   --hidden-import rfq_defaults `
   --hidden-import hub_artifacts `
+  --hidden-import sap_gui_connection `
   --hidden-import me01_source_list `
   --hidden-import me01_source_table `
   --hidden-import me52n_project_ref `
   --hidden-import apqp_plan_closure `
+  --hidden-import apqp_date_api `
+  --hidden-import apqp_date_update `
+  --hidden-import apqp_date_discovery `
+  --hidden-import apqp_date_sessions `
+  --hidden-import apqp_dates `
   --hidden-import win32com.client `
   --hidden-import pythoncom `
+  --hidden-import win32gui `
   --collect-all playwright `
   --distpath $distPath `
   --workpath $workPath `

@@ -325,7 +325,7 @@ class SourceListTable:
             raise RuntimeError(f'Source List row {absolute + 1} changed during review; stop and check SAP.')
         return controls
 
-    def upsert(self, parma, dual, valid_from, valid_to, org):
+    def upsert(self, parma, dual, valid_from, valid_to, org, *, skip_existing=False):
         if not isinstance(dual, bool):
             raise RuntimeError('Dual Sourcing must be an explicit Yes/No.')
         first, last = parse_date(valid_from), parse_date(valid_to)
@@ -334,6 +334,15 @@ class SourceListTable:
             raise RuntimeError('Invalid new Source List dates, Parma or purchasing organization.')
         self.stage = 'Read Source List controls'
         rows, blanks = self.snapshot()
+        self.skip_reason = ''
+        if skip_existing and any(values[FIELDS['supplier']] == parma for values in rows.values()):
+            # Hub policy: any existing target Parma is a benign skip, regardless
+            # of validity, organization, Fix or MRP. Never "repair" old rows.
+            self.before_rows = {row: dict(values) for row, values in rows.items()}
+            self.expected_rows = {row: dict(values) for row, values in rows.items()}
+            self.skip_reason = 'SOURCE_EXISTS'
+            self.stage = 'Existing target supplier — skipped'
+            return False
         candidates = {row: values for row, values in rows.items()
                       if values[FIELDS['supplier']] == parma and values[FIELDS['org']] == org}
         exact = [row for row, values in candidates.items()

@@ -77,6 +77,7 @@ try {
     await page.screenshot({path:join(artifacts,`operations-${width}x${height}.png`)})
   }
   await page.evaluate(() => { window.location.hash='/apqp-plan-closure' })
+  await page.getByRole('tab',{name:'Query Plan Closure Date',exact:true}).click()
   const upload=page.getByRole('button',{name:'Upload completed template',exact:true})
   await upload.click()
   await page.getByRole('cell',{name:'10000001',exact:true}).waitFor()
@@ -122,7 +123,7 @@ try {
     await window.sapAutomation.saveSettings({...s,language:'zh-CN',theme:'dark'})
   })
   await page.reload()
-  await page.getByRole('heading',{name:'自动批量查询 APQP 计划关闭日期',exact:true}).waitFor()
+  await page.getByRole('heading',{name:'APQP 日期管理',exact:true,level:2}).waitFor()
   for (const route of pages) {
     await page.evaluate(route=>{window.location.hash='/'+route},route)
     await page.locator('.page:visible').waitFor()

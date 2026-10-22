@@ -35,6 +35,7 @@ export class RfqNativeRunner {
   private responding = false
   private launchPromise?: Promise<{ command: string; args: string[] }>
   private allowedPaths = new Set<string>()
+  private sourcePaths = new Set<string>()
 
   constructor(private readonly enginePaths: EnginePaths, readonly runsDirectory: string, private readonly appVersion: string,
     private readonly recovery?: RfqRecoveryRecorder, private readonly artifacts?: GeneratedArtifacts) {}
@@ -81,7 +82,9 @@ export class RfqNativeRunner {
       recorded = Boolean(this.recovery)
       report({ stage: 'preparing', status: 'running', runId, message: 'Validating a local working copy before connecting to SAP.' })
       const launch = await this.resolveLaunch()
-      const args = ['--hub', '--excel-path', resultPath, '--run-id', runId, '--target-env', config.environment, '--event-mode', 'jsonl', '--stop-file', this.stopFile, '--control-dir', this.controlDirectory]
+      const args = ['--hub', '--excel-path', resultPath, '--source-excel-path', resolve(config.excelPath),
+        '--source-baseline-path', input, '--run-id', runId, '--target-env', config.environment,
+        '--event-mode', 'jsonl', '--stop-file', this.stopFile, '--control-dir', this.controlDirectory]
       const readyFile = this.recovery ? join(directory, 'temp', 'hub-ready.json') : undefined
       if (readyFile) args.push('--hub-ready-file', readyFile)
       if (config.productionConfirmed) args.push('--production-confirmed')
@@ -132,12 +135,20 @@ export class RfqNativeRunner {
       this.recovery?.close(runId, recoveryIssue ? null : output.code)
       closed = true
       const terminal = [...output.events].reverse().find((event) => ['RUN_COMPLETED', 'RUN_FAILED', 'RUN_CANCELLED'].includes(event.type))
+      const sourceWriteback = [...output.events].reverse().find(event => event.sourceWriteback)?.sourceWriteback ?? {
+        sourcePath: resolve(config.excelPath), status: 'pending' as const, writtenRows: 0, pendingRows: 0,
+        message: 'Original Excel writeback was not confirmed. Review the result copy; do not rerun SAP to retry Excel writeback.' }
+      // Only the exact file explicitly selected by the user is openable. An
+      // engine event must not grant access to an arbitrary external file.
+      if (resolve(sourceWriteback.sourcePath) !== resolve(config.excelPath)) throw new Error('Invalid source workbook writeback identity.')
+      this.sourcePaths.add(resolve(config.excelPath))
+      this.allowedPaths.add(resolve(config.excelPath))
       const completed = !recoveryIssue && terminal?.type === 'RUN_COMPLETED' && output.code === 0
       const recoveryMessage = recoveryIssue ? 'Recovery evidence could not be stored reliably. Safe stop was requested. Verify SAP and review Safe Recovery before retrying.' : undefined
       const metadata = { appVersion: this.appVersion, engineVersion: '32', runId, automationType: 'RFQ',
         timestamp: new Date().toISOString(), environment: config.environment,
         lastStage: last?.type, error: completed ? undefined : recoveryMessage || terminal?.message || output.error,
-        terminal, resultPath }
+        terminal, resultPath, sourceWriteback }
       await writeFile(join(diagnosticsPath, 'run.json'), JSON.stringify(metadata, null, 2), 'utf8')
       for (const target of [resultPath, diagnosticsPath]) {
         if (this.isInsideRun(target) && await exists(target)) this.allowedPaths.add(resolve(target))
@@ -149,12 +160,13 @@ export class RfqNativeRunner {
         message: recoveryMessage || terminal?.message || output.error || 'The engine stopped without a completion event. Review local logs before restarting.',
         runId, resultPath, logPath, diagnosticsPath, rfqNumbers: terminal?.rfqNumbers,
         processed: terminal?.processed, total: terminal?.total, succeeded: terminal?.succeeded,
-        skipped: terminal?.skipped, failed: terminal?.failed }
-      return { success: true, message: terminal.message || 'RFQ run completed.', runId,
+        skipped: terminal?.skipped, failed: terminal?.failed, sourceWriteback }
+      return { success: true, message: sourceWriteback.status === 'pending'
+        ? `${terminal.message || 'RFQ run completed.'} ${sourceWriteback.message}` : terminal.message || 'RFQ run completed.', runId,
         processed: terminal.processed ?? 0, total: terminal.total ?? 0,
         succeeded: terminal.succeeded ?? 0, skipped: terminal.skipped ?? 0, failed: terminal.failed ?? 0,
         withSkips: terminal.withSkips ?? 0, materials: typeof terminal.materials === 'number' ? terminal.materials : 0,
-        rfqNumbers: terminal.rfqNumbers ?? [], resultPath, logPath, diagnosticsPath }
+        rfqNumbers: terminal.rfqNumbers ?? [], resultPath, logPath, diagnosticsPath, sourceWriteback }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (diagnosticsPath) {
@@ -203,7 +215,7 @@ export class RfqNativeRunner {
 
   isRunning(): boolean { return this.busy || this.child !== null }
 
-  canOpen(path: string): boolean { return this.allowedPaths.has(resolve(path)) && this.isInsideRun(path) }
+  canOpen(path: string): boolean { return this.allowedPaths.has(resolve(path)) && (this.isInsideRun(path) || this.sourcePaths.has(resolve(path))) }
 
   private isInsideRun(path: string): boolean {
     const child = relative(resolve(this.runsDirectory), resolve(path))

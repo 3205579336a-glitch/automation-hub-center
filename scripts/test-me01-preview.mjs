@@ -14,6 +14,9 @@ new Function('require','module','exports', code)(require, module, module.exports
 const service = new module.exports.Me01ExcelService()
 const businessModule = {exports:{}}
 new Function('require','module','exports',ts.transpileModule(readFileSync('src/shared/me01-types.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(require,businessModule,businessModule.exports)
+const runnerModule = {exports:{}}
+new Function('require','module','exports',ts.transpileModule(readFileSync('src/main/automation/me01-native-runner.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText)(
+  name => name === '../../shared/me01-types' ? businessModule.exports : name === './native-interaction-bridge' ? {} : require(name), runnerModule, runnerModule.exports)
 const escape = value => String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;')
 async function fixture(rows, run) {
   const directory = await mkdtemp(join(tmpdir(), 'hub-me01-preview-'))
@@ -33,6 +36,24 @@ async function fixture(rows, run) {
   }
 }
 const headers = ['Material No.','Parma','Dual Sourcing','ME01 Status']
+
+test('native runner preserves existing-source skip counts and Excel result-copy warnings', async () => {
+  // Only a tiny Node process emits fake protocol events. No Python or SAP access.
+  const resultPath = 'C:\\owned-logs\\run\\source_ME01_results.xlsx'
+  const warning = 'Excel is read-only. Completed results are preserved; do not rerun SAP.'
+  const event = { event: 'complete', processed: 2, succeeded: 1, skipped: 1, failed: 0, resultPath, backupPath: 'C:\\owned-logs\\backup.xlsx', warning }
+  const runner = new runnerModule.exports.Me01NativeRunner({ executable: process.execPath, executableArgs: ['-e', `console.log('ME01_EVENT ' + ${JSON.stringify(JSON.stringify(event))})`], script: '' })
+  const progress = []
+  const result = await runner.run({ excelPath: 'C:\\input.xlsx', confirmed: true }, event => progress.push(event))
+  assert.equal(result.success, true)
+  assert.equal(result.skipped, 1)
+  assert.equal(result.failed, 0)
+  assert.equal(result.resultPath, resultPath)
+  assert.equal(result.warning, warning)
+  assert.match(result.message, /1 successful and 1 skipped/)
+  assert(result.message.includes(warning))
+  assert.equal(progress.at(-1).stage, 'complete')
+})
 test('Yes/No preview includes modes and rechecks SUCCESS rather than filtering it out', async () => {
   await fixture([headers,['0016808656','00041889','No','SUCCESS'],['NEXT','101','Yes','']],async path => {
     const preview = await service.preview(path)

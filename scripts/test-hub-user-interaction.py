@@ -31,8 +31,9 @@ def sap_session(system='TEST', user='TEST-USER', transaction='SESSION_MANAGER'):
         if name == 'wnd[1]': return None
         if name == 'wnd[0]/sbar': return SimpleNamespace(MessageType='', Text='')
         return Mock()
+    finder = Mock(side_effect=find)
     return SimpleNamespace(Id='mock-session', Busy=False,
-        Info=SimpleNamespace(SystemName=system, Client='100', User=user, Transaction=transaction), findById=Mock(side_effect=find))
+        Info=SimpleNamespace(SystemName=system, Client='100', User=user, Transaction=transaction), findById=finder, FindById=finder)
 
 
 class Tests(unittest.TestCase):
@@ -66,6 +67,25 @@ class Tests(unittest.TestCase):
         hub = HubUserInteraction('Source List', emit)
         with self.assertRaises(HubStopped): hub.wait('UNKNOWN', 'Unknown', '未知')
 
+    def test_classified_recheck_updates_visible_reason_and_keeps_technical_details(self):
+        requests, checks = [], []
+        hub = HubUserInteraction('APQP', lambda event, **payload: emit(event, payload))
+        def emit(event, payload):
+            if event == 'interaction':
+                requests.append(payload['interaction'])
+                hub.responses.put(dict(requestId=payload['interaction']['requestId'], action='continue'))
+        def verify():
+            checks.append(1)
+            if len(checks) == 1:
+                raise apqp.SapSessionCheckError('SAP_SESSION_BUSY', 'SAP is busy', 'SAP 仍在处理中', 'COM diagnostic')
+            return 'verified'
+        self.assertEqual(hub.wait('SIGN_IN', 'Sign in', '请登录', verify, detail='Initial diagnostic'), 'verified')
+        self.assertEqual(requests[0]['message'], 'Initial diagnostic')
+        self.assertEqual(requests[1]['issueSummary'], 'SAP is busy')
+        self.assertEqual(requests[1]['issueSummaryZh'], 'SAP 仍在处理中')
+        self.assertIn('COM diagnostic', requests[1]['message'])
+        self.assertTrue(requests[1]['message'].startswith('The issue is still present.'))
+
     def test_stale_run_or_request_ignored_by_stdin(self):
         hub = HubUserInteraction('APQP', Mock())
         hub.run_id = 'run'
@@ -95,17 +115,17 @@ class Tests(unittest.TestCase):
         with self.assertRaises(RuntimeError): verify_session(session, identity)
 
     def test_session_detection_never_guesses_between_environments(self):
-        app = SimpleNamespace(Children=Children([SimpleNamespace(Children=Children([sap_session('QA'), sap_session('PROD')]))]))
+        app = SimpleNamespace(Children=Children([SimpleNamespace(Description='VCE - One Digital Core [949]', Children=Children([sap_session('QA'), sap_session('PROD')]))]))
         with patch.object(me01.win32com.client, 'GetObject', return_value=SimpleNamespace(GetScriptingEngine=app)):
             with self.assertRaises(RuntimeError): me01.find_hub_session()
 
     def test_session_detection_does_not_hijack_another_transaction(self):
-        busy_task = sap_session(transaction='VA01')
-        idle = sap_session()
-        app = SimpleNamespace(Children=Children([SimpleNamespace(Children=Children([busy_task, idle]))]))
+        busy_task = sap_session(system='VCE', transaction='VA01')
+        idle = sap_session(system='VCE')
+        app = SimpleNamespace(Children=Children([SimpleNamespace(Description='VCE - One Digital Core [949]', Children=Children([busy_task, idle]))]))
         with patch.object(me01.win32com.client, 'GetObject', return_value=SimpleNamespace(GetScriptingEngine=app)):
             self.assertIs(me01.find_hub_session(), idle)
-        self.assertEqual(busy_task.findById.call_count, 1)  # wnd[1] read, no text/click writes
+        self.assertEqual(busy_task.findById.call_count, 2)  # Only wnd[0]/wnd[1] reads, no navigation/writes.
 
 
     def test_source_unknown_error_saves_and_never_starts_next_material(self):

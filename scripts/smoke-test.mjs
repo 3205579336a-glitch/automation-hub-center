@@ -12,7 +12,7 @@ const artifacts = resolve('artifacts')
 await mkdir(artifacts, { recursive: true })
 const modules = [
   { card: 'Automatically Update Supplier Lead Times (SLT) in Batch', title: 'Automatically Update Supplier Lead Times (SLT) in Batch', template: 'ME12_Supplier_Lead_Time_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['B', 'C100']], name: 'Info Record' },
-  { card: 'Automatically Query APQP Plan Close Dates in Batch', title: 'Automatically Query APQP Plan Close Dates in Batch', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['D', '41889']], name: 'APQP' },
+  { card: 'APQP Date Management', title: 'APQP Date Management', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['B', '41889']], name: 'APQP' },
   { card: 'Automatically Maintain Source Lists in Batch', title: 'Automatically Maintain Source Lists in Batch', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889'], ['C', 'No']], name: 'Source List' }
 ]
 for (const module of modules) {
@@ -54,6 +54,10 @@ try {
     await operations()
     await page.getByRole('heading', { name: module.card, exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
     await page.getByRole('heading', { name: module.title, exact: true, level: 2 }).waitFor()
+    if (module.channel === 'apqp') {
+      const tab = page.getByRole('tab', { name: 'Query Plan Closure Date', exact: true })
+      if (await tab.getAttribute('aria-selected') !== 'true') await tab.click()
+    }
   }
   await operations()
   assert.equal(await page.getByRole('button', { name: 'Open', exact: true }).count(), 4)
@@ -96,7 +100,7 @@ try {
       await confirmation.waitFor()
       if (module.channel === 'me12') await confirmation.getByText(/Permission required: SAP ME12/).waitFor()
       if (module.channel === 'me01') {
-        await confirmation.getByText(/No clears other Fix and MRP on ALL rows/).waitFor()
+        await confirmation.getByText(/Existing target Parma: skip without changes/).waitFor()
         await confirmation.getByText('No — switch fixed source',{exact:true}).waitFor()
       }
       await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click()
@@ -155,6 +159,8 @@ try {
     assert.equal(await prompt.isVisible(), true)
     if (module.channel === 'me01') {
       assert.equal(await prompt.getByRole('button', { name: 'Continue', exact: true }).count(), 0)
+      await prompt.getByRole('region', { name: 'Error information', exact: true }).getByText(/MOCK_SAP_STATE/).waitFor()
+      assert.equal(await prompt.getByText('View Details', { exact: true }).count(), 0, 'Source List blocking reason is never collapsed')
       await prompt.getByRole('button', { name: 'Stop Automation', exact: true }).click()
     } else {
       if (module.channel === 'apqp') {
@@ -176,7 +182,8 @@ try {
     const result = page.getByRole('region', { name: 'Automation result', exact: true })
     await result.waitFor()
     await result.getByRole('button', { name: 'Open Result', exact: true }).click()
-    await result.getByText('View Details', { exact: true }).click()
+    if (module.channel === 'me01') assert.equal(await result.getByText('View Details', { exact: true }).count(), 0)
+    else await result.getByText('View Details', { exact: true }).click()
     await result.getByText(/Mock completed safely/).waitFor()
     await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; document.documentElement.dataset.fontSize = 'large' })
     await page.setViewportSize({ width: 1100, height: 900 })
@@ -203,8 +210,8 @@ try {
   await page.getByRole('button', { name: 'Save Settings', exact: true }).click()
   await page.getByText('Settings saved', { exact: true }).waitFor()
   assert.equal(await page.evaluate(() => window.__tones.length), count, 'Sound disabled must be silent')
-  await page.getByText('Advanced / Key User Settings', { exact: true }).click()
-  await page.getByLabel('SAP WebGUI URL Template').waitFor()
+  assert.equal(await page.getByText('Advanced / Key User Settings', { exact: true }).count(), 0)
+  assert.equal(await page.getByLabel('SAP WebGUI URL Template').count(), 0)
   await page.screenshot({ path: join(artifacts, 'guided-settings-advanced.png'), fullPage: true })
   await page.getByRole('button', { name: 'Execution History', exact: true }).click()
   await page.getByRole('heading', { name: 'Execution history', exact: true }).waitFor()
@@ -230,7 +237,7 @@ try {
   await page.getByLabel('Language', { exact: true }).selectOption('zh-CN')
   await page.getByRole('button', { name: 'Save Settings', exact: true }).click()
   await page.getByRole('button', { name: '操作中心', exact: true }).click()
-  for (const title of ['在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', '自动批量更新供应商交货时间（SLT）', '自动批量查询 APQP 计划关闭日期', '自动批量 Source List 维护']) {
+  for (const title of ['在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', '自动批量更新供应商交货时间（SLT）', 'APQP 日期管理', '自动批量 Source List 维护']) {
     await page.getByRole('heading', { name: title, exact: true }).waitFor()
   }
   await checkCards()

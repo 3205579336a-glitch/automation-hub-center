@@ -38,6 +38,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
   const latest = events[events.length - 1]
   const group = [...events].reverse().find((event) => event.groupKey)
   const totals = [...events].reverse().find((event) => event.succeeded !== undefined)
+  const sourceWriteback = result?.sourceWriteback ?? [...events].reverse().find(event => event.sourceWriteback)?.sourceWriteback
   const completedGroups = result?.processed ?? Math.max(0, ...events.map(event => completedUnits('create-rfq', event) ?? 0))
   const percent = preview?.groupCount ? Math.min(100, Math.round(completedGroups / preview.groupCount * 100)) : 0
   const canRun = Boolean(preview && preview.validRows > 0 && preview.invalidRows === 0 && !running && !loading && !result)
@@ -108,7 +109,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
       const response = await window.sapAutomation.startRfqBatch({ excelPath, environment: 'PROD', productionConfirmed: true, fingerprint: preview.fingerprint })
       setResult(response)
       setNumbers((previous) => [...new Set([...previous, ...(response.rfqNumbers ?? [])])])
-      const warning = response.success && (response.failed > 0 || response.skipped > 0 || (response.withSkips ?? 0) > 0)
+      const warning = response.success && (response.failed > 0 || response.skipped > 0 || (response.withSkips ?? 0) > 0 || response.sourceWriteback?.status === 'pending')
       notify({ kind: response.success ? warning ? 'warning' : 'success' : response.errorCode === 'CANCELLED' ? 'warning' : 'error',
         title: response.success ? t('RFQ 执行结束', 'RFQ run finished') : t('RFQ 已停止', 'RFQ stopped'), message: response.message })
     } catch (error) { reportError(error) } finally { runInFlight.current = false; setRunning(false); setStopping(false); window.dispatchEvent(new Event('rfq-run-finished')) }
@@ -165,7 +166,9 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
     SAP_SLOW: t('SAP 响应较慢，仍在等待', 'SAP is responding slowly; still waiting'),
     SAP_RECOVERED: t('SAP 已响应，继续当前步骤', 'SAP responded; continuing the current step'),
     STOP_DEFERRED: t('停止已接收，正在保护已发出的 SAP 操作', 'Stop received; protecting the issued SAP action'),
-    STOP_ACKNOWLEDGED: t('停止已接收，正在保存本地状态', 'Stop received; saving local status')
+    STOP_ACKNOWLEDGED: t('停止已接收，正在保存本地状态', 'Stop received; saving local status'),
+    SOURCE_WRITEBACK: t('结果已写回原 Excel', 'Results saved to original Excel'),
+    SOURCE_WRITEBACK_WARNING: t('原 Excel 尚未写回，结果已保留在副本中', 'Original Excel not updated; result copy is safe')
   }
 
   return <div className="page">
@@ -178,7 +181,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
       : preview?.invalidRows ? t('请修正文件后重新上传', 'Correct your file and upload again') : t('等待上传', 'Ready to upload')}
       hint={running ? t('请保持 SAP 打开；读取等待可及时停止，已发出的 SAP 操作会保护当前分组完成及结果回写。', 'Keep SAP open. Read-only waits stop promptly; issued SAP actions protect current-group completion and result writeback.')
         : result ? t('在下方打开结果，或清空本页准备新任务。', 'Open your result below, or clear this page for a new task.')
-        : excelPath ? t('核对下方物料和供应商分组后，在这里开始执行。', 'Review the materials and supplier groups below, then start here.')
+        : excelPath ? t('核对下方分组后开始。结果会自动写回所选 Excel，请勿在运行中排序或修改输入数据。', 'Review the groups, then start. Results write back to the selected Excel; do not sort or change inputs during the run.')
         : t('下载模板、填写并上传，即可开始。', 'Download the template, fill it, then upload to get started.')}
       startLabel={t('开始自动化', 'Start Automation')} canRun={canRun} running={running} stopping={stopping} locked={loading} canClear={hasData}
       onStart={() => setConfirming(true)} onStop={() => void stop()} onClear={reset} />
@@ -194,7 +197,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
         </div>
         {downloadedPath && <p className={styles.savedPath}>{t('模板已保存：', 'Template saved: ')}{downloadedPath}</p>}
         {excelPath && <p className={styles.path}>{excelPath}</p>}
-        <p className={styles.hint}>{t('使用已保存的 Excel 内容。原文件保持安全；结果保存到本机独立文件，可在完成后打开。', 'Uses the saved Excel content. Your original is kept safe; results are saved to a separate local workbook.')}</p>
+        <p className={styles.hint}>{t('上传前请先保存 Excel。运行时可保持打开；结果自动写回原文件，同时保留本机安全副本。', 'Save Excel before uploading. It can stay open during the run; results write back to the original, with a safe local copy retained.')}</p>
       </section>
       {preview && <section className={`card ${styles.section}`}>
         <h3>{preview.invalidRows ? t('请修正数据后重新上传', 'Correct the data and upload again') : t('RFQ 文件已就绪', 'RFQ file ready')}</h3>
@@ -232,11 +235,21 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
         {attention && <div className={styles.warning}><AlertTriangle size={18} /><strong>{t('需要处理', 'Action required')}</strong>
           <p>Material: {Array.isArray(attention.materials) ? attention.materials.join(', ') : '—'} · {t('阶段', 'Stage')}: {attention.step || attention.type}</p>
           <p>{attention.message}</p><p>{t('其他可处理物料会继续执行。请在结果中修正该物料，再重新上传。', 'Other eligible materials continue. Correct this material in the result workbook, then upload again.')}</p></div>}
+        {sourceWriteback && sourceWriteback.status !== 'unchanged' && <div className={sourceWriteback.status === 'pending' ? styles.warning : styles.hint} role="status">
+          <strong>{sourceWriteback.status === 'synced'
+            ? t('RFQ 结果已写回原 Excel', 'RFQ results saved to original Excel')
+            : t('原 Excel 尚未写回，请查看结果副本', 'Original Excel not updated — review the result copy')}</strong>
+          <p>{sourceWriteback.status === 'synced'
+            ? t(`已更新 ${sourceWriteback.writtenRows} 行，仅修改执行结果列。`, `${sourceWriteback.writtenRows} row(s) updated; only result columns were changed.`)
+            : t('已有结果保存在副本中。请勿为了回写 Excel 而重新运行 SAP。', 'Existing results are safe in the result copy. Do not rerun SAP just to retry Excel writeback.')}</p>
+          {sourceWriteback.status === 'pending' && <details><summary>{t('查看回写原因', 'View writeback issue')}</summary><p>{sourceWriteback.message}</p></details>}
+        </div>}
         {result && <div className={styles.resultPaths}>
           <strong>{result.success ? t('执行结束', 'Automation finished') : t('执行已停止', 'Automation stopped')}</strong>
           <p>{result.message}</p>
           {result.success && <p>{t('成功但含跳过物料的组', 'Successful groups with skipped materials')}: {result.withSkips ?? 0}</p>}
-          {result.resultPath && <button className="button" onClick={() => void open(result.resultPath!)}><FolderOpen size={16} />{t('打开结果文件', 'Open Result File')}</button>}
+          {result.sourceWriteback?.status === 'synced' && <button className="button primary" onClick={() => void open(result.sourceWriteback!.sourcePath)}><FolderOpen size={16} />{t('打开原 Excel', 'Open Original Excel')}</button>}
+          {result.resultPath && <button className="button" onClick={() => void open(result.resultPath!)}><FolderOpen size={16} />{t('打开结果副本', 'Open Result Copy')}</button>}
           {result.diagnosticsPath && <button className="button" onClick={() => void open(result.diagnosticsPath!)}>{t('打开本地诊断资料', 'Open local diagnostics')}</button>}
           <button className="button" disabled={running || loading} onClick={reset}>{t('运行另一任务', 'Run Another Task')}</button>
         </div>}

@@ -43,8 +43,14 @@ import type {
 } from '../shared/me01-types'
 
 import type { ApqpConfig, ApqpFileResult, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../shared/apqp-types'
+import type { ApqpDateCapabilities, ApqpDateQuery, ApqpDateQueryResult, ApqpDatePreviewRequest, ApqpDatePreviewResult,
+  ApqpDateExecuteRequest, ApqpDateExecuteResult } from '../shared/apqp-date-types'
 
 export interface SapAutomationApi {
+  getApqpDateCapabilities: () => Promise<ApqpDateCapabilities | null>
+  queryApqpDates: (input: ApqpDateQuery) => Promise<ApqpDateQueryResult>
+  previewApqpDateChanges: (input: ApqpDatePreviewRequest) => Promise<ApqpDatePreviewResult>
+  executeApqpDateChanges: (input: ApqpDateExecuteRequest) => Promise<ApqpDateExecuteResult>
   getTimeSavings: () => Promise<TimeSavingsSummary>
   getRfqRecovery: () => Promise<RfqRecoveryView[]>
   openRecoveryResult: (runId: string) => Promise<RfqRecoveryResult>

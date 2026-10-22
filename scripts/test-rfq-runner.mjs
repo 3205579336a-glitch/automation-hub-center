@@ -26,7 +26,7 @@ test('Electron RFQ runner (mock child only)', async (t) => {
       return { runner, config, input }
     }
 
-    await t.test('copies input, preserves original, trusts terminal totals not row event counts, logs Unicode', async () => {
+    await t.test('keeps durable copy, passes original separately, trusts terminal totals not row event counts, logs Unicode', async () => {
       const { runner, config, input } = await setup()
       const before = await readFile(input)
       const events = []
@@ -39,10 +39,34 @@ test('Electron RFQ runner (mock child only)', async (t) => {
       assert.equal(runner.canOpen(result.resultPath), true)
       assert.equal(runner.canOpen(result.diagnosticsPath), true)
       assert.match(await readFile(result.logPath, 'utf8'), /fixture diagnostic/)
-      assert.equal(runner.canOpen(input), false)
+      assert.equal(runner.canOpen(input), true)
+      assert.equal(runner.canOpen(input + '.unselected'), false)
+      assert.equal(result.sourceWriteback.status, 'pending', 'missing confirmation must never imply the original was updated')
       assert.match(await readFile(join(result.diagnosticsPath, 'engine.log'), 'utf8'), /离线模拟/)
       assert.equal(events.filter((e) => e.type === 'RFQ_CREATED').length, 2)
       assert.equal(events.some((e) => e.message.includes('ordinary output')), false)
+    })
+    for (const mode of ['source-synced', 'source-pending']) {
+      await t.test(`${mode}: preserves SAP success and exposes original writeback status separately`, async () => {
+        const { runner, config, input } = await setup(mode)
+        const result = await runner.run(config, () => {})
+        assert.equal(result.success, true)
+        assert.equal(result.sourceWriteback.status, mode === 'source-synced' ? 'synced' : 'pending')
+        assert.equal(result.sourceWriteback.sourcePath, input)
+        assert.notEqual(result.resultPath, input)
+        assert.equal(runner.canOpen(input), true)
+        assert.equal(runner.canOpen(result.resultPath), true)
+        if (mode === 'source-pending') assert.match(result.message, /read-only/)
+        const metadata = JSON.parse(await readFile(join(result.diagnosticsPath, 'run.json'), 'utf8'))
+        assert.deepEqual(metadata.sourceWriteback, result.sourceWriteback)
+      })
+    }
+    await t.test('engine cannot grant arbitrary external source file access', async () => {
+      const { runner, config, input } = await setup('source-spoof')
+      const result = await runner.run(config, () => {})
+      assert.equal(result.success, false)
+      assert.match(result.message, /Invalid source workbook/)
+      assert.equal(runner.canOpen(input), false)
     })
     await t.test('changed input requires a fresh preview', async () => {
       const { runner, config, input } = await setup()

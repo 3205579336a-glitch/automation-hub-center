@@ -11,7 +11,7 @@ await mkdir(artifacts, { recursive: true })
 const titles = [
   'Automatically Create Buyer Receipts and RFQs in Batch from NPL',
   'Automatically Update Supplier Lead Times (SLT) in Batch',
-  'Automatically Query APQP Plan Close Dates in Batch',
+  'APQP Date Management',
   'Automatically Maintain Source Lists in Batch'
 ]
 let app

@@ -26,6 +26,8 @@ import { Me01ExcelService } from './services/me01-excel-service'
 import { GuidedAutomationService } from './services/guided-automation-service'
 import { ApqpRunner } from './automation/apqp-runner'
 import { registerApqpHandlers } from './ipc/apqp-handlers'
+import { ApqpDateService } from './services/apqp-date-service'
+import { registerApqpDateHandlers } from './ipc/apqp-date-handlers'
 import { RfqSafeRecoveryService } from './services/rfq-safe-recovery-service'
 import { registerSafeRecoveryHandlers } from './ipc/safe-recovery-handlers'
 import { GeneratedArtifacts } from './services/generated-artifacts'
@@ -187,6 +189,7 @@ app.whenReady().then(async () => {
     preferScript: !app.isPackaged
   }, artifacts)
   registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'), guided, intelligence)
+  registerApqpDateHandlers(new ApqpDateService(apqpRunner), guided, history, logger, intelligence)
   registerHistoryHandlers(history, intelligence, () => guided.isRunning() || rfqRunner.isRunning() || artifactCleanupActive)
   registerSafeRecoveryHandlers(recovery, history, settingsService, () => guided.isRunning() || rfqRunner.isRunning() || artifactCleanupActive)
   // Run locally at startup and daily while idle; no external scheduler needed.

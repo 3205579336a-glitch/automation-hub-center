@@ -343,3 +343,42 @@ test('Four real IPC adapters observe mocked engines without changing execution',
     } finally { await rm(folder, { recursive: true, force: true }) }
   })
 })
+
+test('APQP dates: real IPC persists query/preview history and learns separate timing models', async () => {
+  const folder = await mkdtemp(join(tmpdir(), 'hub-date-eta-history-'))
+  try {
+    handlers.clear()
+    const logger = { info: async () => {}, error: async () => {}, warning: async () => {}, getEntries: async () => [] }
+    const path = join(folder, 'history.json'), store = new ExecutionHistoryService(path, logger)
+    const guided = new GuidedAutomationService(join(folder, 'guidance'), () => false)
+    let clock = 0
+    const published = [], intelligence = new LocalIntelligenceService(store, eta => published.push(eta), () => clock)
+    const simulate = (report, count) => {
+      clock += 1000; report({ event: 'workers', workers: 1, total: count })
+      for (let current = 1; current <= count; current++) { clock += 2000; report({ event: 'record', current, total: count, status: 'READ' }) }
+    }
+    const service = {
+      query: async (_query, report) => { simulate(report, 2); return { success: true, snapshot: { records: [{}, {}], resultPath: join(folder, 'read.json') } } },
+      preview: async (_input, report) => { simulate(report, 1); return { success: true, preview: { total: 2, changedRecords: 0, changedFields: 0, conflicts: 1, invalid: 0 }, resultPath: join(folder, 'comparison.json') } }
+    }
+    load('src/main/ipc/apqp-date-handlers.ts').registerApqpDateHandlers(service, guided, store, logger, intelligence)
+    const event = { senderFrame: { url: 'file:///renderer/index.html' }, sender: { isDestroyed: () => true } }
+    await handlers.get('apqp:dates:query')(event, { project: '775773', userId: 'EE00221', environment: 'PROD' })
+    await handlers.get('apqp:dates:preview')(event, { snapshotId: '11111111-1111-4111-8111-111111111111', edits: [{ apqp: '2000000000', dates: { gPlanDate: null, gActualDate: '2026-11-01', hPlanDate: null, hActualDate: null } }] })
+    // Reopen the actual file: validates both persistence and isHistoryEntry, not a mock array.
+    const reopened = new ExecutionHistoryService(path, logger)
+    const entries = await reopened.getEntries({ operations: ['apqp-date-management'] })
+    assert.equal(entries.length, 2)
+    const query = entries.find(e => e.apqpDateAction === 'query'), preview = entries.find(e => e.apqpDateAction === 'preview')
+    assert.equal(query.status, 'Success'); assert.equal(query.performance.workUnits.completed, 2)
+    assert.equal(preview.status, 'Partial'); assert.equal(preview.performance.workUnits.completed, 1)
+    assert.equal(preview.succeeded, undefined, 'A comparison is not a successful SAP update')
+    assert.equal(shared.timingModel(entries, 'apqp-date-management').historicalRuns, 1)
+    assert.equal(shared.timingModel(entries, 'apqp-date-preview').historicalRuns, 1)
+    assert.equal(shared.timingModel(entries, 'apqp-plan-closure').historicalRuns, 0)
+    assert.equal(shared.DEFAULT_TASK_ORDER.length, 4, 'Only four Operations cards')
+    assert(published.some(eta => eta.automationId === 'apqp-date-management' && eta.completed === 1 && eta.remainingMs > 0))
+    assert.equal(intelligence.eta(), null)
+    assert.equal(guided.isRunning(), false)
+  } finally { await rm(folder, { recursive: true, force: true }) }
+})

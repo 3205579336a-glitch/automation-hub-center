@@ -1,0 +1,53 @@
+.back { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 15px; padding: 0; border: 0; background: transparent; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; }
+.back:hover { text-decoration: underline; }
+.back:focus-visible { outline: 2px solid var(--primary); outline-offset: 5px; border-radius: 3px; }
+.tabs { display: flex; gap: 8px; margin-bottom: 20px; padding: 6px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-muted); }
+.tabs button { display: flex; align-items: center; justify-content: center; gap: 9px; flex: 1; padding: 14px; border: 1px solid transparent; border-radius: 9px; color: var(--text-muted); background: transparent; font-weight: 600; }
+.tabs button[aria-selected='true'] { border-color: var(--border-strong); background: var(--surface); color: var(--primary); box-shadow: var(--shadow); }
+.tabs button:disabled { cursor: default; }
+.section { padding: 22px; margin-top: 18px; min-width: 0; scroll-margin-top: 150px; }
+.section h3 { margin: 0 0 9px; color: var(--text-strong); }
+.copy { margin: 0 0 16px; color: var(--text-muted); line-height: 1.7; }
+.fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: end; }
+.queryGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: 18px; align-items: start; }
+.queryGrid .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.projectCombo { position: relative; display: flex; min-width: 0; }
+.projectCombo input { width: 100%; padding-right: 40px; }
+.projectToggle { position: absolute; right: 1px; top: 1px; bottom: 1px; width: 36px; border: 0; border-radius: 0 7px 7px 0; color: var(--text-muted); background: transparent; display: grid; place-items: center; cursor: pointer; }
+.projectToggle:hover { background: var(--surface-muted); }
+.projectToggle:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+.projectOptions { position: absolute; top: 100%; left: 0; right: 0; z-index: 20; padding: 5px; margin: 5px 0 0; list-style: none; max-height: 230px; overflow-y: auto; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface); color: var(--text-strong); box-shadow: var(--shadow); }
+.projectOptions li { padding: 10px; border-radius: 5px; cursor: pointer; overflow-wrap: anywhere; }
+.projectOptions li:hover, .projectOptions li[aria-selected='true'] { background: var(--primary-soft); color: var(--primary); }
+.tableControls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .6fr); gap: 16px; align-items: end; }
+.viewSummary { margin: 10px 0 0; color: var(--text-muted); line-height: 1.6; font-size: .9rem; }
+.viewSummary strong { color: var(--warning-strong); }
+.runPanel { border-top: 3px solid var(--primary); }
+.runFacts { margin: 0; }
+.runFacts > div { display: grid; grid-template-columns: minmax(85px, .8fr) minmax(0, 1.2fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.runFacts dt { color: var(--text-muted); }
+.runFacts dd { margin: 0; font-weight: 600; color: var(--text-strong); overflow-wrap: anywhere; }
+.progressBar { width: 100%; height: 9px; margin-top: 18px; accent-color: var(--primary); }
+.progressMessage { color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; font-size: .9rem; }
+.notice { border: 1px solid var(--border); border-radius: 9px; padding: 14px 16px; line-height: 1.7; background: var(--primary-soft); margin: 14px 0; overflow-wrap: anywhere; }
+.warning { background: var(--warning-soft); color: var(--warning-strong); border-color: var(--warning); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 15px; }
+.table { overflow-x: auto; width: 100%; border: 1px solid var(--border); border-radius: 9px; margin-top: 16px; }
+.table table { border-collapse: collapse; width: 100%; min-width: 970px; }
+.compact table { min-width: 600px; }
+.section button:disabled { background: var(--surface-muted); color: var(--text-subtle); }
+.table th, .table td { padding: 12px 11px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.table th { background: var(--surface-muted); color: var(--text-muted); white-space: normal; min-width: 115px; max-width: 190px; line-height: 1.5; }
+.table td input { width: 145px; min-height: 37px; }
+.table td { vertical-align: top; }
+.commentField { display: grid; gap: 5px; margin-top: 9px; width: 145px; color: var(--text-muted); font-size: .8rem; white-space: normal; line-height: 1.4; }
+.editorFields { margin: 0; padding: 0; border: 0; min-width: 0; }
+.table td[data-changed='true'] { background: var(--primary-soft); }
+.table tr:last-child td { border-bottom: 0; }
+.table tr[data-mismatch='true'] td { background: var(--warning-soft); color: var(--warning-strong); font-weight: 600; }
+.pager { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 13px; flex-wrap: wrap; }
+.details { margin-top: 16px; color: var(--text-muted); overflow-wrap: anywhere; }
+.details pre { white-space: pre-wrap; }
+@media (max-width: 850px) { .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } .section { padding: 16px; } .tabs button { padding: 12px 8px; } }
+@media (max-width: 850px) { .queryGrid { grid-template-columns: minmax(0, 1fr); gap: 0; } }
+@media (max-width: 550px) { .fields, .queryGrid .fields, .tableControls { grid-template-columns: 1fr; } .tabs { flex-direction: column; } }

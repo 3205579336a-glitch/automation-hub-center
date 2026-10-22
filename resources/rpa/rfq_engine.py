@@ -357,6 +357,10 @@ BUYER_SAVE_POPUP_CLOSE_TIMEOUT_SEC = max(
 )
 BUYER_SAVE_CLICK_RETRIES = max(1, int(os.getenv("BUYER_SAVE_CLICK_RETRIES", "3")))
 BUYER_SAVE_CLICK_RETRY_SEC = max(0.2, float(os.getenv("BUYER_SAVE_CLICK_RETRY_SEC", "1")))
+# A successful Yes may immediately open an identical question for the next
+# material. Legacy ClickRetries is not a limit on these successful confirmations.
+BUYER_SAVE_QUEUE_TIMEOUT_SEC = 300.0
+BUYER_SAVE_CONFIRMATION_LIMIT = 500
 BUYER_GREEN_STATUS_TIMEOUT_SEC = max(
     1.0,
     float(os.getenv("BUYER_GREEN_STATUS_TIMEOUT_SEC", "30")),
@@ -1871,96 +1875,19 @@ class SapSession:
         )
 
     def _get_or_open_target_session(self, application):
-        candidates = self._collect_sessions(application)
-        self._print_sessions(candidates)
-
-        def matches_identity(meta):
-            return (
-                meta.get("target_verified") and meta.get("user")
-                and (not EXPECTED_SAP_SYSTEM or meta["system"] == EXPECTED_SAP_SYSTEM)
-                and (not EXPECTED_SAP_CLIENT or meta["client"] == EXPECTED_SAP_CLIENT)
-                and (not EXPECTED_SAP_USER or meta["user"] == EXPECTED_SAP_USER)
-            )
-
-        def ready(session):
-            try:
-                return not bool(session.Busy) and session.FindById("wnd[1]", False) is None
-            except Exception:
-                return False
-
-        target_matches = [
-            (session, meta)
-            for session, meta in candidates
-            if matches_identity(meta) and ready(session)
-        ]
-
-        if target_matches:
-            if len(target_matches) > 1:
-                print(
-                    f"⚠️ 找到{len(target_matches)}个目标环境会话，"
-                    "将使用列表中的第一个"
-                )
-            print("✅ 复用已打开的目标SAP会话")
-            return target_matches[0]
-
-        # Never mistake a mismatched/busy/login-pending target for an absent
-        # connection. Opening it again can terminate the user's existing login.
-        existing_targets = [meta for _, meta in candidates
-                            if meta.get("target_verified") or (
-                                EXPECTED_SAP_SYSTEM and meta.get("system") == EXPECTED_SAP_SYSTEM)]
-        if existing_targets:
-            actual = "; ".join(
-                f"Entry={meta.get('connection_description') or '<unknown>'}, "
-                f"System={meta.get('system') or '<unknown>'}, "
-                f"Client={meta.get('client') or '<unknown>'}, "
-                f"User={meta.get('user') or '<not signed in>'}"
-                for meta in existing_targets
-            )
-            raise RuntimeError(
-                "目标SAP连接已存在，但没有符合校验且空闲的已登录会话。"
-                "为避免重复登录，未打开新连接。请完成已有登录、处理弹窗，"
-                "并核对系统/Client/用户配置后重试；不要结束其他登录。"
-                f"期望 System={EXPECTED_SAP_SYSTEM or '<optional>'}, "
-                f"Client={EXPECTED_SAP_CLIENT or '<optional>'}。实际：{actual}"
-            )
-
-        # _collect_sessions deliberately tolerates COM errors. Recheck the
-        # connection inventory before opening, including entries with no session.
-        try:
-            connection_count = int(application.Children.Count)
-            for index in range(connection_count):
-                connection = application.Children(index)
-                description = self._connection_description(connection)
-                if not description:
-                    raise RuntimeError("SAP连接名称无法读取")
-                if self._description_matches_target(description):
-                    raise RuntimeError(
-                        f"目标SAP连接 {description!r} 已存在，但会话尚未就绪。"
-                        "请在已有窗口完成登录；为避免重复登录，未打开新连接。"
-                    )
-        except Exception as exc:
-            raise RuntimeError(
-                "无法确认目标SAP连接不存在，已停止以避免重复登录。" + str(exc)
-            ) from exc
-
-        # Only an absent target connection may be opened, once.
-        self._open_target_connection(application)
-        time.sleep(1)
-        candidates = self._collect_sessions(application)
-        self._print_sessions(candidates)
-        target_matches = [
-            (session, meta)
-            for session, meta in candidates
-            if matches_identity(meta) and ready(session)
-        ]
-
-        if not target_matches:
-            raise RuntimeError(
-                "SAP连接已打开，但没有识别到目标环境会话："
-                f"{SAP_TARGET_CONNECTION_NAME!r}。"
-                "请检查SAP Logon连接名称和登录状态。"
-            )
-        return target_matches[0]
+        from sap_gui_connection import SapGuiConnector
+        connector = getattr(self, '_hub_connection', None)
+        if connector is None:
+            connector = SapGuiConnector(SAP_TARGET_CONNECTION_NAME, EXPECTED_SAP_SYSTEM,
+                                        EXPECTED_SAP_CLIENT, EXPECTED_SAP_USER)
+            self._hub_connection = connector
+        # Keep startup verification separate from the supplied v32 business flow.
+        # A COM exception is evidence, not proof that there are no SAP sessions.
+        selected = connector.select(application)
+        print(f"SAP connection verified: {selected[1]['connection_description']} | "
+              f"System={selected[1]['system']} | Client={selected[1]['client']} | "
+              f"T-code={selected[1]['transaction']}")
+        return selected
 
     def _validate_environment(self) -> None:
         if not self.connection_target_verified:
@@ -3031,6 +2958,16 @@ class SapSession:
         if not (has_yes and has_no):
             return False
 
+        # BUTTON_1 alone is not proof of Yes (it can also mean Delete/Continue).
+        # Read only the exact controls; never walk the full modal control tree.
+        try:
+            yes_text = safe_text(self.find("wnd[1]/usr/btnBUTTON_1").Text).replace("&", "").strip().casefold()
+            no_text = safe_text(self.find("wnd[1]/usr/btnBUTTON_2").Text).replace("&", "").strip().casefold()
+        except Exception:
+            return False
+        if yes_text not in {"yes", "是", "是(y)", "是（y）"} or no_text not in {"no", "否", "否(n)", "否（n）"}:
+            return False
+
         # Do not traverse the whole popup control tree before clicking. In this
         # SAP GUI patch, that can refresh/invalidate a cached button COM object.
         try:
@@ -3038,16 +2975,22 @@ class SapSession:
         except Exception:
             title = ""
 
-        # The button pair is the primary signal. Title/text checks merely avoid
-        # confusing an unrelated Yes/No popup with the Buyer Receipt Save dialog.
-        if "save" in title or "buyer receipt" in title:
-            return True
-
         try:
             question = self.find("wnd[1]/usr/lbl[1,2]", required=False)
             question_text = safe_text(getattr(question, "Text", "")).casefold() if question else ""
         except Exception:
             question_text = ""
+        # This handler is scoped to the Save just issued, not every Yes in SAP.
+        # In particular, a Buyer Receipt delete/discard question is not Save.
+        context = title + " " + question_text
+        if any(word in context for word in ("delete", "discard", "logoff", "log off", "logon", "sign in", "terminate", "删除", "放弃", "注销")):
+            return False
+        normalized_title = re.sub(r"\s*:\s*", ":", title)
+        if normalized_title in {
+            "buyer receipt:create", "buyer receipt:change", "buyer receipt:save",
+            "save", "save data", "save confirmation", "confirm save", "保存", "保存确认",
+        }:
+            return True
         return "save" in question_text or "do you want to save" in question_text
 
     def _direct_press_buyer_save_yes(self) -> str:
@@ -3062,105 +3005,108 @@ class SapSession:
         return f"{yes_id}.Press()"
 
     def wait_and_confirm_buyer_receipt_save(self) -> bool:
-        """Wait for Buyer Receipt Save outcome.
+        """Drain per-material Save questions, without replaying Save/Create.
 
-        PROD has two valid branches after pressing Save:
-        1) normal Save Yes/No confirmation -> click BUTTON_1 (Yes);
-        2) business Message Display appears immediately, with Continue but no
-           Save Yes/No question. In that case do NOT wait for timeout. Surface
-           BUYER_RECEIPT_SAVE_POPUP immediately so process_group can write the
-           business error to Excel and run Continue -> Back -> Back recovery.
+        Several consecutive questions can reuse wnd[1], its title and button IDs.
+        Each visible, recognized question gets a fresh direct Yes Press; it is
+        not a failed retry of the previous question. Unknown/business popups and
+        uncertain Press outcomes still stop safely. Green status is checked by
+        save_buyer_receipt after this method, not inferred from Yes clicks.
         """
-        deadline = time.time() + BUYER_SAVE_CONFIRM_TIMEOUT_SEC
+        from rfq_interaction import session_identity
+
+        deadline = time.monotonic() + BUYER_SAVE_CONFIRM_TIMEOUT_SEC
         last_popup_text = ""
+        confirmations = 0
+        quiet_since = None
+        poll = min(0.05, max(0.01, SAP_POLL_SEC))
 
-        while time.time() < deadline:
-            # Normal path: explicit Save Yes/No question.
-            if self._buyer_save_confirmation_is_open():
-                break
+        try:
+            identity = session_identity(self)
+        except Exception as exc:
+            raise SapRpaError("BUYER_RECEIPT_SAVE_CONFIRM", f"无法核对保存确认所属SAP会话：{exc}") from exc
 
-            if self.exists("wnd[1]"):
+        while time.monotonic() < deadline:
+            try:
+                # Retain the runtime's deferred-Stop protection after Save was
+                # dispatched. Never press through Busy or a changed login.
+                self.wait_not_busy(min(SAP_LONG_WAIT_SEC, max(0.1, deadline - time.monotonic())))
+                if session_identity(self) != identity:
+                    raise ValueError("SAP session/system/client/user changed")
+                if self.session.Busy:
+                    raise ValueError("SAP is still busy")
+                # Optional FindById distinguishes an absent window from a COM
+                # read failure; exists() intentionally hides such failures.
+                popup = self.session.FindById("wnd[1]", False)
+                if self.session.FindById("wnd[2]", False) is not None:
+                    raise ValueError("An additional SAP dialog is open")
+            except SapRpaError:
+                raise
+            except Exception as exc:
+                raise SapRpaError("BUYER_RECEIPT_SAVE_CONFIRM", f"无法安全核对保存确认窗口：{exc}；不会重放Save。") from exc
+
+            if popup is not None:
+                quiet_since = None
+                if self._buyer_save_confirmation_is_open():
+                    if confirmations >= BUYER_SAVE_CONFIRMATION_LIMIT or time.monotonic() >= deadline:
+                        break
+                    try:
+                        method = self._direct_press_buyer_save_yes()
+                    except Exception as exc:
+                        # Press may have reached SAP before COM reported an
+                        # error. Do not blindly retry this uncertain action.
+                        raise SapRpaError(
+                            "BUYER_RECEIPT_SAVE_CONFIRM",
+                            f"Buyer Receipt保存确认Yes结果未确认：{exc}；不会重放Save或自动重试本次点击。",
+                        ) from exc
+                    confirmations += 1
+                    if confirmations == 1:
+                        deadline = time.monotonic() + BUYER_SAVE_QUEUE_TIMEOUT_SEC
+                    print(f"   🖱️ Buyer Receipt保存确认：第{confirmations}个Yes | 方式={method}")
+                    time.sleep(poll)
+                    continue
+
                 has_continue = self.exists("wnd[1]/tbar[0]/btn[0]")
                 has_yes = self.exists("wnd[1]/usr/btnBUTTON_1")
                 has_no = self.exists("wnd[1]/usr/btnBUTTON_2")
-
-                # Critical PROD fix: some Buyer Receipt validation errors bypass
-                # the Save confirmation completely and open Message Display
-                # immediately. The previous version kept waiting 20 seconds for
-                # Yes/No and finally raised BUYER_RECEIPT_SAVE_CONFIRM.
+                # Preserve the existing PROD Message Display recovery path,
+                # including an error after one or more successful Yes clicks.
                 if has_continue and not (has_yes and has_no):
                     popup_message = extract_buyer_receipt_popup_business_message(self)
-                    print(
-                        "   ⚠️ Save后直接出现Message Display，"
-                        "跳过Yes/No等待并进入业务错误恢复："
-                        + safe_text(popup_message)[:500]
-                    )
-                    raise SapRpaError(
-                        "BUYER_RECEIPT_SAVE_POPUP",
-                        popup_message,
-                    )
+                    raise SapRpaError("BUYER_RECEIPT_SAVE_POPUP", popup_message)
 
                 try:
                     last_popup_text = self.window_text("wnd[1]")
                 except Exception:
-                    last_popup_text = ""
-
-            time.sleep(SAP_POLL_SEC)
-        else:
-            if not REQUIRE_BUYER_SAVE_CONFIRMATION:
-                print("   ⚠️ 未检测到Buyer Receipt保存确认窗口；配置允许继续")
-                return False
-            raise SapRpaError(
-                "BUYER_RECEIPT_SAVE_CONFIRM",
-                "点击Save后未在限定时间内识别到Buyer Receipt保存确认窗口。"
-                f"最后弹窗内容：{last_popup_text[:1000] or '<无>'}",
-            )
-
-        last_method = ""
-        for attempt in range(1, BUYER_SAVE_CLICK_RETRIES + 1):
-            if not self._buyer_save_confirmation_is_open():
-                print(
-                    "   ✅ Buyer Receipt保存确认窗口已关闭 "
-                    f"| 点击方式={last_method or '<已自动关闭>'}"
+                    last_popup_text = "<无法读取>"
+                raise SapRpaError(
+                    "BUYER_RECEIPT_SAVE_CONFIRM",
+                    "出现非Buyer Receipt保存确认的弹窗，未自动点击。"
+                    f"最后弹窗内容：{last_popup_text[:1000]}",
                 )
-                return True
 
-            try:
-                last_method = self._direct_press_buyer_save_yes()
-            except Exception as exc:
-                if attempt >= BUYER_SAVE_CLICK_RETRIES:
-                    raise SapRpaError(
-                        "BUYER_RECEIPT_SAVE_CONFIRM",
-                        f"无法点击Buyer Receipt保存确认Yes：{exc}",
-                    ) from exc
-                time.sleep(BUYER_SAVE_CLICK_RETRY_SEC)
-                continue
-
-            print(
-                f"   🖱️ Buyer Receipt保存确认：点击Yes "
-                f"({attempt}/{BUYER_SAVE_CLICK_RETRIES}) | 方式={last_method}"
-            )
-
-            close_deadline = time.time() + max(1.0, BUYER_SAVE_CLICK_RETRY_SEC)
-            while time.time() < close_deadline:
-                if not self._buyer_save_confirmation_is_open():
-                    print(
-                        "   ✅ 已点击Buyer Receipt保存确认：Yes "
-                        f"| 方式={last_method}"
-                    )
+            if confirmations:
+                # Catch a briefly absent wnd[1] between asynchronous questions;
+                # do not return at the first disappearing modal handle.
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= 0.25:
+                    print(f"   ✅ Buyer Receipt保存确认完成：已点击{confirmations}个Yes；继续校验保存状态")
                     return True
-                time.sleep(SAP_POLL_SEC)
+            time.sleep(poll)
 
-            time.sleep(BUYER_SAVE_CLICK_RETRY_SEC)
-
+        if not confirmations and not REQUIRE_BUYER_SAVE_CONFIRMATION:
+            print("   ⚠️ 未检测到Buyer Receipt保存确认窗口；配置允许继续")
+            return False
         try:
             last_popup_text = self.window_text("wnd[1]")
         except Exception:
             last_popup_text = ""
         raise SapRpaError(
             "BUYER_RECEIPT_SAVE_CONFIRM",
-            "已按直接Press方式重试保存确认，但Save窗口仍未关闭。"
-            f"最后弹窗内容：{last_popup_text[:1000] or '<无法读取>'}",
+            f"Buyer Receipt保存确认等待超时或达到安全上限（已点击{confirmations}个Yes）；"
+            "未重复执行Save，请核查SAP。"
+            f"最后弹窗内容：{last_popup_text[:1000] or '<无>'}",
         )
 
     def wait_popup_closed(self, timeout: float = SAP_WAIT_SEC) -> bool:
@@ -5822,8 +5768,8 @@ def standalone_main() -> None:
         f"RequireConfirm={REQUIRE_BUYER_SAVE_CONFIRMATION} | "
         f"Method=FreshDirectPressOnly | "
         f"ConfirmWait={BUYER_SAVE_CONFIRM_TIMEOUT_SEC:.1f}s | "
-        f"ClickRetries={BUYER_SAVE_CLICK_RETRIES} | "
-        f"ClickRetryWait={BUYER_SAVE_CLICK_RETRY_SEC:.1f}s | "
+        f"ConfirmQueueWait={BUYER_SAVE_QUEUE_TIMEOUT_SEC:.1f}s | "
+        f"ConfirmLimit={BUYER_SAVE_CONFIRMATION_LIMIT} | "
         f"PopupCloseWait={BUYER_SAVE_POPUP_CLOSE_TIMEOUT_SEC:.1f}s | "
         f"GreenWait={BUYER_GREEN_STATUS_TIMEOUT_SEC:.1f}s | "
         f"GreenTokens={','.join(sorted(BUYER_GREEN_ICON_TOKENS))} | "

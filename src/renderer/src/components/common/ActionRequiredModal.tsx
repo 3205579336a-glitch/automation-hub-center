@@ -48,10 +48,13 @@ export function ActionRequiredModal({ request, onRespond }: Props): React.JSX.El
   const canContinue = request?.allowedActions.includes('continue')
   const checking = request?.state === 'RECOVERING' || sending === 'continue'
   const failedCheck = request?.message.startsWith('The issue is still present.')
+  const signIn = request?.recoveryPoint === 'SIGN_IN'
   const commodity = request?.recoveryPoint === 'COMMODITY_MISSING'
   const readFailure = request?.recoveryPoint === 'NPL_READ_FAILED'
   const slow = request?.recoveryPoint === 'SAP_SLOW_HARD_TIMEOUT'
   const material = Array.isArray(request?.materials) ? request.materials.join(', ') : ''
+  const sourceList = request?.automation === 'Source List'
+  const diagnostic = request && <><p>{request.message}</p>{!canContinue && request.instructions && <p>{t(request.instructionsZh || request.instructions, request.instructions)}</p>}<dl><dt>Run ID</dt><dd>{request.runId}</dd><dt>{t('分组', 'RFQ Group')}</dt><dd>{request.groupKey || '—'}</dd><dt>{t('Excel 行', 'Excel Row')}</dt><dd>{request.rows?.join(', ') || '—'}</dd><dt>{t('恢复点', 'Recovery Point')}</dt><dd>{request.recoveryPoint || request.step || '—'}</dd></dl></>
   const step = request?.recoveryPoint === 'PROD_RFQ_STAGING' ? t('RFQ 列表校验', 'RFQ list verification')
     : request?.recoveryPoint === 'BUYER_RECEIPT_SAVED_GREEN' ? t('Buyer Receipt 保存确认', 'Buyer Receipt save verification')
     : commodity ? t('Commodity 创建前检查', 'Commodity pre-check')
@@ -63,16 +66,16 @@ export function ActionRequiredModal({ request, onRespond }: Props): React.JSX.El
       <p className={styles.state} role="status">{checking ? t('正在验证 SAP，自动化仍暂停…', 'Checking SAP; automation remains paused…') : t('自动化已暂停，等待用户处理。', 'Automation is paused and waiting for you.')}</p>
       <dl><dt>{t('物料', 'Material')}</dt><dd>{material || '—'}</dd><dt>{t('当前步骤', 'Current Step')}</dt><dd>{step}</dd></dl>
       <p><strong>{t('问题', 'Issue')}: </strong>{t(request.issueSummaryZh || '当前 SAP 页面或数据未通过验证。', request.issueSummary || 'The current SAP screen or data could not be verified.')}</p>
-      {failedCheck && <p className={styles.warning}>{t('问题仍未解决。系统尚未确认 SAP 状态有效，请处理后再次检查。', 'The issue is still present. SAP could not be verified; correct it and check again.')}</p>}
-      <p>{commodity || readFailure || slow || request.automation !== 'RFQ' && canContinue ? t(request.instructionsZh || '请在 SAP 中处理提示的问题，返回后点击重新检查。未知页面不能直接继续。', request.instructions || 'Resolve the issue in SAP, then recheck. An unknown screen cannot blindly continue.') : canContinue ? request.recoveryPoint === 'BUYER_RECEIPT_SAVED_GREEN'
+      {failedCheck && !signIn && <p className={styles.warning}>{t('问题仍未解决。系统尚未确认 SAP 状态有效，请处理后再次检查。', 'The issue is still present. SAP could not be verified; correct it and check again.')}</p>}
+      <p>{signIn || commodity || readFailure || slow || request.automation !== 'RFQ' && canContinue ? t(request.instructionsZh || '请在 SAP 中处理提示的问题，返回后点击重新检查。未知页面不能直接继续。', request.instructions || 'Resolve the issue in SAP, then recheck. An unknown screen cannot blindly continue.') : canContinue ? request.recoveryPoint === 'BUYER_RECEIPT_SAVED_GREEN'
         ? t('请在 SAP 中修正并手动保存当前 Buyer Receipt，确认相关物料为绿色状态，再点击继续。', 'Correct and manually save the current Buyer Receipt in SAP. Confirm the materials show green saved status, then click Continue.')
         : t('请检查 SAP 当前 RFQ 列表中的重复物料、供应商或可编辑状态。处理后返回这里点击继续，系统会重新验证。', 'Check the current SAP RFQ list for duplicate materials, supplier details or editability. After correcting it, click Continue to verify again.')
+        : sourceList ? t('请核对下方具体错误并停止任务；已保存的结果会保留，不会重复保存。', 'Review the error below and stop the task. Saved results are preserved; Save will not be repeated.')
         : t('检测到未确认的 SAP 状态，无法安全继续。请查看详情并停止自动化，保留已创建的结果。', 'An unexpected SAP state was detected. Automatic execution cannot safely continue. View details and stop automation; existing results are preserved.')}</p>
       {!!request.fields?.length && <UserInputModal fields={request.fields} values={values} disabled={checking || sending === 'stop'}
         onChange={(id, value) => setValues(current => ({ ...current, [id]: value }))} />}
-      <details className={styles.details}><summary>{t('查看详情', 'View Details')}</summary>
-        <p>{request.message}</p>{!canContinue && request.instructions && <p>{t(request.instructionsZh || request.instructions, request.instructions)}</p>}<dl><dt>Run ID</dt><dd>{request.runId}</dd><dt>{t('分组', 'RFQ Group')}</dt><dd>{request.groupKey || '—'}</dd><dt>{t('Excel 行', 'Excel Row')}</dt><dd>{request.rows?.join(', ') || '—'}</dd><dt>{t('恢复点', 'Recovery Point')}</dt><dd>{request.recoveryPoint || request.step || '—'}</dd></dl>
-      </details>
+      {sourceList ? <section className={styles.details} aria-label={t('具体错误', 'Error information')}>{diagnostic}</section>
+        : <details className={styles.details}><summary>{t('查看详情', 'View Details')}</summary>{diagnostic}</details>}
       {error && <p role="alert" className={styles.warning}>{error}</p>}
       {request.message.startsWith('Open Fix Session unavailable:') && <p className={styles.warning}>{t('未能打开额外会话，请使用另一个已有 SAP 会话人工修正，完成后重新检查。', 'An additional session is unavailable. Use another existing SAP session to correct master data, then Recheck.')}</p>}
       {request.message.startsWith('Manual correction session ready:') && <p className={styles.state}>{t('修正会话已打开；请手动维护 Commodity，完成后重新检查。原自动化会话仍暂停。', request.message)}</p>}

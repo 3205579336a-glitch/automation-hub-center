@@ -9,8 +9,16 @@ const normalize = (value: string): string => value.trim().toLowerCase()
 
 export class ApqpTemplateError extends Error {}
 
+export interface ExcelTemplateSheet { name: string; headers: string[]; xml: string }
+export interface ExcelTemplateWorkbook { sheets: ExcelTemplateSheet[]; strings: string[] }
+
 /** Saved-file header inspection only; does not start Python, Excel or SAP. */
 export async function readExcelTemplateHeaders(filePath: string): Promise<{ name: string; headers: string[] }[]> {
+  return (await readExcelTemplateWorkbook(filePath)).sheets.map(({ name, headers }) => ({ name, headers }))
+}
+
+/** Shared bounded XLSX reader for saved-file previews; never opens Excel. */
+export async function readExcelTemplateWorkbook(filePath: string): Promise<ExcelTemplateWorkbook> {
     if (!['.xlsx', '.xlsm'].includes(extname(filePath).toLowerCase())) throw new Error('Select an .xlsx or .xlsm file.')
     const file = await stat(filePath)
     if (!file.isFile() || file.size > 100 * 1024 * 1024) throw new Error('Select a workbook smaller than 100 MB.')
@@ -40,13 +48,14 @@ export async function readExcelTemplateHeaders(filePath: string): Promise<{ name
     }
     const strings = archive['xl/sharedStrings.xml'] ? [...strFromU8(archive['xl/sharedStrings.xml'])
       .matchAll(/<(?:\w+:)?si\b[^>]*>([\s\S]*?)<\/(?:\w+:)?si>/g)].map(match => textNodes(match[1])) : []
-    return sheets.map(sheet => {
+    return { strings, sheets: sheets.map(sheet => {
       const path = links.get(sheet.id)
-      if (!path) return { name: sheet.name, headers: [] }
+      if (!path) return { name: sheet.name, headers: [], xml: '' }
+      const sheetXml = xml(path)
       const rowPattern = /<(?:\w+:)?row\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?row>/g
       // Stop after the first row: do not enumerate thousands of data rows just to check headers.
-      const row = rowPattern.exec(xml(path))
-      if (!row || attribute(row[1], 'r') !== '1') return { name: sheet.name, headers: [] }
+      const row = rowPattern.exec(sheetXml)
+      if (!row || attribute(row[1], 'r') !== '1') return { name: sheet.name, headers: [], xml: sheetXml }
       const headers: string[] = []
       for (const cell of row[2].matchAll(/<(?:\w+:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:\w+:)?c>)/g)) {
         const ref = attribute(cell[1], 'r')
@@ -57,31 +66,36 @@ export async function readExcelTemplateHeaders(filePath: string): Promise<{ name
         const type = attribute(cell[1], 't')
         headers[column] = type === 's' ? strings[Number(value)] ?? '' : type === 'inlineStr' ? textNodes(contents) : decode(value)
       }
-      return { name: sheet.name, headers }
-    })
+      return { name: sheet.name, headers, xml: sheetXml }
+    }) }
+}
+
+export function apqpHeaderColumns(headers: string[]): [number, number, number] | null {
+  const names = Array.from({ length: 5 }, (_, i) => normalize(headers[i] ?? ''))
+  if (material.includes(names[0]) && ['ver', 'version'].includes(names[1]) &&
+      names[2] === 'description' && vendor.includes(names[3]) && date.includes(names[4])) return [1, 4, 5]
+  if (material.includes(names[0]) && vendor.includes(names[1]) && date.includes(names[2]) &&
+      !names.slice(3).some(header => [...material, ...vendor, ...date, 'ver', 'version', 'description'].includes(header))) return [1, 2, 3]
+  return null
+}
+
+export function selectApqpTemplateSheet<T extends { name: string; headers: string[] }>(sheets: T[], sheetName = ''): T {
+  const requested = sheets.find(sheet => sheet.name === sheetName)
+  if (sheetName && requested && apqpHeaderColumns(requested.headers)) return requested
+  if (!sheetName) {
+    const preferred = sheets.find(sheet => sheet.name === 'APQP_Input')
+    if (preferred && apqpHeaderColumns(preferred.headers)) return preferred
+    const matches = sheets.filter(sheet => apqpHeaderColumns(sheet.headers))
+    if (matches.length === 1) return matches[0]
+  }
+  throw new ApqpTemplateError('APQP headers do not match. Expected A: Part No., B: Vendor, C: APQP plan closure date. Download the template; keep the header row and save before uploading. The previous five-column template is also supported.')
 }
 
 /** Early gate only. The engine still validates the live Excel data before SAP. */
 export async function checkApqpTemplateHeaders(filePath: string, sheetName = ''): Promise<void> {
   try {
     const sheets = await readExcelTemplateHeaders(filePath)
-    const matches = (sheet: { headers: string[] }): boolean => {
-      const headers = Array.from({ length: 5 }, (_, i) => normalize(sheet.headers[i] ?? ''))
-      const legacy = material.includes(headers[0]) && ['ver', 'version'].includes(headers[1]) &&
-        headers[2] === 'description' && vendor.includes(headers[3]) && date.includes(headers[4])
-      const compact = material.includes(headers[0]) && vendor.includes(headers[1]) && date.includes(headers[2]) &&
-        !headers.slice(3).some(header => [...material, ...vendor, ...date, 'ver', 'version', 'description'].includes(header))
-      return legacy || compact
-    }
-    if (sheetName) {
-      const sheet = sheets.find(sheet => sheet.name === sheetName)
-      if (sheet && matches(sheet)) return
-    } else {
-      const preferred = sheets.find(sheet => sheet.name === 'APQP_Input')
-      if (preferred && matches(preferred)) return
-      if (sheets.filter(matches).length === 1) return
-    }
-    throw new Error('APQP headers do not match. Expected A: Part No., B: Vendor, C: APQP plan closure date. Download the template; keep the header row and save before uploading. The previous five-column template is also supported.')
+    selectApqpTemplateSheet(sheets, sheetName)
   } catch (error) {
     throw new ApqpTemplateError(error instanceof Error ? error.message : 'Cannot read the Excel template.')
   }
@@ -106,13 +120,13 @@ export async function checkRfqTemplateHeaders(filePath: string): Promise<void> {
   throw new Error('RFQ 表头不匹配，请下载模板并保留第 1 行表头：Plant、Project No、Material No.、Supplier Parma。RFQ headers do not match. Download the template and keep its first-row headers; save before uploading.')
 }
 
-function attribute(xml: string, name: string): string {
+export function attribute(xml: string, name: string): string {
   return decode(new RegExp(`(?:^|\\s)${name}\\s*=\\s*["']([^"']*)["']`).exec(xml)?.[1] ?? '')
 }
-function textNodes(xml: string): string {
+export function textNodes(xml: string): string {
   return [...xml.matchAll(/<(?:\w+:)?t\b[^>]*>([\s\S]*?)<\/(?:\w+:)?t>/g)].map(match => decode(match[1])).join('')
 }
-function decode(xml: string): string {
+export function decode(xml: string): string {
   return xml.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, entity: string) => {
     if (entity.startsWith('#')) {
       const code = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1))

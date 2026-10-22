@@ -59,7 +59,16 @@ export type RfqProgressStage =
   | 'waiting-for-user'
   | 'recovering'
 
+export interface RfqSourceWriteback {
+  sourcePath: string
+  status: 'synced' | 'pending' | 'unchanged'
+  writtenRows: number
+  pendingRows: number
+  message: string
+}
+
 export interface RfqBatchProgress {
+  sourceWriteback?: RfqSourceWriteback
   automation?: string
   requestId?: string
   state?: 'WAITING_FOR_USER' | 'RECOVERING' | 'RUNNING' | 'CANCELLED' | 'SAP_SLOW'
@@ -120,6 +129,7 @@ export type RfqBatchResult =
       withSkips?: number
       rfqNumbers?: string[]
       diagnosticsPath?: string
+      sourceWriteback?: RfqSourceWriteback
     }
   | {
       success: false
@@ -140,6 +150,7 @@ export type RfqBatchResult =
       diagnosticsPath?: string
       rfqNumbers?: string[]
       logPath?: string
+      sourceWriteback?: RfqSourceWriteback
     }
 
 export interface RfqCancelResult {

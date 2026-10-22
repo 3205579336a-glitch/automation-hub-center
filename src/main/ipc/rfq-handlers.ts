@@ -170,7 +170,7 @@ export function registerRfqHandlers(
       })
       const result = await runner.run(input, (progress) => {
         reportProgress(progress)
-        if (['ACTION_REQUIRED', 'RECOVERABLE_ERROR', 'GROUP_FAILED', 'RUN_FAILED'].includes(progress.type ?? '')) {
+        if (['ACTION_REQUIRED', 'RECOVERABLE_ERROR', 'GROUP_FAILED', 'RUN_FAILED', 'SOURCE_WRITEBACK_WARNING'].includes(progress.type ?? '')) {
           void logger.warning({ category: 'automation', event: `rfq.${progress.type}`, message: progress.message,
             tcode: 'ZMFM050072', details: { runId: historyEntry.id, group: progress.groupKey ?? '' } }).catch(() => undefined)
         }
@@ -179,7 +179,7 @@ export function registerRfqHandlers(
       try { if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.automationInteraction, null) } catch { /* Renderer may have closed. */ }
       await history.finish(historyEntry.id, result.success
         ? {
-            status: result.failed > 0 || result.skipped > 0 || (result.withSkips ?? 0) > 0 ? 'Partial' : 'Success',
+            status: result.failed > 0 || result.skipped > 0 || (result.withSkips ?? 0) > 0 || result.sourceWriteback?.status === 'pending' ? 'Partial' : 'Success',
             summary: result.message,
             total: result.total ?? result.processed,
             processed: result.processed,

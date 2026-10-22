@@ -5,13 +5,13 @@ import { useLocalization } from '../../i18n/use-localization'
 import { stateLabel } from './state-label'
 import styles from './GuidedAutomation.module.css'
 
-export function AutomationPageLayout({ title, description, onBack, toolbar, children }: {
-  title: string; description: string; onBack: () => void; toolbar?: React.ReactNode; children: React.ReactNode
+export function AutomationPageLayout({ title, description, onBack, toolbar, children, embedded = false }: {
+  title: string; description: string; onBack: () => void; toolbar?: React.ReactNode; children: React.ReactNode; embedded?: boolean
 }): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
-  return <div className="page"><button className={styles.back} onClick={onBack}><ArrowLeft size={15} />{zh ? '返回操作中心' : 'Back to Operations'}</button>
-    <div className="page-heading"><div><h2>{title}</h2><p>{description}</p></div></div>
+  return <div className={embedded ? undefined : 'page'}>{!embedded && <><button className={styles.back} onClick={onBack}><ArrowLeft size={15} />{zh ? '返回操作中心' : 'Back to Operations'}</button>
+    <div className="page-heading"><div><h2>{title}</h2><p>{description}</p></div></div></>}
     {toolbar}
     <div className={styles.workflow}><div className={styles.steps} aria-label={zh ? '操作步骤' : 'Workflow steps'}>
       {(zh ? ['下载并填写模板', '上传并核对', '运行并查看结果'] : ['Download & fill', 'Upload & review', 'Run & view result']).map((label, i) => <span key={label}><b>{i + 1}</b>{label}</span>)}
@@ -57,8 +57,24 @@ export function RunConfirmationModal({ open, title, description, metrics, onStar
     <div className={styles.actions}><button className="button" onClick={onCancel}>{zh ? '取消' : 'Cancel'}</button><button className="button primary" onClick={onStart}>{zh ? '开始自动化' : 'Start Automation'}</button></div>
   </dialog>
 }
-export function AutomationResult({ outcome, onOpen, onAnother }: {
-  outcome: AutomationOutcome; onOpen: () => void; onAnother: () => void
+/** Acknowledge a finished read/validation issue, never a SAP confirmation. */
+export function NoticeConfirmationModal({ notice, onClose, expandedDetails = false }: {
+  notice: { title: string; message: string; details?: string } | null; onClose: () => void; expandedDetails?: boolean
+}): React.JSX.Element {
+  const dialog = useRef<HTMLDialogElement>(null)
+  const titleId = useId(), messageId = useId()
+  const { language } = useLocalization()
+  const zh = language === 'zh-CN'
+  useEffect(() => { if (notice && !dialog.current?.open) dialog.current?.showModal(); else if (!notice) dialog.current?.close() }, [notice])
+  return <dialog className={styles.dialog} ref={dialog} aria-labelledby={titleId} aria-describedby={messageId} onCancel={onClose}>
+    <h2 id={titleId}>{notice?.title}</h2><p id={messageId}>{notice?.message}</p>
+    {notice?.details && (expandedDetails ? <pre className={styles.details}>{notice.details}</pre>
+      : <details className={styles.details}><summary>{zh ? '查看详情' : 'View Details'}</summary><pre>{notice.details}</pre></details>)}
+    <div className={styles.actions}><button className="button primary" autoFocus onClick={onClose}>{zh ? '我知道了' : 'OK, understood'}</button></div>
+  </dialog>
+}
+export function AutomationResult({ outcome, onOpen, onAnother, expandedDetails = false }: {
+  outcome: AutomationOutcome; onOpen: () => void; onAnother: () => void; expandedDetails?: boolean
 }): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
@@ -67,9 +83,12 @@ export function AutomationResult({ outcome, onOpen, onAnother }: {
       { label: zh ? '总数' : 'Total', value: outcome.total }, { label: zh ? '成功' : 'Successful', value: outcome.succeeded },
       { label: zh ? '跳过' : 'Skipped', value: outcome.skipped }, { label: zh ? '失败' : 'Failed', value: outcome.failed }
     ]} />
-    {outcome.state === 'FAILED' && <p>{zh ? '本次任务未能安全完成。请查看详情，保留已有结果，不要直接重复运行。' : 'This task could not safely finish. Review details and existing results before retrying.'}</p>}
+    {outcome.state === 'FAILED' && <p>{expandedDetails
+      ? (zh ? '本次任务未能安全完成。请核对下方错误及已有结果，不要直接重复运行。' : 'This task could not safely finish. Review the error below and existing results before retrying.')
+      : (zh ? '本次任务未能安全完成。请查看详情，保留已有结果，不要直接重复运行。' : 'This task could not safely finish. Review details and existing results before retrying.')}</p>}
     <div className={styles.actions}>{outcome.resultPath && <button className="button primary" onClick={onOpen}>{zh ? '打开结果' : 'Open Result'}</button>}
       <button className="button" onClick={onAnother}>{zh ? '运行另一任务' : 'Run Another Task'}</button></div>
-    <ViewDetailsPanel><pre>{outcome.details}{'\n'}{[outcome.resultPath, outcome.backupPath, outcome.logPath].filter(Boolean).join('\n')}</pre></ViewDetailsPanel>
+    {expandedDetails ? <pre className={styles.details}>{outcome.details}{'\n'}{[outcome.resultPath, outcome.backupPath, outcome.logPath].filter(Boolean).join('\n')}</pre>
+      : <ViewDetailsPanel><pre>{outcome.details}{'\n'}{[outcome.resultPath, outcome.backupPath, outcome.logPath].filter(Boolean).join('\n')}</pre></ViewDetailsPanel>}
   </section>
 }

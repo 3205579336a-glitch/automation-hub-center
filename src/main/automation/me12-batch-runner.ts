@@ -16,6 +16,7 @@ import type { SettingsService } from '../services/settings-service'
 import type { BrowserSlotManager } from './browser-slot-manager'
 import type { GuidanceContext } from './native-interaction-bridge'
 import { GuidedCancelled } from '../services/guided-automation-service'
+import { verifyMe12Startup } from './me12-startup'
 
 const LOGIN_TIMEOUT_MS = 180_000
 const NAVIGATION_TIMEOUT_MS = 30_000
@@ -183,18 +184,19 @@ export class Me12BatchRunner {
           try { await page.goto(resolvedUrl.url.toString(), { waitUntil: 'commit', timeout: 10_000 }) }
           catch (error) { if (!/timeout/i.test(errorMessage(error))) throw error }
         }))
+        const startupNavigated = new WeakSet<Page>()
         const verify = async (): Promise<void> => {
           for (const { page } of workers) {
-            if (page.isClosed() || new URL(page.url()).origin !== resolvedUrl.url.origin
-                || !await findTextboxAcrossFrames(page, ['Info Record', 'Purchasing Info Record'], 1_200)) {
-              throw new Error('An opened SAP window is not ready. Complete sign-in in every window.')
-            }
+            await verifyMe12Startup(page, resolvedUrl.url, startupNavigated,
+              async () => Boolean(await findTextboxAcrossFrames(page, ['Info Record', 'Purchasing Info Record'], 1_200)),
+              async () => Boolean(await findTextboxAcrossFrames(page, ['Transaction Code', 'Command Field', 'OK Code'], 600)),
+              () => this.assertNotCancelled())
           }
         }
         try { await verify() } catch {
           await guidance.service.wait('Info Record', guidance.runId,
-            'Complete certificate selection and SAP sign-in in every opened browser window.',
-            '请在每个打开的浏览器窗口选择证书并完成 SAP 登录。', verify, () => this.cancelRequested)
+            'Complete certificate selection and SAP sign-in in every browser window; check SAP prompts if ME12 has not opened.',
+            '请在每个浏览器窗口完成证书选择和 SAP 登录；若尚未进入 ME12，请检查 SAP 提示及事务权限。', verify, () => this.cancelRequested)
         }
       }
 

@@ -60,6 +60,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pythoncom
 import win32com.client
+import win32con
+import win32gui
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hub_user_interaction import HubStopped, HubUserInteraction
@@ -79,14 +81,23 @@ VENDOR_COL = 4         # legacy D
 OUTPUT_DATE_COL = 5    # legacy E
 
 TCODE = "ZMFM050035"
+APQP_SESSION_POLICY = "949-fast-startup-v6"
 PLANT = os.getenv("PLANT", "C100").strip().upper()
 
 # SAP环境过滤。
 # 如果只打开一个SAP系统，可以保持空字符串。
 # 如果同时开了QA和Prod，请务必填系统名，例如 "VCE" / "CEQ"（以你SAP Info为准）。
-TARGET_SYSTEM = os.getenv("TARGET_SYSTEM", "").strip().upper()
-TARGET_CLIENT = os.getenv("TARGET_CLIENT", "").strip()
+HUB_TARGET_DEFAULTS = bool(os.environ.get("HUB_RUN_ID"))
+TARGET_SYSTEM = (os.getenv("TARGET_SYSTEM", "").strip() or ("VCE" if HUB_TARGET_DEFAULTS else "")).upper()
+TARGET_CLIENT = os.getenv("TARGET_CLIENT", "").strip() or ("100" if HUB_TARGET_DEFAULTS else "")
 TARGET_CONNECTION_CONTAINS = ""
+# The runner supplies these explicitly; Hub defaults also cover a still-running
+# desktop main process with older blank fields. Preview exits before SAP access.
+# Standalone callers retain their explicit System/Client discovery policy.
+TARGET_CONNECTION_NAME = os.getenv("APQP_TARGET_CONNECTION_NAME", "").strip() or ("VCE - One Digital Core [949]" if HUB_TARGET_DEFAULTS else "")
+AUTO_OPEN_TARGET = os.getenv("APQP_AUTO_OPEN_TARGET", str(HUB_TARGET_DEFAULTS)).lower() == "true"
+AUTO_NAVIGATE_TARGET = os.getenv("APQP_AUTO_NAVIGATE_TARGET", str(HUB_TARGET_DEFAULTS)).lower() == "true"
+SAP_CONNECTION_READY_TIMEOUT_SEC = 8.0
 
 # 多开SAP：最多使用几个已登录Session。
 MAX_WORKERS = max(1, min(5, int(os.getenv("MAX_WORKERS", "3"))))
@@ -108,6 +119,7 @@ CREATE_BACKUP = True
 SAP_ELEMENT_TIMEOUT_SEC = 20.0
 SAP_PAGE_WAIT_SEC = 15.0
 SAP_POLL_SEC = 0.20
+SAP_STARTUP_POLL_SEC = 0.02
 SAP_STEP_PAUSE_SEC = 0.15
 
 # 查询结束后优先用Back回到同一T-code选择页面，失败才 /n 重进事务。
@@ -244,67 +256,566 @@ def excel_date_serial(value: dt.date) -> int:
 
 
 def get_sap_application():
+    from sap_gui_connection import GuiCollectionAccess
     sap_gui_auto = win32com.client.GetObject("SAPGUI")
-    return sap_gui_auto.GetScriptingEngine
+    return GuiCollectionAccess(sap_gui_auto.GetScriptingEngine)
 
 
-def get_session_by_ref(ref: SessionRef):
-    application = get_sap_application()
+class SapSessionCheckError(RuntimeError):
+    """A read-only preflight failure with a user-facing reason and technical evidence."""
+    def __init__(self, code: str, issue: str, issue_zh: str, details: str = "", pending_sessions=None):
+        self.code = code
+        self.issue_summary = issue
+        self.issue_summary_zh = issue_zh
+        self.pending_sessions = pending_sessions or []
+        super().__init__(f"[{code}] {issue}" + (f"\n{details}" if details else ""))
+
+
+def read_session_identity(session) -> Tuple[str, str, str]:
+    # Identity is mandatory. An inaccessible identity is not a signed-out window.
+    info = session.Info
+    return tuple(normalize_text(getattr(info, name)) for name in ("SystemName", "Client", "User"))
+
+
+def get_session_by_ref(ref: SessionRef, application=None):
+    application = application if application is not None else get_sap_application()
     connection = application.Children(ref.connection_index)
     session = connection.Children(ref.session_index)
-    if session_info(session)[:3] != (ref.system, ref.client, ref.user):
-        raise RuntimeError("SAP session identity changed; refusing to use another system/client/user.")
+    if (read_session_identity(session) != (ref.system, ref.client, ref.user)
+            or (TARGET_CONNECTION_NAME and not matches_target_connection(connection_label(connection)))):
+        raise SapSessionCheckError("SAP_SESSION_CHANGED",
+            "SAP session identity changed; refusing to use another system/client/user.",
+            "SAP 窗口的系统、Client 或账号已变化。请确认目标登录后重新检查，不会切换到其他环境。")
     return session
 
 
 def session_info(session) -> Tuple[str, str, str, str]:
+    identity = read_session_identity(session)
     try:
-        info = session.Info
-        system = normalize_text(getattr(info, "SystemName", ""))
-        client = normalize_text(getattr(info, "Client", ""))
-        user = normalize_text(getattr(info, "User", ""))
-        transaction = normalize_text(getattr(info, "Transaction", ""))
-        return system, client, user, transaction
+        transaction = normalize_text(session.Info.Transaction)
     except Exception:
-        return "", "", "", ""
+        transaction = ""
+    return (*identity, transaction)
 
 
-def discover_sap_sessions() -> List[SessionRef]:
-    application = get_sap_application()
+def readable_transaction(session) -> str:
+    # Unlike current_tcode's display fallback, a COM failure must not mean "home".
+    value = session.Info.Transaction
+    if value is None:
+        raise RuntimeError("SAP did not return the current transaction.")
+    return normalize_text(value).upper()
+
+
+def session_readiness(session, allow_other_transactions: bool = False) -> Tuple[bool, str, str]:
+    """Only read controls/state; never close dialogs, navigate or create a session."""
+    busy = session.Busy
+    if not isinstance(busy, (bool, int)):
+        raise RuntimeError("SAP Busy state could not be verified.")
+    if bool(busy):
+        return False, "busy", "SAP is still busy"
+    if session.FindById("wnd[1]", False) is not None:
+        return False, "dialog", "an SAP dialog is open"
+    if session.FindById("wnd[0]", False) is None:
+        raise RuntimeError("SAP main window could not be read.")
+    transaction = readable_transaction(session)
+    if not allow_other_transactions and transaction not in {"", "SESSION_MANAGER", "SMEN", "S000", TCODE}:
+        return False, "transaction", f"another transaction is open: {transaction}"
+    return True, "ready", transaction or "SAP home"
+
+
+def checked_sap_application():
+    try:
+        return get_sap_application()
+    except Exception as error:
+        raise SapSessionCheckError("SAP_GUI_UNAVAILABLE",
+            "Cannot access SAP GUI Desktop. Complete SAP sign-in and check SAP GUI Scripting; browser sign-in alone is not enough.",
+            "无法连接 SAP GUI 桌面。请完成 SAP 桌面登录并确认脚本可用；仅登录浏览器网页不够。", str(error)) from error
+
+
+def connection_label(connection) -> str:
+    for name in ("Description", "Name"):
+        try:
+            value = normalize_text(getattr(connection, name, ""))
+            if value and not re.fullmatch(r"(?:con|conn|connection)\[\d+\]", value, re.IGNORECASE):
+                return value
+        except Exception:
+            pass
+    return ""
+
+
+def matches_target_connection(label: str) -> bool:
+    normalized = " ".join(label.casefold().split())
+    target = " ".join(TARGET_CONNECTION_NAME.casefold().split())
+    if normalized == target:
+        return True
+    token = re.search(r"\[\d+\]", target)
+    return bool(token and token.group() in normalized)
+
+
+def target_connection_indexes(application) -> List[int]:
+    """Prove absence using the connection inventory, including signed-out entries."""
+    try:
+        count = int(application.Children.Count)
+        matches = []
+        for ci in range(count):
+            label = connection_label(application.Children(ci))
+            if not label:
+                raise RuntimeError(f"Connection {ci + 1}: SAP Logon entry label is unreadable")
+            if matches_target_connection(label):
+                matches.append(ci)
+    except Exception as error:
+        raise SapSessionCheckError("SAP_TARGET_INVENTORY_UNREADABLE",
+            "Cannot confirm whether the 949 connection is already open. Check SAP Logon/Scripting access; no extra connection will be opened.",
+            "无法确认 949 连接是否已经打开。请检查 SAP Logon 和脚本权限；为避免重复登录，不会另开连接。", str(error)) from error
+    if len(matches) > 1:
+        raise SapSessionCheckError("SAP_TARGET_AMBIGUOUS",
+            "More than one 949 connection is open. Verify the intended login; the Hub will not end other logons.",
+            "检测到多个 949 连接。请确认目标登录后重新检查；Hub 不会结束其他登录。")
+    return matches
+
+
+def assert_no_target_alias(application) -> None:
+    # A differently named Logon entry can point to the same production backend.
+    # Do not create a second login merely because its display label differs.
+    try:
+        for ci in range(int(application.Children.Count)):
+            connection = application.Children(ci)
+            for si in range(int(connection.Children.Count)):
+                system, client, user = read_session_identity(connection.Children(si))
+                if system.upper() == TARGET_SYSTEM and client == TARGET_CLIENT and user:
+                    raise SapSessionCheckError("SAP_TARGET_ALIAS_PRESENT",
+                        "A VCE/100 login is already open under another SAP Logon entry. Verify the entry name; the Hub will not create a duplicate production login.",
+                        "已有其他名称的 VCE/100 登录。请核对 SAP Logon 条目名称；Hub 不会再创建一个正式系统登录。")
+    except SapSessionCheckError:
+        raise
+    except Exception as error:
+        raise SapSessionCheckError("SAP_TARGET_INVENTORY_UNREADABLE",
+            "Existing SAP logins could not be verified. Check disconnected/sign-in windows before opening 949; no extra login will be created automatically.",
+            "无法核对已有 SAP 登录。请先处理断线或登录窗口，再打开 949；不会自动创建额外登录。", str(error)) from error
+
+
+def sign_in_problem(session, ref: SessionRef) -> SapSessionCheckError:
+    """Read-only classification: a connection object is not a completed login."""
+    try:
+        busy = session.Busy
+        if not isinstance(busy, (bool, int)):
+            raise RuntimeError("SAP Busy state could not be verified")
+        if busy:
+            return SapSessionCheckError("SAP_SESSION_BUSY",
+                "SAP sign-in is still busy. Wait, then check again; no duplicate login will be opened.",
+                "SAP 登录仍在处理中，请稍后重新检查；不会创建重复登录。")
+        dialog = session.FindById("wnd[1]", False)
+        title = normalize_text(dialog.Text) if dialog is not None else ""
+        main = session.FindById("wnd[0]", False)
+    except Exception as error:
+        return SapSessionCheckError("SAP_LOGIN_STATE_UNREADABLE",
+            "A 949 connection object exists, but its sign-in window cannot be verified. Check SAP Logon/window state; the Hub will not create a duplicate login.",
+            "检测到 949 连接对象，但无法核实登录窗口。请检查 SAP Logon 和窗口状态；不会盲目创建重复登录。", str(error))
+    if re.search(r"multiple\s+logons?|多重登录|重复登录|多次登录", title, re.I):
+        return SapSessionCheckError("SAP_MULTIPLE_LOGONS",
+            "SAP is waiting at 'License Information for Multiple Logons'. Review that SAP dialog yourself, then check again. The Hub will not end other logons or choose an option for you.",
+            "949 登录被 SAP“多重登录”提示挡住。请在 SAP 中按公司规则自行处理后重新检查；不要随意结束其他登录，未保存工作可能丢失。Hub 不会代选。",
+            f"SAP dialog: {title}", pending_sessions=[ref])
+    if dialog is not None:
+        return SapSessionCheckError("SAP_LOGIN_DIALOG_OPEN",
+            "An SAP sign-in dialog needs attention. Handle it in SAP, then check again. No dialog option will be clicked automatically.",
+            "SAP 登录有待处理的弹窗。请在 SAP 中处理后重新检查；系统不会代点弹窗选项。",
+            f"SAP dialog: {title or '<untitled>'}", pending_sessions=[ref])
+    if main is not None:
+        return SapSessionCheckError("SAP_LOGIN_REQUIRED",
+            "949 has an unfinished sign-in window, not a signed-in session. Complete sign-in in SAP, then check again. The Hub will show the existing window instead of creating another login.",
+            "949 存在尚未完成的登录窗口，并不是已登录会话。Hub 会尝试显示该窗口，请完成 SAP 登录后重新检查，不会再创建一个登录。",
+            "No signed-in user; SAP main window exists.", pending_sessions=[ref])
+    return SapSessionCheckError("SAP_LOGIN_WINDOW_UNAVAILABLE",
+        "949 has an incomplete connection object but no readable login window. Check SAP Logon for failed/disconnected connections; no automatic close or duplicate login will be attempted.",
+        "949 仅有未完成的连接对象，未找到可用登录窗口。请检查 SAP Logon 的失败或断线提示；不会自动关闭连接或重复登录。")
+
+
+def show_pending_sap_window(ref: SessionRef, shown_handles: set) -> str:
+    """Display only: no credentials, keys, clicks, close, save or login choices."""
+    session = get_session_by_ref(ref)  # Revalidate target and unchanged identity.
+    busy = session.Busy
+    if not isinstance(busy, (bool, int)):
+        raise RuntimeError("SAP Busy state could not be verified before window display.")
+    if busy:
+        return "SAP is busy; window display deferred."
+    main = session.FindById("wnd[0]", False)
+    dialog = session.FindById("wnd[1]", False)
+    windows = [window for window in (main, dialog) if window is not None]
+    handles = [int(window.Handle) for window in windows]
+    # Validate every handle before displaying anything; stale COM proxies must
+    # not cause a different window/connection to be opened or closed.
+    if not handles or any(not win32gui.IsWindow(handle) for handle in handles):
+        raise RuntimeError("SAP login window handle is missing or no longer valid.")
+    errors = []
+    display_requested = False
+    for handle in handles:  # Restore owner before modal so the dialog stays on top.
+        if STOP_EVENT.is_set():
+            raise HubStopped("APQP stopped before showing SAP.")
+        if handle in shown_handles:
+            continue
+        shown_handles.add(handle)  # Do not steal focus on every readiness poll.
+        display_requested = True
+        try:
+            win32gui.ShowWindow(handle, win32con.SW_RESTORE)
+        except Exception as error:
+            errors.append(str(error))
+    if STOP_EVENT.is_set():
+        raise HubStopped("APQP stopped before bringing SAP forward.")
+    target = handles[-1]
+    if display_requested:
+        try:
+            win32gui.SetForegroundWindow(target)
+        except Exception as error:
+            # Windows may prevent foreground activation. Visibility and the actual
+            # login issue still remain useful; never use injected keys as a bypass.
+            errors.append(str(error))
+    visible = bool(win32gui.IsWindowVisible(target))
+    return f"SAP pending window visible={visible}." + (" Display details: " + "; ".join(errors) if errors else "")
+
+
+def discover_sap_sessions(allow_other_transactions: bool = False, application=None, *, limit_workers: bool = True) -> List[SessionRef]:
+    from sap_gui_connection import SapGuiIssue
+    application = application if application is not None else checked_sap_application()
+    target_indexes = target_connection_indexes(application) if TARGET_CONNECTION_NAME else None
+    if target_indexes == []:
+        raise SapSessionCheckError("SAP_TARGET_CONNECTION_MISSING",
+            "The 949 connection is not open. Open VCE - One Digital Core [949] in SAP Logon and check again.",
+            "尚未打开 949 连接。请在 SAP Logon 中打开 VCE - One Digital Core [949] 后重新检查。")
+    try:
+        connection_count = int(application.Children.Count)
+    except Exception as error:
+        raise SapSessionCheckError("SAP_SESSION_SCAN_FAILED",
+            "Cannot read the SAP connection list. Recheck SAP GUI Scripting and the signed-in desktop windows.",
+            "无法读取 SAP 连接列表。请确认 SAP 桌面登录和脚本访问权限，再重新检查。", str(error)) from error
     refs: List[SessionRef] = []
-    for ci in range(application.Children.Count):
-        connection = application.Children(ci)
-        description = normalize_text(getattr(connection, "Description", ""))
-        for si in range(connection.Children.Count):
-            session = connection.Children(si)
-            system, client, user, transaction = session_info(session)
+    inventory_errors = []
+    diagnostics = []
+    pending_sessions = []
+    for ci in range(connection_count):
+        if target_indexes is not None and ci not in target_indexes:
+            continue  # Never inspect or use QA/other known Logon entries.
+        try:
+            connection = application.Children(ci)
+            session_count = int(connection.Children.Count)
+        except SapGuiIssue as error:
+            raise SapSessionCheckError(error.code, error.issue_summary, error.issue_summary_zh, str(error)) from error
+        except Exception as error:
+            inventory_errors.append(f"Connection {ci + 1}: {error}")
+            continue
+        description = connection_label(connection)
+        for si in range(session_count):
+            try:
+                session = connection.Children(si)
+                system, client, user = read_session_identity(session)
+            except Exception as error:
+                inventory_errors.append(f"Connection {ci + 1}, window {si + 1}: identity unreadable: {error}")
+                continue
             if not user or not system or not client:
+                diagnostics.append(f"Connection {ci + 1}, window {si + 1}: not signed in")
+                # A known mismatching partial identity must not be shown or used.
+                if TARGET_CONNECTION_NAME and ((system and TARGET_SYSTEM and system.upper() != TARGET_SYSTEM)
+                                               or (client and TARGET_CLIENT and client != TARGET_CLIENT)):
+                    inventory_errors.append(f"949 partial identity mismatch: expected {TARGET_SYSTEM}/{TARGET_CLIENT}, observed {system}/{client}")
+                else:
+                    pending_sessions.append((session, SessionRef(ci, si, system, client, user, description)))
+                continue
+            if TARGET_CONNECTION_NAME and ((TARGET_SYSTEM and system.upper() != TARGET_SYSTEM)
+                                           or (TARGET_CLIENT and client != TARGET_CLIENT)):
+                inventory_errors.append(f"949 identity mismatch: expected {TARGET_SYSTEM}/{TARGET_CLIENT}, observed {system}/{client}")
                 continue
             if TARGET_SYSTEM and system.upper() != TARGET_SYSTEM:
                 continue
             if TARGET_CLIENT and client != TARGET_CLIENT:
                 continue
             refs.append(SessionRef(ci, si, system, client, user, description))
+    if inventory_errors:
+        # Unknown identities may belong to a second environment; never silently guess.
+        raise SapSessionCheckError("SAP_SESSION_IDENTITY_UNREADABLE",
+            "Some SAP connection identities are unreadable. The target environment cannot be confirmed; resolve disconnected or sign-in windows and check again. Existing work will not be closed.",
+            "部分 SAP 连接的系统、Client 或账号无法读取，暂时不能确认目标环境。请处理断线或登录窗口后重新检查；不会关闭已有业务窗口。",
+            "\n".join(inventory_errors))
     if not refs:
-        raise RuntimeError("No matching signed-in SAP GUI session. Sign in and enable SAP GUI Scripting.")
+        if TARGET_CONNECTION_NAME and pending_sessions:
+            error = sign_in_problem(*pending_sessions[0])
+            error.args = (str(error) + "\n" + "\n".join(diagnostics),)
+            raise error
+        raise SapSessionCheckError("SAP_NOT_SIGNED_IN",
+            "949 has a connection object but no signed-in session yet. Wait for SAP sign-in to appear or check SAP Logon connection messages." if TARGET_CONNECTION_NAME else "No matching signed-in SAP GUI session. Sign in to SAP Desktop and enable SAP GUI Scripting.",
+            "949 仅有连接对象，尚无已登录会话。请等待 SAP 登录窗口出现，或检查 SAP Logon 的连接提示。" if TARGET_CONNECTION_NAME else "没有找到已登录的 SAP 桌面会话。请完成 SAP GUI 登录，再重新检查。", "\n".join(diagnostics))
     environments = {(ref.system, ref.client, ref.user) for ref in refs}
     if len(environments) != 1:
-        raise RuntimeError("Multiple SAP systems/clients/users match. Specify System and Client to avoid mixing environments.")
+        raise SapSessionCheckError("SAP_ENVIRONMENT_AMBIGUOUS",
+            "Multiple SAP systems/clients/users match. Keep one intended signed-in environment available; do not close unsaved work or end other logons blindly.",
+            "检测到不同 SAP 系统、Client 或账号，不能自动判断目标环境。请先安全处理其他环境的连接，再重新检查；不要直接退出未保存的业务窗口。",
+            "Systems/Clients: " + ", ".join(sorted({f"{ref.system}/{ref.client}" for ref in refs})))
     usable = []
+    usable_transactions = {}
+    rejected = []
     for ref in refs:
-        session = get_session_by_ref(ref)
-        if bool(session.Busy) or element_exists(session, "wnd[1]"):
-            continue
-        if current_tcode(session) not in {"", "SESSION_MANAGER", "SMEN", "S000", TCODE}:
+        try:
+            session = get_session_by_ref(ref, application)
+            ready, reason, detail = session_readiness(session, allow_other_transactions)
+        except SapSessionCheckError:
+            raise  # An identity change invalidates the environment snapshot.
+        except Exception as error:
+            ready, reason, detail = False, "unreadable", str(error)
+        if not ready:
+            rejected.append((reason, detail))
+            diagnostics.append(f"Connection {ref.connection_index + 1}, window {ref.session_index + 1}: {detail}")
             continue
         usable.append(ref)
+        usable_transactions[(ref.connection_index, ref.session_index)] = detail
     if not usable:
-        raise RuntimeError("No idle SAP session is available. Open SAP Easy Access in the selected system; other transactions will not be interrupted.")
-    return usable[:MAX_WORKERS]
+        reasons = {reason for reason, _ in rejected}
+        code = "SAP_NO_IDLE_SESSION"
+        issue = "No ready APQP/home window is available. Save your current SAP work, enter ZMFM050035 in the existing target window and check again."
+        issue_zh = "没有就绪的 APQP/首页窗口。请先保存 SAP 当前工作，在现有目标窗口进入 ZMFM050035 后重新检查。"
+        if reasons == {"busy"}:
+            code, issue, issue_zh = "SAP_SESSION_BUSY", "SAP windows are still busy. Wait for SAP to finish, then check again.", "SAP 窗口仍在处理中，请等待响应结束后重新检查。"
+        elif reasons == {"dialog"}:
+            if TARGET_CONNECTION_NAME:
+                for ref in refs:
+                    dialog_problem = sign_in_problem(get_session_by_ref(ref), ref)
+                    if dialog_problem.code == "SAP_MULTIPLE_LOGONS":
+                        raise dialog_problem
+            code, issue, issue_zh = "SAP_SESSION_DIALOG_OPEN", "An SAP dialog is blocking each available window. Review and handle the dialog in SAP, then check again; no button will be clicked automatically.", "可用 SAP 窗口上有弹窗。请在 SAP 中确认并处理后重新检查，系统不会代点确认按钮。"
+        elif reasons == {"unreadable"}:
+            code, issue, issue_zh = "SAP_SESSION_STATE_UNREADABLE", "Signed-in SAP windows were found, but their state could not be read. Check the existing SAP window and Scripting access, then check again.", "已找到 SAP 登录，但无法读取窗口状态。请检查现有 SAP 窗口和脚本访问权限后重新检查。"
+        elif reasons == {"transaction"}:
+            transactions = ", ".join(sorted({detail.rsplit(": ", 1)[-1] for _, detail in rejected}))
+            issue += f" Current transaction(s): {transactions}."
+            issue_zh = f"当前 SAP 窗口停在 {transactions}，尚未进入 APQP。请先保存 SAP 当前工作，在原窗口进入 ZMFM050035 后重新检查，不需要新建会话。"
+        raise SapSessionCheckError(code, issue, issue_zh, "\n".join(diagnostics),
+            pending_sessions=refs[:1] if TARGET_CONNECTION_NAME and reasons == {"dialog"} else None)
+    if any(reason == "unreadable" for reason, _ in rejected):
+        emit("notice", message=f"Skipped {sum(reason == 'unreadable' for reason, _ in rejected)} unreadable SAP window(s); using {len(usable)} verified ready window(s) in one environment.")
+    if allow_other_transactions:
+        # Prefer already available APQP/home windows, but another T-code is
+        # eligible for startup too. No navigation takes place during discovery.
+        usable.sort(key=lambda ref: usable_transactions[(ref.connection_index, ref.session_index)]
+                    not in {"", "SAP home", "SESSION_MANAGER", "SMEN", "S000", TCODE})
+    return usable[:MAX_WORKERS] if limit_workers else usable
 
 
-def prepare_sessions(task_count: int) -> List[SessionRef]:
-    refs = discover_sap_sessions()
+class HubSessionConnector:
+    """One startup, connection-open and same-window navigation attempt per run.
+
+    Failed/slow COM calls may have succeeded externally: rechecks only inspect
+    after an open attempt, even if SAP has not exposed the new connection yet.
+    """
+    def __init__(self, task_count=None):
+        self.logon_attempted = False
+        self.open_attempted = False
+        self.navigation_refs = {}
+        self.worker_limit = min(MAX_WORKERS, task_count) if task_count is not None else MAX_WORKERS
+        self.shown_handles = set()
+
+    def show_sign_in_issue(self, error) -> None:
+        for ref in getattr(error, "pending_sessions", []):
+            try:
+                detail = show_pending_sap_window(ref, self.shown_handles)
+            except Exception as display_error:
+                detail = f"Could not display SAP login window; switch to SAP manually. {display_error}"
+            error.args = (str(error) + "\n" + detail,)
+
+    def ready_sessions(self) -> List[SessionRef]:
+        if not AUTO_NAVIGATE_TARGET:
+            return discover_sap_sessions()
+        # A previous ambiguous request belongs to its original window. Do not
+        # silently swap it for a different window or repeat StartTransaction.
+        for ref in self.navigation_refs.values():
+            self.verify_navigation(ref)
+        try:
+            refs = discover_sap_sessions(allow_other_transactions=True)[:self.worker_limit]
+        except SapSessionCheckError as error:
+            self.show_sign_in_issue(error)
+            raise
+        for ref in refs:
+            session = get_session_by_ref(ref)
+            if readable_transaction(session) not in {"", "SESSION_MANAGER", "SMEN", "S000", TCODE}:
+                self.navigate_existing(ref)
+        return refs
+
+    def verify_navigation(self, ref) -> List[SessionRef]:
+        # Bind only this verified window. Polling must not enumerate every SAP
+        # connection/session again after a transaction has already been sent.
+        session = get_session_by_ref(ref)
+        deadline = time.monotonic() + SAP_CONNECTION_READY_TIMEOUT_SEC
+        while True:
+            if STOP_EVENT.is_set():
+                raise HubStopped("APQP stopped while waiting for its query page.")
+            try:
+                ready, reason, transaction = session_readiness(session)
+            except Exception as error:
+                raise SapSessionCheckError('SAP_SESSION_STATE_UNREADABLE',
+                    'The selected SAP window state cannot be read. Check its Scripting access and window, then check again.',
+                    '无法读取选中 SAP 窗口的状态，请检查脚本权限和该窗口后重新检查。', str(error)) from error
+            if reason == 'dialog':
+                error = SapSessionCheckError('SAP_SESSION_DIALOG_OPEN',
+                    'SAP needs your confirmation before entering APQP. Handle its dialog, then check again; no option will be chosen automatically.',
+                    '进入 APQP 时 SAP 需要确认。请自行处理弹窗后重新检查，系统不会代选。', pending_sessions=[ref])
+                self.show_sign_in_issue(error)
+                raise error
+            if ready and transaction == TCODE and is_selection_screen(session):
+                if read_session_identity(session) != (ref.system, ref.client, ref.user):
+                    raise SapSessionCheckError('SAP_SESSION_CHANGED', 'SAP identity changed during APQP navigation.', '进入 APQP 期间 SAP 会话身份已变化，请核对目标登录。')
+                return [ref]
+            if time.monotonic() >= deadline:
+                raise SapSessionCheckError('SAP_APQP_NAVIGATION_PENDING',
+                    'The existing window has not reached the APQP query page. Handle SAP prompts or enter ZMFM050035, then check again. Navigation will not be replayed.',
+                    '原窗口尚未进入 APQP 查询页。请处理 SAP 提示或进入 ZMFM050035 后重新检查；不会重复跳转。')
+            if STOP_EVENT.wait(SAP_STARTUP_POLL_SEC):
+                raise HubStopped("APQP stopped while waiting for its query page.")
+
+    def navigate_existing(self, source) -> None:
+        started = time.perf_counter()
+        key = (source.connection_index, source.session_index)
+        if key in self.navigation_refs:
+            self.verify_navigation(source)
+            return
+        # User-authorized startup switch in each selected existing window. The
+        # per-record guard still refuses a manual T-code change after startup.
+        session = get_session_by_ref(source)
+        ready, _, _ = session_readiness(session, allow_other_transactions=True)
+        if not ready:
+            raise SapSessionCheckError("SAP_SESSION_CHANGED",
+                "SAP window state changed before entering APQP. Check again; no navigation was sent.",
+                "进入 APQP 前 SAP 窗口状态发生变化，请重新检查；尚未发送跳转命令。")
+        if STOP_EVENT.is_set():
+            raise HubStopped("APQP stopped before navigating to APQP.")
+        self.navigation_refs[key] = source  # Set before COM: navigation may succeed even on error.
+        emit("notice", message=f"Switching the existing SAP window from {readable_transaction(session)} to {TCODE}. No new session will be created.")
+        try:
+            # Deliberately no command-box fallback/replay after an ambiguous COM
+            # response, and no automatic Save/Discard/Back/popup acknowledgment.
+            session.StartTransaction(TCODE)
+        except Exception as error:
+            raise SapSessionCheckError("SAP_APQP_NAVIGATION_FAILED",
+                "Could not confirm entering ZMFM050035. Review SAP prompts/transaction authorization, then check again. No new session was created and no save/discard choice was made.",
+                "无法确认已进入 ZMFM050035。请检查 SAP 提示或事务权限后重新检查；没有新建会话，也没有代点保存或放弃。", str(error)) from error
+        self.verify_navigation(source)
+        emit('notice', message=f'APQP timing | SAP navigation and page verification: {(time.perf_counter() - started) * 1000:.0f} ms | window={source.session_index + 1}')
+
+    def wait_for_ready(self, retry_codes, pending_code, issue, issue_zh, navigation_ref=None) -> List[SessionRef]:
+        deadline = time.monotonic() + SAP_CONNECTION_READY_TIMEOUT_SEC
+        while True:
+            if STOP_EVENT.is_set():
+                raise HubStopped("APQP stopped while waiting for SAP.")
+            try:
+                refs = discover_sap_sessions()
+                if navigation_ref is not None:
+                    session = get_session_by_ref(navigation_ref)
+                    ready, reason, _ = session_readiness(session)
+                    if reason == "dialog":
+                        raise SapSessionCheckError("SAP_SESSION_DIALOG_OPEN",
+                            "SAP needs your confirmation before entering APQP. Review its save/discard or other dialog, then check again; no option will be chosen automatically.",
+                            "进入 APQP 时 SAP 需要确认。请自行处理保存/放弃或其他弹窗后重新检查，系统不会代选。")
+                    if not ready or readable_transaction(session) != TCODE or not is_selection_screen(session):
+                        raise SapSessionCheckError(pending_code, issue, issue_zh)
+                return refs
+            except SapSessionCheckError as error:
+                self.show_sign_in_issue(error)
+                if error.code not in retry_codes:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise SapSessionCheckError(pending_code, issue, issue_zh, str(error)) from error
+            if STOP_EVENT.wait(0.2):
+                raise HubStopped("APQP stopped while waiting for SAP.")
+
+    def verify(self) -> List[SessionRef]:
+        if STOP_EVENT.is_set():
+            raise HubStopped("APQP stopped before SAP connection verification.")
+        if not AUTO_OPEN_TARGET or not TARGET_CONNECTION_NAME:
+            return self.ready_sessions()
+        try:
+            application = checked_sap_application()
+        except SapSessionCheckError:
+            if self.logon_attempted:
+                raise
+            self.logon_attempted = True
+            try:
+                from me01_source_list import launch_sap_logon
+                launch_sap_logon()
+            except Exception as error:
+                raise SapSessionCheckError("SAP_LOGON_START_FAILED",
+                    "SAP Logon could not be started. Open SAP Logon manually and check again.",
+                    "无法启动 SAP Logon。请手动打开 SAP Logon 后重新检查。", str(error)) from error
+            emit("notice", message="Starting SAP Logon to open VCE - One Digital Core [949].")
+            # A short, cancellable startup wait, not a fixed delay on normal runs.
+            deadline = time.monotonic() + 8
+            while True:
+                if STOP_EVENT.wait(0.2):
+                    raise HubStopped("APQP stopped while starting SAP Logon.")
+                try:
+                    application = checked_sap_application()
+                    break
+                except SapSessionCheckError:
+                    if time.monotonic() >= deadline:
+                        raise
+        if not target_connection_indexes(application):
+            if self.open_attempted:
+                raise SapSessionCheckError("SAP_TARGET_OPEN_PENDING",
+                    "949 was already requested, but is not available yet. Check SAP Logon for connection/network errors, or open the entry manually. It will not be opened again automatically.",
+                    "已请求打开 949，但连接尚不可用。请检查 SAP Logon 的连接或网络提示，必要时手动打开该条目；不会重复自动打开。")
+            if STOP_EVENT.is_set():
+                raise HubStopped("APQP stopped before opening SAP.")
+            assert_no_target_alias(application)
+            if target_connection_indexes(application):
+                return self.ready_sessions()  # User opened it during preflight.
+            if STOP_EVENT.is_set():
+                raise HubStopped("APQP stopped before opening SAP.")
+            self.open_attempted = True  # Set before COM: a failure can still open a window.
+            emit("notice", message="Opening VCE - One Digital Core [949]. Complete SAP sign-in if requested.")
+            try:
+                # SAP's async mode leaves sign-in and security prompts interactive.
+                application.OpenConnection(TARGET_CONNECTION_NAME, False)
+            except Exception as error:
+                raise SapSessionCheckError("SAP_TARGET_OPEN_FAILED",
+                    "Could not confirm opening 949. Check SAP Logon and the configured entry name; no automatic retry will create another login.",
+                    "无法确认 949 是否已打开。请检查 SAP Logon 和连接名称；不会自动重试并创建重复登录。", str(error)) from error
+            # Async OpenConnection normally returns before SAP exposes a login.
+            # Give SSO a bounded, cancellable chance instead of immediately warning.
+            try:
+                self.wait_for_ready({"SAP_TARGET_CONNECTION_MISSING", "SAP_NOT_SIGNED_IN", "SAP_SESSION_BUSY", "SAP_LOGIN_REQUIRED"},
+                    "SAP_TARGET_OPEN_PENDING",
+                    "949 was requested but sign-in is not ready. Complete SAP sign-in/connection prompts and check again; no duplicate connection will be opened.",
+                    "已请求打开 949，但登录尚未就绪。请完成 SAP 登录或处理连接提示后重新检查；不会重复打开连接。")
+            except SapSessionCheckError as error:
+                if error.code != "SAP_NO_IDLE_SESSION":
+                    raise
+                # A startup transaction may be configured for a fresh SSO login.
+                # Switch in the same window, just as for an existing ME11 page.
+        return self.ready_sessions()
+
+
+def wait_for_hub_sessions(hub, task_count=None) -> List[SessionRef]:
+    connector = HubSessionConnector(task_count)
+    try:
+        return connector.verify()
+    except HubStopped:
+        raise
+    except Exception as error:
+        return hub.wait("SIGN_IN",
+            getattr(error, "issue_summary", "SAP session verification failed. Review the details, resolve SAP sign-in/window state and check again."),
+            getattr(error, "issue_summary_zh", "SAP 会话检查未通过。请查看详情并处理 SAP 登录或窗口状态后重新检查。"),
+            connector.verify, detail=str(error),
+            instructions="Handle SAP sign-in, authorization or save/discard prompts, then check again. APQP uses the existing window without creating a session. No save/discard choice is made automatically.",
+            instructionsZh="请处理 SAP 登录、权限或保存/放弃提示后重新检查。APQP 复用原窗口，不新建会话，不自动选择保存或放弃。")
+
+
+def prepare_sessions(task_count: int, verified_refs=None) -> List[SessionRef]:
+    # Carry the selected windows through to workers instead of performing a new
+    # home-only selection that can drop or replace them after startup.
+    refs = (list(verified_refs) if verified_refs is not None else
+            HubSessionConnector(task_count).verify() if AUTO_NAVIGATE_TARGET else discover_sap_sessions())
+    if verified_refs is not None:
+        for ref in refs:
+            ready, reason, _ = session_readiness(get_session_by_ref(ref))
+            if not ready:
+                raise SapSessionCheckError("SAP_SESSION_CHANGED",
+                    "A selected SAP window changed after APQP startup. Check its prompt/state before restarting.",
+                    "选中的 SAP 窗口在 APQP 启动检查后发生变化，请检查该窗口的提示或状态后再启动。", reason)
     desired = min(MAX_WORKERS, task_count)
     if CREATE_SESSIONS:
         while len(refs) < desired:
@@ -973,7 +1484,7 @@ def worker_loop(
                 )
 
                 session = get_session_by_ref(session_ref)
-                if current_tcode(session) not in {"", "SESSION_MANAGER", "SMEN", "S000", TCODE}:
+                if readable_transaction(session) not in {"", "SESSION_MANAGER", "SMEN", "S000", TCODE}:
                     result = Result(task.excel_row, task.material, task.vendor, "SESSION_CHANGED", message="SAP session switched to another transaction; not interrupted.", worker_id=worker_id)
                 else:
                     result = query_one(session, task, worker_id)
@@ -1034,7 +1545,13 @@ def validate_headers(ws):
     material = {"part no.", "part no", "material", "material no."}
     vendor = {"vendor", "supplier", "parma"}
     date = {"apqp plan closure date"}
-    headers = [normalize_text(ws.Cells(1, column).Value2).lower() for column in range(1, 6)]
+    if getattr(ws, 'Range', None) is not None:
+        block = ws.Range('A1:E1').Value2
+        if not isinstance(block, (tuple, list)) or len(block) != 1 or len(block[0]) != 5:
+            raise RuntimeError('Excel returned incomplete APQP headers. No SAP query was started.')
+        headers = [normalize_text(value).lower() for value in block[0]]
+    else:
+        headers = [normalize_text(ws.Cells(1, column).Value2).lower() for column in range(1, 6)]
     if (headers[0] in material and headers[1] in {"ver", "version"} and
             headers[2] == "description" and headers[3] in vendor and headers[4] in date):
         return (1, 4, 5)
@@ -1088,6 +1605,10 @@ def apply_result(ws, result: Result, columns=None) -> None:
 
 
 def main() -> None:
+    if '--dates' in sys.argv:
+        from apqp_date_api import main as date_main
+        date_main()
+        return
     preview_only = "--preview" in sys.argv
     excel_path = Path(EXCEL_PATH).resolve()
     if excel_path.suffix.lower() not in {".xlsx", ".xlsm"} or not excel_path.is_file():
@@ -1101,7 +1622,10 @@ def main() -> None:
     tasks = []
     skipped = 0
     try:
+        excel_started = time.perf_counter()
         excel, wb, ws, owns_excel = get_or_open_excel_workbook(excel_path, SHEET_NAME)
+        excel_open_ms = (time.perf_counter() - excel_started) * 1000
+        validation_started = time.perf_counter()
         columns = validate_headers(ws)
         if preview_only:
             input_rows = list(iter_excel_input_rows(ws, columns))
@@ -1113,6 +1637,9 @@ def main() -> None:
             emit("preview", preview={**current, "modes": modes})
             return
         tasks, skipped, invalid = read_excel_tasks(ws, columns)
+        emit('notice', message=f'APQP timing | Excel attach/open: {excel_open_ms:.0f} ms | live validation: {(time.perf_counter() - validation_started) * 1000:.0f} ms')
+        if invalid:
+            raise ValueError(f'{invalid} Excel row(s) have an incomplete Part No./Vendor. Correct the current Excel data before querying SAP; no SAP query was started.')
         if bool(wb.ReadOnly):
             raise RuntimeError("Workbook is read-only or open in another Excel instance. Close that copy and retry.")
         if not tasks:
@@ -1124,24 +1651,12 @@ def main() -> None:
             hub.start_listener()
         else:
             threading.Thread(target=listen_for_cancel, daemon=True).start()
-        emit("preparing", message="Checking the SAP environment and available idle sessions.")
+        emit("preparing", message="Checking the SAP login and existing windows. Other T-codes can be switched to APQP automatically.")
+        verified_refs = None
         if hub:
-            try:
-                discover_sap_sessions()
-            except Exception:
-                # Launch only when SAP GUI is absent; never create/guess a company connection.
-                try:
-                    get_sap_application()
-                except Exception:
-                    try:
-                        from me01_source_list import launch_sap_logon
-                        launch_sap_logon()
-                    except Exception:
-                        pass
-                hub.wait("SIGN_IN",
-                    "Sign in to SAP, return idle windows to SAP home, and keep one environment open.",
-                    "请登录 SAP，把空闲窗口返回 SAP 首页，并只保留一个环境。", discover_sap_sessions)
-        session_refs = prepare_sessions(len(tasks))
+            emit("notice", message=f"APQP session policy: {APQP_SESSION_POLICY}; target={TARGET_CONNECTION_NAME}; System/Client={TARGET_SYSTEM}/{TARGET_CLIENT}. Save existing SAP work before starting; existing login dialogs will be shown, not auto-confirmed.")
+            verified_refs = wait_for_hub_sessions(hub, len(tasks))
+        session_refs = prepare_sessions(len(tasks), verified_refs)
         if STOP_EVENT.is_set():
             emit("complete", message="Cancelled before querying.", total=len(tasks), processed=0,
                  succeeded=0, skipped=skipped, failed=0, workers=0, cancelled=True,

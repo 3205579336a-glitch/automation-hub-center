@@ -49,14 +49,15 @@ export function registerApqpHandlers(runner: ApqpRunner, logger: DiagnosticLogge
     try { runId = guided.begin() } catch (error) { return { success: false, message: messageOf(error) } }
     try {
     const currentSettings = await settings.getSettings()
-    const effective = { ...config, system: '', client: '', sheetName: '', maxItems: 0, createSessions: false, maxWorkers: currentSettings.maxConcurrentSapSessions ?? 3 }
+    // [949] is the Production SAP Logon entry, not the SAP Client number.
+    const effective = { ...config, system: 'VCE', client: '100', sheetName: '', maxItems: 0, createSessions: false, maxWorkers: currentSettings.maxConcurrentSapSessions ?? 3 }
     const preview = await runner.preview(effective)
     if (!preview.success) return preview
     if (preview.preview.invalid || !preview.preview.selected) return { success: false, message: 'Fix the incomplete rows before starting.' }
     const entry = await history.start({ operation: 'apqp-plan-closure', diagnosticRunId: runId, label: 'APQP Plan Closure Date', summary: 'Querying ZMFM050035.', tcode: 'ZMFM050035' })
     timingId = entry.id
     intelligence?.begin(entry.id, 'apqp-plan-closure', runId, preview.preview.selected)
-    await logger.info({ category: 'automation', event: 'apqp.batch.started', message: 'APQP query started.', tcode: 'ZMFM050035', details: { runId: entry.id, maxWorkers: config.maxWorkers, system: config.system, client: config.client, plant: config.plant } })
+    await logger.info({ category: 'automation', event: 'apqp.batch.started', message: 'APQP query started.', tcode: 'ZMFM050035', details: { runId: entry.id, maxWorkers: effective.maxWorkers, system: effective.system, client: effective.client, plant: effective.plant } })
     const result = await runner.run(effective, (progress) => {
       intelligence?.observe(entry.id, progress)
       if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress)
