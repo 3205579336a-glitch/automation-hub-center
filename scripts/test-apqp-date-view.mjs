@@ -45,7 +45,7 @@ const records = [
   { apqp: '2000000002', material: '10000002', vendor: '6587' },
   { apqp: '2000000003', material: '10000003', vendor: '41889' },
   { apqp: '2000000004', material: '10000004', vendor: '100000' }
-].map(row => Object.freeze({ ...row, dates: Object.freeze({ gActualDate: '2026-10-22' }) }))
+].map(row => Object.freeze({ ...row, dates: Object.freeze({ fPlanDate: '2026-10-22' }) }))
 Object.freeze(records)
 
 test('search covers material, Supplier Parma and APQP; terms are ANDed across identity fields', () => {
@@ -62,5 +62,5 @@ test('supplier order is numeric, stable for zero-padded ties, and does not mutat
   assert.deepEqual(visibleApqpRecords(records, '', 'original'), records)
   assert.equal(records[0].vendor, '0041889')
   assert.equal(visibleApqpRecords(records, '41889', 'supplier-desc')[0], records[0], 'Row identity and edit keys are preserved')
-  assert.equal(records[0].dates.gActualDate, '2026-10-22')
+  assert.equal(records[0].dates.fPlanDate, '2026-10-22')
 })

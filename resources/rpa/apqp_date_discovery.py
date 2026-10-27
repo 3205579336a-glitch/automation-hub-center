@@ -70,7 +70,7 @@ class ApqpDiscovery:
 
     def check_stop(self):
         if self.stop():
-            self.fail('CANCELLED', 'Read-only inspection stopped. No SAP dates were changed.', '只读检查已停止，未修改 SAP 日期。')
+            self.fail('CANCELLED', 'APQP operation stopped. Review the recorded results; no further action was sent.', 'APQP 操作已停止，请核查已记录的结果，未继续发送操作。')
 
     def guard(self, allow_home=False, waiting=False, *, allow_navigation=False, transition_from=None):
         self.check_stop()
@@ -277,7 +277,7 @@ class ApqpDiscovery:
             raise ValueError('Inspection row limit must be between 1 and 10000.')
         self.guard(allow_home=True, allow_navigation=allow_navigation)
         transaction = self.legacy.readable_transaction(self.session)
-        if transaction == self.legacy.TCODE and self.selection() is None and self.optional(self.legacy.ID_RESULT_GRID) is None:
+        if not allow_navigation and transaction == self.legacy.TCODE and self.selection() is None and self.optional(self.legacy.ID_RESULT_GRID) is None:
             self.fail('SAP_SESSION_UNAVAILABLE', 'Use SAP home or a clean APQP query page. Existing APQP detail work will not be abandoned.',
                       '请使用 SAP 首页或干净的 APQP 查询页，不会退出已有 APQP 详情工作。')
         self.navigation_dispatched = True
@@ -472,7 +472,7 @@ class ApqpDiscovery:
             self.fail('SAP_DETAIL_OUTCOME_UNCERTAIN', 'Detail opening could not be confirmed. Inspect SAP; no action was replayed.',
                       '无法确认详情打开结果，请检查 SAP，未重放操作。', str(error))
         self.wait(lambda: True if any(self.optional(field.control_id) is not None for field in DATE_FIELDS) else None,
-                  'recorded APQP G/H detail controls')
+                  'recorded APQP F/G/H/M planned-date controls')
         return self._read_detail_fields() if load_dates else None
 
     def return_read_detail(self):

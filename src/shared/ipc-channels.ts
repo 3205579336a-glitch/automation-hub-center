@@ -13,6 +13,7 @@ export const IPC_CHANNELS = {
   apqpProgress: 'apqp:progress',
   apqpDateCapabilities: 'apqp:dates:capabilities',
   queryApqpDates: 'apqp:dates:query',
+  loadCachedApqpDates: 'apqp:dates:cache',
   previewApqpDateChanges: 'apqp:dates:preview',
   executeApqpDateChanges: 'apqp:dates:execute',
   openSapWebGui: 'automation:open-sap',

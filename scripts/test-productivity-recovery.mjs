@@ -56,6 +56,23 @@ test('periods use completion dates and include negative runs conservatively befo
   assert.equal(summary.last30Days.runs, 2)
   assert.equal(summary.calibrated, true)
 })
+
+test('APQP date savings use one minute per verified field, not four fields per record or query rows', () => {
+  const dateEntry = (id, changes = {}) => entry(id, { operation: 'apqp-date-management', apqpDateAction: 'update',
+    succeeded: 2, apqpDateFieldsSaved: 7, durationMs: 30000, ...changes })
+  const summary = timeSavings([dateEntry('saved'), dateEntry('partial', { status: 'Partial', succeeded: 1, apqpDateFieldsSaved: 1, durationMs: 10000 }),
+    dateEntry('read', { apqpDateAction: 'query' }), dateEntry('preview', { apqpDateAction: 'preview' }),
+    dateEntry('legacy', { apqpDateFieldsSaved: undefined }), dateEntry('too-many', { apqpDateFieldsSaved: 9 }),
+    dateEntry('too-few', { apqpDateFieldsSaved: 1 }), dateEntry('staged', { apqpStaged: 1 }), dateEntry('dry', { dryRun: true }),
+    dateEntry('failed', { status: 'Failed' }), dateEntry('cancelled', { status: 'Cancelled' }), dateEntry('uncertain'), dateEntry('saved')],
+    DEFAULT_MANUAL_SECONDS, false, new Set(['uncertain']), now)
+  assert.equal(summary.today.successfulDateFields, 8)
+  assert.equal(summary.today.successfulUnits, 3)
+  assert.equal(summary.today.runs, 2)
+  assert.equal(summary.today.manualMs, 480000)
+  assert.equal(summary.today.actualMs, 40000)
+  assert.equal(summary.today.savedMs, 440000)
+})
 test('RFQ units are groups; baselines validate finite positive bounded seconds', () => {
   assert.equal(timeSavings([entry('rfq', { operation: 'create-rfq', succeeded: 2, durationMs: 300000 })], DEFAULT_MANUAL_SECONDS, false, new Set(), now).today.savedMs, 3900000)
   for (const value of [NaN, Infinity, 0, -1, 86401]) assert.equal(isManualTimeBaselines({ ...DEFAULT_MANUAL_SECONDS, 'create-rfq': value }), false)

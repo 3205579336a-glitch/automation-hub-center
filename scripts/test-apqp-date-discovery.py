@@ -123,7 +123,7 @@ def application(*sessions):
 class DateDomainTests(unittest.TestCase):
     def test_only_recorded_four_control_ids_and_temporary_labels(self):
         self.assertEqual([field.technical_name for field in DATE_FIELDS],
-                         ['GS_ITAB-G_PLNDAT', 'GS_ITAB-G_ACTDAT', 'GS_ITAB-H_PLNDAT', 'GS_ITAB-H_ACTDAT'])
+                         ['GS_ITAB-F_PLNDAT', 'GS_ITAB-G_PLNDAT', 'GS_ITAB-H_PLNDAT', 'GS_ITAB-M_PLNDAT'])
         for field in DATE_FIELDS:
             self.assertIn('/ssubSUB1:ZMFM050035_N:0901/ctxtGS_ITAB-', field.control_id)
 
@@ -141,9 +141,9 @@ class DateDomainTests(unittest.TestCase):
 
     def test_change_only_and_already_applied_retry_require_no_blind_save(self):
         original = self.dates('2026-10-20')
-        desired = dict(original, gActualDate='2026-10-25', hActualDate='2026-10-26')
+        desired = dict(original, fPlanDate='2026-10-25', mPlanDate='2026-10-26')
         plan = compare_dates(original, original, desired)
-        self.assertEqual([field['field'] for field in plan['changes']], ['gActualDate', 'hActualDate'])
+        self.assertEqual([field['field'] for field in plan['changes']], ['fPlanDate', 'mPlanDate'])
         self.assertFalse(plan['writesEnabled'])
         retry = compare_dates(original, desired, desired)
         self.assertEqual(retry['status'], 'NO_CHANGE')
@@ -152,7 +152,7 @@ class DateDomainTests(unittest.TestCase):
 
     def test_conflict_blocks_entire_record_proposal(self):
         original = self.dates('2026-10-20')
-        result = compare_dates(original, dict(original, gActualDate='2026-10-22'), dict(original, gActualDate='2026-10-25'))
+        result = compare_dates(original, dict(original, fPlanDate='2026-10-22'), dict(original, fPlanDate='2026-10-25'))
         self.assertEqual(result['status'], 'CONFLICT')
         self.assertEqual(result['changes'], [])
 
@@ -160,7 +160,7 @@ class DateDomainTests(unittest.TestCase):
         original = self.dates('2026-10-20')
         result = compare_dates(original, dict(original, gPlanDate='2026-10-22'), original)
         self.assertEqual(result['status'], 'NO_CHANGE')
-        self.assertEqual(result['fields'][0]['expectedAfterSave'], '2026-10-22')
+        self.assertEqual(result['fields'][1]['expectedAfterSave'], '2026-10-22')
 
     def test_blanks_and_missing_values_never_authorize_clear(self):
         self.assertEqual(compare_dates(self.dates(None), self.dates(None), self.dates(''))['status'], 'NO_CHANGE')
@@ -311,8 +311,8 @@ class DiscoveryTests(unittest.TestCase):
         self.current.dates.pop(DATE_FIELDS[2].control_id)
         values = self.reader.read_open_detail()
         self.assertFalse(values['allFourReadable'])
-        self.assertEqual(values['fields']['gPlanDate']['status'], 'INVALID_DATE')
-        self.assertEqual(values['fields']['gActualDate']['status'], 'EMPTY')
+        self.assertEqual(values['fields']['fPlanDate']['status'], 'INVALID_DATE')
+        self.assertEqual(values['fields']['gPlanDate']['status'], 'EMPTY')
         self.assertEqual(values['fields']['hPlanDate']['status'], 'UNREADABLE')
 
     def test_changed_row_before_or_during_selection_prevents_opening(self):

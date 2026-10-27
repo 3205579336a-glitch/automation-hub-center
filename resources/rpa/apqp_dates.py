@@ -18,13 +18,13 @@ class DateField:
                 + self.technical_name)
 
 
-# Labels verified read-only against the live detail page on 2026-10-20.
-# Keep the technical selectors unchanged.
+# Planned-date selectors from the owner's 2026-10-27 recording.
+FIELD_SCHEMA = 'APQP_PLANNED_FGHM_V1'
 DATE_FIELDS = (
+    DateField('fPlanDate', 'GS_ITAB-F_PLNDAT', 'RTS Confirmation Planned Date'),
     DateField('gPlanDate', 'GS_ITAB-G_PLNDAT', 'RTS Action & Closure Planned Date'),
-    DateField('gActualDate', 'GS_ITAB-G_ACTDAT', 'RTS Action & Closure Actual Date'),
     DateField('hPlanDate', 'GS_ITAB-H_PLNDAT', 'Total PPAP Planned Date'),
-    DateField('hActualDate', 'GS_ITAB-H_ACTDAT', 'Total PPAP Actual Date'),
+    DateField('mPlanDate', 'GS_ITAB-M_PLNDAT', 'APQP Closure Plan Date'),
 )
 ID_PROJECT = 'wnd[0]/usr/txtS_PCODE-LOW'
 ID_OWNER = 'wnd[0]/usr/txtS_SDMEMB-LOW'

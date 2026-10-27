@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { APQP_DATE_CAPABILITIES, APQP_DATE_KEYS, APQP_DATE_LABELS, type ApqpDateCapabilities, type ApqpDateKey,
-  type ApqpDateQuery, type ApqpDateSnapshot, type ApqpDates, type ApqpDateError, type ApqpQueryMismatch, type ApqpDateUpdateSummary, type ApqpSdComments } from '../../../../shared/apqp-date-types'
+import { APQP_DATE_KEYS, APQP_DATE_LABELS, type ApqpDateKey,
+  type ApqpDateQuery, type ApqpDateSnapshot, type ApqpDates, type ApqpDateError, type ApqpQueryMismatch, type ApqpDateUpdateSummary } from '../../../../shared/apqp-date-types'
 import { useLocalization } from '../../i18n/use-localization'
 import type { Notify } from '../../types/notifications'
 import { AutomationTaskToolbar } from './AutomationTaskToolbar'
@@ -24,10 +24,9 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   const [query, setQuery] = useState<ApqpDateQuery>(() => ({ project: projects[0], userId: rememberedUser(), environment: 'PROD' }))
   const [snapshot, setSnapshot] = useState<ApqpDateSnapshot | null>(null)
   const [edits, setEdits] = useState(new Map<string, ApqpDates>())
-  const [comments, setComments] = useState(new Map<string, ApqpSdComments>())
   const [outcome, setOutcome] = useState<{ update: ApqpDateUpdateSummary; resultPath: string } | null>(null)
   const [stagedPending, setStagedPending] = useState(false)
-  const [capabilities, setCapabilities] = useState<ApqpDateCapabilities>(APQP_DATE_CAPABILITIES)
+  const [needsSapReview, setNeedsSapReview] = useState(false), [cacheLoading, setCacheLoading] = useState(false)
   const [running, setRunning] = useState(false), [stopping, setStopping] = useState(false)
   const emptyProgress = { message: '', current: 0, total: 0, material: '', vendor: '', apqp: '', step: '' }
   const [progress, setProgress] = useState(emptyProgress)
@@ -47,13 +46,11 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   useEffect(() => { onBusyChange(running || stagedPending) }, [running, stagedPending, onBusyChange])
   useEffect(() => { if (snapshot) editorSection.current?.scrollIntoView({ block: 'start' }) }, [snapshot])
   useEffect(() => {
-    let active = true
-    void api.getApqpDateCapabilities().then(value => { if (active && value) setCapabilities(value) }).catch(() => undefined)
     const stop = api.onApqpProgress(event => {
       if (inFlight.current) setProgress(previous => ({ message: event.message || previous.message, current: event.current ?? previous.current, total: event.total ?? previous.total,
         material: event.material ?? previous.material, vendor: event.vendor ?? previous.vendor, apqp: event.apqp ?? previous.apqp, step: event.step ?? previous.step }))
     })
-    return () => { active = false; stop() }
+    return () => stop()
   }, [api])
 
   const showError = (result: ApqpDateError): void => {
@@ -64,7 +61,9 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     notify({ kind: result.cancelled ? 'warning' : 'error', title, message })
     setComparison(result.comparison ?? null)
     setErrorLog(result.logPath ?? '')
-    if (result.writeMayHaveOccurred) { setSnapshot(null); setEdits(new Map()); setComments(new Map()) }
+    // Preserve local drafts for untouched rows, but never reuse the invalidated
+    // execution token. Manual SAP handling + cache reload/full read is required.
+    if (result.writeMayHaveOccurred) { setNeedsSapReview(true); setStagedPending(true) }
   }
   const openResult = (path: string): void => {
     void api.openAutomationArtifact(path).then(result => {
@@ -84,10 +83,10 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   const find = (): void => { void work(async () => {
     const remembered = rememberApqpProject(projects, query.project)
     setProjects(remembered)
-    if (!stagedPending) { setSnapshot(null); setOutcome(null); setEdits(new Map()); setComments(new Map()); setPage(0) }
+    if (!stagedPending) { setSnapshot(null); setOutcome(null); setEdits(new Map()); setPage(0) }
     const result = await api.queryApqpDates(query)
     if (!result.success) { showError(result); return }
-    setStagedPending(false); setOutcome(null); setComments(new Map()); setPage(0); setSearch(''); setOrder('original')
+    setStagedPending(false); setNeedsSapReview(false); setOutcome(null); setPage(0); setSearch(''); setOrder('original')
     setSnapshot(result.snapshot)
     setEdits(new Map(result.snapshot.records.map(row => [row.apqp, { ...row.dates }])))
     try { localStorage.setItem('apqp-last-business-user', query.userId) } catch { /* No password is stored. */ }
@@ -95,22 +94,44 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     notify({ kind: result.snapshot.records.length ? 'success' : 'warning', title: t('APQP dates loaded', '已读取 APQP 日期'), message })
     if (!result.snapshot.records.length) setNotice({ title: t('No matching APQPs', '未找到匹配 APQP'), message: t('Check NPL and business User ID, then find again.', '请核对 NPL 和业务 User ID 后重新查询。') })
   }) }
+  const loadCached = async (): Promise<void> => {
+    if (inFlight.current) return
+    inFlight.current = true; setCacheLoading(true)
+    try {
+      const result = await api.loadCachedApqpDates(query)
+      if (!result.success) {
+        notify({ kind: 'warning', title: t('No cached result', '暂无缓存结果'), message: zh && result.messageZh ? result.messageZh : result.message })
+        return
+      }
+      const sameRead = snapshot?.resultPath === result.snapshot.resultPath
+      const processed = stagedPending ? progress.apqp : ''
+      setSnapshot(result.snapshot)
+      // Keep other pending edits. The explicitly handled, staged row is reset
+      // to historical read values, not falsely relabelled as saved/current.
+      setEdits(new Map(result.snapshot.records.map(row => [row.apqp,
+        { ...(sameRead && row.apqp !== processed ? edits.get(row.apqp) ?? row.dates : row.dates) }])))
+      setStagedPending(false); setOutcome(null); setPage(0); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setNotice(null)
+      setNeedsSapReview(current => current || Boolean(result.snapshot.lastAttempt))
+      notify({ kind: 'warning', title: t('Previous results loaded', '已载入上次结果'),
+        message: t('For the latest dates, choose Refresh from SAP.', '如需最新日期，请点击“重新查询 SAP”。') })
+    } catch {
+      notify({ kind: 'warning', title: t('Local result unavailable', '本地结果不可用'), message: t('Read from SAP again.', '请从 SAP 重新读取。') })
+    } finally { inFlight.current = false; setCacheLoading(false) }
+  }
   const execute = (): void => {
     if (!snapshot) return
-    const request = { snapshotId: snapshot.id, edits: snapshot.records.map(row => {
-      const dates = edits.get(row.apqp)!
-      const sdComments = Object.fromEntries(Object.entries(comments.get(row.apqp) ?? {}).filter(([group, text]) => text.trim()
-        && dates[group === 'g' ? 'gActualDate' : 'hActualDate'] !== row.dates[group === 'g' ? 'gActualDate' : 'hActualDate']))
-      return { apqp: row.apqp, dates, ...(Object.keys(sdComments).length ? { sdComments } : {}) }
-    }), confirmed: true as const }
+    const request = { snapshotId: snapshot.id, edits: snapshot.records.map(row => ({ apqp: row.apqp, dates: edits.get(row.apqp)! })), confirmed: true as const }
     setOutcome(null)
     void work(async () => {
       const result = await api.executeApqpDateChanges(request)
       if (result.success) {
         if (result.update.stageOnly) {
-          setOutcome({ update: result.update, resultPath: result.resultPath }); setStagedPending(true)
-          notify({ kind: 'warning', title: t('Filled — NOT SAVED', '已填入，未保存'),
-            message: t('One record was checked/filled. No Save was sent. Inspect SAP, then manually save or discard and return to the list.', '本次仅检查/填入 1 条，未发送 Save。请在 SAP 核对后手动保存或放弃，并返回列表。') })
+          const filled = (result.update.staged ?? 0) > 0, failures = result.update.failed ?? 0
+          setOutcome({ update: result.update, resultPath: result.resultPath }); setStagedPending(filled); setNeedsSapReview(current => current || filled)
+          const message = t(`${failures} record issue(s) safely skipped; ${result.update.staged ?? 0} APQP filled, NOT SAVED. ${filled ? 'Inspect SAP and manually save or discard before another test.' : 'No inputs were left staged. Review the listed reasons.'}`,
+            `安全跳过 ${failures} 条问题记录，填入 ${result.update.staged ?? 0} 条，未保存。${filled ? '请先在 SAP 核对并手动保存或放弃，再测试下一条。' : '未留下待保存输入，请查看下方原因。'}`)
+          notify({ kind: 'warning', title: filled ? t('Filled — NOT SAVED', '已填入，未保存') : t('Input test finished', '试填检查完成'), message })
+          if (failures) setNotice({ title: t('Some records were skipped', '部分记录已跳过'), message })
           return
         }
         setSnapshot(result.snapshot)
@@ -118,25 +139,26 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
           const before = snapshot.records.find(item => item.apqp === row.apqp)!
           const desired = edits.get(row.apqp)!
           const processed = APQP_DATE_KEYS.every(key => desired[key] === before.dates[key] || desired[key] === row.dates[key])
-          return [row.apqp, { ...(!result.update.cancelled || processed ? row.dates : desired) }]
+          return [row.apqp, { ...(processed ? row.dates : desired) }]
         })))
         setOutcome({ update: result.update, resultPath: result.resultPath })
-        setComments(current => new Map([...current].filter(([apqp]) => result.update.cancelled
-          && result.snapshot.records.some(row => row.apqp === apqp && APQP_DATE_KEYS.some(key => edits.get(apqp)?.[key] !== row.dates[key])))))
-        const title = result.update.cancelled ? t('Stopped safely', '已安全停止') : t('APQP dates updated', 'APQP 日期已修改')
-        const message = t(`${result.update.succeeded} APQPs saved and verified; ${result.update.skipped} unchanged.`, `${result.update.succeeded} 条 APQP 已保存并复读验证；${result.update.skipped} 条无需修改。`)
-        notify({ kind: result.update.cancelled ? 'warning' : 'success', title, message })
+        const failures = result.update.failed ?? 0
+        const title = result.update.cancelled ? t('Stopped safely', '已安全停止') : failures ? t('Some records were skipped', '部分记录已跳过') : t('APQP dates updated', 'APQP 日期已修改')
+        const message = t(`${result.update.succeeded} APQPs saved, ${result.update.savedFields ?? 0} dates updated; ${failures} records skipped.`, `成功保存 ${result.update.succeeded} 条 APQP，更新 ${result.update.savedFields ?? 0} 个日期；跳过 ${failures} 条。`)
+        notify({ kind: result.update.cancelled || failures ? 'warning' : 'success', title, message })
+        if (failures) setNotice({ title, message })
       }
       else showError(result)
     }, 'update')
   }
   const reset = (): void => {
-    if (inFlight.current || stagedPending) return
-    setQuery({ project: '', userId: '', environment: 'PROD' }); setSnapshot(null); setEdits(new Map()); setComments(new Map()); setOutcome(null)
+    if (inFlight.current) return
+    setStagedPending(false)
+    setSnapshot(null); setEdits(new Map()); setOutcome(null)
     setError(''); setDetails(''); setComparison(null); setErrorLog(''); setProgress(emptyProgress); setPage(0); setNotice(null); setSearch(''); setOrder('original')
   }
   const criteria = (key: keyof ApqpDateQuery, value: string): void => {
-    setQuery(current => ({ ...current, [key]: value })); setSnapshot(null); setOutcome(null); setEdits(new Map()); setComments(new Map()); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setPage(0); setSearch(''); setOrder('original')
+    setQuery(current => ({ ...current, [key]: value })); setSnapshot(null); setOutcome(null); setEdits(new Map()); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setPage(0); setSearch(''); setOrder('original')
   }
   const changed = snapshot?.records.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== edits.get(row.apqp)?.[key])).length ?? 0
   const validInput = /^[A-Za-z0-9_/-]{1,32}$/.test(query.project) && /^[A-Za-z0-9_/-]{1,32}$/.test(query.userId)
@@ -144,29 +166,32 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
   const hiddenEdits = changed - visible.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== edits.get(row.apqp)?.[key])).length
   const steps: Record<string, string> = { PREPARING: t('Connecting / checking SAP', '连接及检查 SAP'), READING_DATES: t('Reading dates', '读取日期'), READ_COMPLETE: t('Dates read', '日期读取完成'),
-    LOCATING_APQP: t('Locating edited APQP', '定位待修改 APQP'), STAGED_READY_NOT_SAVED: t('Filled — NOT SAVED', '已填入，未保存'),
+    LOCATING_APQP: t('Finding the record', '正在查找记录'), NAVIGATING_APQP: t('Opening APQP', '正在打开 APQP'), STAGED_READY_NOT_SAVED: t('Not saved', '未保存'), RECORD_SKIPPED_BEFORE_INPUT: t('Skipped; continuing', '已跳过，继续下一条'),
     CHECKING_DATES: t('Checking current dates', '检查当前日期'), CURRENT_VALUES_VERIFIED: t('Current dates checked', '当前日期已核对'), SD_CONFIRM_INPUT_DISPATCHED: t('Selecting SD conf', '勾选 SD conf'), SD_COMMENT_INPUT_DISPATCHED: t('Entering SD Comment', '填写 SD Comment'), DATE_INPUT_DISPATCHED: t('Entering dates', '输入日期'), SAVE_DISPATCHED: t('Saving — do not repeat', '正在保存，请勿重复操作'), SAVE_CONFIRMATION_DISPATCHED: t('Confirming Save', '确认保存'),
-    SAVE_ACKNOWLEDGED: t('Checking saved values', '核对保存结果'), UPDATE_VERIFIED: t('Saved and re-read', '已保存并复读验证'), SAVE_OUTCOME_UNCERTAIN: t('Review SAP before retrying', '请先核查 SAP，勿直接重试') }
+    SAVE_ACKNOWLEDGED: t('Checking the result', '正在确认结果'), UPDATE_VERIFIED: t('Saved', '保存完成'), SAVE_OUTCOME_UNCERTAIN: t('Check SAP before trying again', '请先检查 SAP，不要重复运行') }
 
   return <>
     <AutomationTaskToolbar status={running ? phase === 'query' ? t('Reading SAP', '正在读取 SAP') : t('Updating SAP', '正在修改 SAP') : snapshot ? t(`${snapshot.records.length} APQPs · ${changed} edited`, `${snapshot.records.length} 条 APQP · 已编辑 ${changed} 条`) : t('Find your APQPs', '查找你的 APQP')}
-      hint={running ? t('Keep SAP open. Do not edit its working window.', '请保持 SAP 打开，期间不要操作其工作窗口。') : capabilities.stageOnly ? t('Test only: fill one record, leave its detail open, and never press Save.', '仅测试：每次填入一条，停在详情，不点击 Save。') : snapshot?.environment === 'PROD'
-        ? t('Production · 949 — Update saves edited dates to SAP. Only changed fields are written; conflicts stop the update.', '正式系统 · 949 — 点击“修改”将真实保存已编辑日期。只写入变更字段，遇到冲突停止。')
-        : t('Find → Edit dates → Update. SAP conflicts are checked automatically; no separate preview step.', '查找 → 编辑日期 → 点击修改。系统自动检查 SAP 冲突，无需单独预览。')}
-      startLabel={stagedPending ? t('Filled — NOT SAVED', '已填入，未保存') : snapshot ? capabilities.stageOnly ? t(`Test fill ${Math.min(changed, 1)} APQP`, `测试填入 ${Math.min(changed, 1)} 条 APQP`) : t(`Update ${changed} ${changed === 1 ? 'APQP' : 'APQPs'}`, `修改 ${changed} 条 APQP`) : t('Find APQPs', '查找 APQP')}
-      canRun={!stagedPending && (snapshot ? changed > 0 : validInput)} running={running} stopping={stopping} locked={running} canClear={!stagedPending && Boolean(query.project || query.userId || snapshot || error)}
+      hint={running ? t('Keep SAP open. Do not use the window being automated.', '请保持 SAP 打开，不要操作正在执行任务的窗口。') : t('Find APQPs, edit the dates, then save.', '查找 APQP，修改日期，然后保存。')}
+      startLabel={stagedPending ? t('Check SAP first', '请先检查 SAP') : snapshot ? t(`Save dates (${changed})`, `保存 ${changed} 条修改`) : t('Find APQPs', '查找 APQP')}
+      canRun={!cacheLoading && !stagedPending && (snapshot ? changed > 0 : validInput)} running={running} stopping={stopping} locked={running || cacheLoading} canClear={Boolean(query.project || query.userId || snapshot || error || stagedPending)}
+      clearWarning={needsSapReview ? t('Handle the unsaved work in SAP first. Clearing this page does not save or discard SAP changes.', '请先到 SAP 处理上次未保存的内容。清空本页不会保存或放弃 SAP 中的修改。') : undefined}
       onStart={snapshot ? execute : find} onStop={() => { if (!stopping) { setStopping(true); void api.cancelApqp().then(result => { if (!result.success) setStopping(false) }).catch(() => setStopping(false)) } }} onClear={reset} />
     <div className={styles.queryGrid}>
     <section className={`card ${styles.section}`} aria-label={t('Find APQPs', '查找 APQP')}>
       <h3>{t('1. Find APQPs', '1. 查找 APQP')}</h3>
-      <p className={styles.copy}>{t('Enter the project and business User ID. Query Plant is C100; shared Plant 0000 records are also valid. This is a read-only query.', '填写项目和业务 User ID，查询工厂固定为 C100；结果中的跨工厂记录 0000 同样有效。这一步只查询，不修改 SAP。')}</p>
+      <p className={styles.copy}>{t('Enter the project and responsible User ID. Uses SAP 949, Plant C100.', '填写项目编号和负责人的 User ID。系统固定使用 SAP 949，工厂 C100。')}</p>
       <div className={styles.fields}>
-        <ApqpProjectInput value={query.project} projects={projects} disabled={running || stagedPending} onChange={value => criteria('project', value)} />
-        <label className="field"><span>User ID *</span><input className="input" value={query.userId} maxLength={32} disabled={running || stagedPending} onChange={event => criteria('userId', event.target.value.trim().toUpperCase())} /></label>
-        <label className="field"><span>{t('SAP environment', 'SAP 环境')}</span><select aria-label={t('SAP environment', 'SAP 环境')} className="select" value={query.environment} disabled={running || stagedPending} onChange={event => criteria('environment', event.target.value)}><option value="PROD">Production · 949</option><option value="QA">QA · 321</option></select></label>
+        <ApqpProjectInput value={query.project} projects={projects} disabled={running || cacheLoading || stagedPending} onChange={value => criteria('project', value)} />
+        <label className="field"><span>User ID *</span><input className="input" value={query.userId} maxLength={32} disabled={running || cacheLoading || stagedPending} onChange={event => criteria('userId', event.target.value.trim().toUpperCase())} /></label>
       </div>
-      <p className={styles.copy}>{t('User ID is the APQP business filter, not your SAP sign-in. Save your current SAP work first. The Hub reuses one window and opens ZMFM050035 automatically, even from another T-code. Sign-in or save/discard prompts need your attention; no new sessions are created.', 'User ID 是 APQP 业务筛选条件，不是 SAP 登录账号。请先保存当前 SAP 工作。Hub 复用原窗口，即使停在其他 T-code，也会自动进入 ZMFM050035；登录或保存/放弃提示需手动处理，不会新建会话。')}</p>
-      {snapshot && <div className={styles.actions}><button className="button" disabled={running || !validInput} onClick={find}>{stagedPending ? t('SAP handled — Find again', '已在 SAP 处理，重新查询') : t('Find again', '重新查找')}</button><button className="button" disabled={running} onClick={() => openResult(snapshot.resultPath)}>{t('Open read result', '打开读取结果')}</button></div>}
+      <p className={styles.copy}>{t('Save any unfinished SAP work before starting. If SAP asks you to sign in or handle a message, follow its prompt.', '开始前请保存 SAP 中未完成的工作。如 SAP 要求登录或确认消息，请先按提示处理。')}</p>
+      <div className={styles.actions}>
+        <button className="button" disabled={running || cacheLoading || !validInput || changed > 0 && !stagedPending} onClick={() => { void loadCached() }}>{cacheLoading ? t('Loading…', '正在载入…') : t('Use previous results', '使用上次结果')}</button>
+        {snapshot && <button className="button" disabled={running || cacheLoading || !validInput} onClick={find}>{t('Refresh from SAP', '重新查询 SAP')}</button>}
+      </div>
+      {snapshot?.cached && <p className={`${styles.notice} ${styles.warning}`} role="note">{t(`Results from ${new Date(snapshot.createdAt).toLocaleString()}. For the latest dates, refresh from SAP.`, `这是 ${new Date(snapshot.createdAt).toLocaleString()} 的查询结果。如需最新日期，请重新查询 SAP。`)}</p>}
+      {needsSapReview && <p className={`${styles.notice} ${styles.warning}`} role="status">{t('SAP may contain unsaved changes. Check them in SAP before continuing.', 'SAP 中可能有未保存的修改。请先到 SAP 检查后再继续。')}</p>}
     </section>
     <aside ref={runPanel} className={`card ${styles.section} ${styles.runPanel}`} aria-label={t('Run progress', '执行进度')}>
       <h3>{t('Run progress', '执行进度')}</h3>
@@ -190,8 +215,7 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     </section>}
     {snapshot && <section ref={editorSection} className={`card ${styles.section}`} aria-label={t('Edit APQP dates', '编辑 APQP 日期')}>
       <h3>{t('2. Edit only the dates you need', '2. 只修改需要变更的日期')}</h3>
-      <p className={styles.copy}>{t('Dates correspond to SAP RTS Action & Closure and Total PPAP. Blank does not mean clear: populated dates cannot be deleted here.', '日期对应 SAP 的 RTS Action & Closure 和 Total PPAP。空白不代表清除：这里不能通过删除已有日期来清空 SAP。')}</p>
-      <p className={styles.copy}>{t('Changing an actual date automatically selects its matching SD conf and shows an optional SD Comment below that date. Blank keeps the SAP comment; new text replaces it. Planned-date-only edits do not change SD conf or comments.', '修改实际日期时，系统自动勾选对应 SD conf，日期下方会出现选填 SD Comment。留空保留 SAP 原备注，填写则替换。只改计划日期时，不改勾选或备注。')}</p>
+      <p className={styles.copy}>{t('Edit the dates below, then save using the button above. Grey dates cannot be changed. Leaving a date blank does not delete it from SAP.', '在下表修改日期，然后点击上方“保存”。灰色日期不可修改，留空不会删除 SAP 中的原日期。')}</p>
       <div className={styles.tableControls}>
         <label className="field"><span>{t('Search APQPs', '搜索 APQP')}</span><input type="search" className="input" value={search} maxLength={100} disabled={running}
           placeholder={t('Material, Supplier Parma or APQP', '物料号、Supplier Parma 或 APQP 编号')} onChange={event => { setSearch(event.target.value); setPage(0) }} /></label>
@@ -203,16 +227,11 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
         {hiddenEdits > 0 && <strong>{t(` ${hiddenEdits} edited APQP(s) are hidden by this search. Execution still uses the original SAP order.`, ` 当前搜索隐藏了 ${hiddenEdits} 条已编辑记录；执行仍按 SAP 原始顺序处理。`)}</strong>}</p>
       <fieldset className={styles.editorFields} disabled={running || stagedPending}><div className={styles.table}><table><thead><tr><th>APQP</th><th>{t('Material', '物料')}</th><th>Supplier Parma</th>{APQP_DATE_KEYS.map(key => <th key={key}>{label(key)}</th>)}</tr></thead><tbody>
         {visible.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(row => <tr key={row.apqp}>
-          <td>{row.apqp}</td><td>{row.material}</td><td>{row.vendor}</td>
+          <td>{row.apqp}{snapshot.lastAttempt?.apqp === row.apqp && <small className={styles.rowState}>{snapshot.lastAttempt.status === 'STAGED' ? t('Last input: save unconfirmed', '上次已填入，保存未确认') : t('Last attempt needs review', '上次未完成，请核查')}</small>}</td><td>{row.material}</td><td>{row.vendor}</td>
           {APQP_DATE_KEYS.map(key => <td key={key} data-changed={row.dates[key] !== edits.get(row.apqp)?.[key]}>
-            <input type="date" className="input" aria-label={`${row.apqp} ${label(key)}`} value={edits.get(row.apqp)?.[key] ?? ''} disabled={running || !row.readable}
+            <input type="date" className="input" aria-label={`${row.apqp} ${label(key)}`} value={edits.get(row.apqp)?.[key] ?? ''} disabled={running || !row.readable || !row.editable[key]}
               onChange={event => { const value = event.target.value || null; setEdits(current => new Map(current).set(row.apqp, { ...current.get(row.apqp)!, [key]: value })); setOutcome(null); setError('') }} />
-            {key.endsWith('ActualDate') && row.dates[key] !== edits.get(row.apqp)?.[key] && <label className={styles.commentField}>
-              <span>SD Comment {t('(optional)', '（选填）')}</span>
-              <input type="text" className="input" aria-label={`${row.apqp} ${key === 'gActualDate' ? 'RTS' : 'Total PPAP'} SD Comment`}
-                placeholder={t('Blank keeps SAP comment', '留空保留 SAP 原备注')} maxLength={255} value={comments.get(row.apqp)?.[key === 'gActualDate' ? 'g' : 'h'] ?? ''} disabled={running || !row.readable}
-                onChange={event => { const value = event.target.value; setComments(current => new Map(current).set(row.apqp, { ...current.get(row.apqp), [key === 'gActualDate' ? 'g' : 'h']: value })); setOutcome(null) }} />
-            </label>}
+            {!row.editable[key] && <small className={styles.rowState}>{t('Cannot be changed in SAP', 'SAP 不允许修改')}</small>}
           </td>)}
         </tr>)}
       </tbody></table></div></fieldset>
@@ -221,12 +240,14 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
       {snapshot.records.length > 0 && !visible.length && <p>{t('No APQPs match this search. Clear the search to show all records.', '没有匹配的 APQP，请清空搜索以显示全部记录。')}</p>}
     </section>}
     {outcome && <section className={`card ${styles.section}`} aria-label={t('Date update result', '日期修改结果')}>
-      <h3>{outcome.update.stageOnly ? t('Test input — NOT SAVED', '测试填入 — 未保存') : t('Date update result', '日期修改结果')}</h3>
-      {outcome.update.stageOnly && <p className={`${styles.notice} ${styles.warning}`}>{t('No Save was sent. Only the first edited record was checked/filled; remaining edits were not processed. Leave this page and SAP detail unchanged until you inspect the input. Manually save or discard in SAP, return to the list, then use SAP handled — Find again.', '未发送 Save。本次只检查/填入第一条待改记录，其余未处理。请先检查 SAP 详情中的输入，再手动保存或放弃、返回列表，之后点击“已在 SAP 处理，重新查询”。')}</p>}
-      <PreviewSummary metrics={[{ label: t('Edited APQPs', '待改 APQP'), value: outcome.update.total }, ...(outcome.update.stageOnly ? [{ label: t('Filled — NOT SAVED', '已填入 — 未保存'), value: outcome.update.staged ?? 0 }] : []), { label: t('Saved and verified', '已保存并验证'), value: outcome.update.succeeded }, { label: t('Unchanged', '无需修改'), value: outcome.update.skipped }]} />
+      <h3>{t('Date update result', '日期修改结果')}</h3>
+      {outcome.update.stageOnly && <p className={`${styles.notice} ${styles.warning}`}>{t(`No Save was sent. Checked ${outcome.update.processed}/${outcome.update.total}; safely skipped ${outcome.update.failed ?? 0} record issue(s), filled ${outcome.update.staged ?? 0}. Stop after the first filled detail; manually handle it in SAP before testing another record.`, `未发送 Save。已检查 ${outcome.update.processed}/${outcome.update.total}，安全跳过 ${outcome.update.failed ?? 0} 条问题记录，填入 ${outcome.update.staged ?? 0} 条。成功填入一条后即停止，请先手动处理 SAP 详情再测试下一条。`)}</p>}
+      <PreviewSummary metrics={[{ label: t('APQPs', 'APQP 数量'), value: outcome.update.total }, { label: t('Skipped', '已跳过'), value: outcome.update.failed ?? 0 }, { label: t('Saved', '保存成功'), value: outcome.update.succeeded }, { label: t('Date fields saved', '已保存日期字段'), value: outcome.update.savedFields ?? 0 }, { label: t('Unchanged', '无需修改'), value: outcome.update.skipped }]} />
+      {Boolean(outcome.update.issues?.length) && <div className={`${styles.table} ${styles.compact}`} role="region" aria-label={t('Skipped record reasons', '跳过原因')}><table><thead><tr><th>APQP</th><th>{t('Material', '物料')}</th><th>Supplier Parma</th><th>{t('Reason — no input / Save', '原因（未输入、未保存）')}</th></tr></thead><tbody>
+        {outcome.update.issues!.map(item => <tr key={item.apqp}><td>{item.apqp}</td><td>{item.material}</td><td>{item.vendor}</td><td style={{ whiteSpace: 'normal' }}>{item.code === 'APQP_DATE_READ_ONLY' ? t('SAP does not allow this date to be changed.', 'SAP 不允许修改此日期，请保留原日期。') : zh ? item.messageZh : item.message}</td></tr>)}
+      </tbody></table></div>}
       <button className="button" onClick={() => openResult(outcome.resultPath)}>{t('Open update result', '打开修改结果')}</button>
     </section>}
-    <p className={`${styles.notice} ${styles.warning}`} role="note">{zh ? capabilities.messageZh : capabilities.message}</p>
     {details && <details className={styles.details}><summary>{t('View Details', '查看详情')}</summary><pre>{details}</pre>{errorLog && <button className="button" disabled={running} onClick={() => openResult(errorLog)}>{t('Open diagnostic record', '打开诊断记录')}</button>}</details>}
     <NoticeConfirmationModal notice={notice} onClose={() => setNotice(null)} />
   </>

@@ -19,6 +19,8 @@ export interface ExecutionHistoryEntry {
   performance?: PerformanceSample
   apqpDateAction?: 'query' | 'preview' | 'update'
   apqpStaged?: number
+  /** Number of changed APQP date fields saved and verified, never inferred from rows. */
+  apqpDateFieldsSaved?: number
   /** App-owned interaction directory ID; never a renderer-provided path. */
   diagnosticRunId?: string
   status: ExecutionHistoryStatus

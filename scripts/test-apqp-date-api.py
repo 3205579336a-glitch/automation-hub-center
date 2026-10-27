@@ -9,13 +9,30 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'resources/rpa'))
-from apqp_date_api import run, save_summary, WRITE_GATE, IDENTITY_COLUMNS
+from apqp_date_api import run, save_summary, WRITE_GATE, IDENTITY_COLUMNS, locate_update_targets
 from apqp_dates import ApqpDateIssue, DATE_FIELDS
 from apqp_date_fakes import DateSession, application, legacy, enable_bulk_dates
 from apqp_date_discovery import ApqpDiscovery
 
 
 class ApiTests(unittest.TestCase):
+    def test_fresh_query_hash_index_avoids_re_reading_all_48_ids_for_first_target(self):
+        self.session = DateSession(count=48)
+        self.app = application(self.session)
+        from apqp_date_sessions import select_reader, target_environment
+        from types import SimpleNamespace
+        with target_environment(legacy, 'PROD'):
+            reader = select_reader(legacy, self.app, SimpleNamespace(mode='discover', session_id='', allow_navigation=True), threading.Event())
+            grid = reader.discover('775773', 'EE00221', scroll=True, required_columns=IDENTITY_COLUMNS, allow_navigation=True, batch_rows=True)
+            target = dict(apqp='2000000047', material='10000047', vendor='0041889', plant='C100', project='775773')
+            before = reader.metrics['gridCellReads']
+            evidence, found = locate_update_targets(reader, [target], '775773', 'EE00221', fresh_scan=grid)
+            self.assertEqual(found[target['apqp']][0], 47)
+            self.assertEqual(reader.metrics['gridCellReads'] - before, 6, 'Only six fresh identity cells, not 48 IDs plus six cells')
+            reader.latest['grid'] = evidence
+            reader.open_observed_row(47)
+            self.assertEqual(self.session.state, 'detail')
+
     def setUp(self):
         self.session = DateSession(count=3)
         self.app = application(self.session)
@@ -81,7 +98,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.session.calls, [])
         self.assertEqual(len(result['records']), 1)
 
-    def test_startup_refuses_ambiguous_business_windows_and_existing_apqp_detail(self):
+    def test_startup_refuses_ambiguous_windows_but_explicit_query_can_leave_a_clean_detail(self):
         self.session.state, self.session.Info.Transaction = 'other', 'ME11'
         other = DateSession()
         other.state, other.Info.Transaction, other.Id = 'other', 'ME13', '/app/con[0]/ses[1]'
@@ -91,8 +108,8 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.session.calls + other.calls, [])
         self.app = application(self.session)
         self.session.state, self.session.Info.Transaction = 'detail', legacy.TCODE
-        with self.assertRaises(ApqpDateIssue): self.snapshot()
-        self.assertEqual(self.session.calls, [])
+        self.snapshot()
+        self.assertEqual(self.session.calls[0], ('navigate', legacy.TCODE))
 
     def test_navigation_save_or_discard_prompt_is_not_clicked_or_replayed(self):
         self.session.state, self.session.Info.Transaction = 'other', 'ME11'
@@ -201,7 +218,7 @@ class ApiTests(unittest.TestCase):
     def test_preview_re_reads_only_edited_records_and_uses_three_way_comparison(self):
         snapshot = self.snapshot()
         self.session.calls.clear()
-        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gActualDate', '2026-11-01'))
+        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('fPlanDate', '2026-11-01'))
         self.assertEqual(result['preview']['changedRecords'], 1)
         self.assertEqual(result['preview']['changedFields'], 1)
         self.assertEqual(result['preview']['unchanged'], 2)
@@ -209,7 +226,7 @@ class ApiTests(unittest.TestCase):
 
     def test_sap_concurrent_change_is_a_conflict_not_a_write(self):
         snapshot = self.snapshot()
-        self.session.values[snapshot['records'][0]['apqp']][0] = '22.10.2026'
+        self.session.values[snapshot['records'][0]['apqp']][1] = '22.10.2026'
         result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gPlanDate', '2026-11-01'))
         self.assertEqual(result['preview']['conflicts'], 1)
         self.assertEqual(result['preview']['changes'], [])
@@ -223,8 +240,8 @@ class ApiTests(unittest.TestCase):
 
     def test_already_applied_changes_need_no_save(self):
         snapshot = self.snapshot()
-        self.session.values[snapshot['records'][0]['apqp']][1] = '01.11.2026'
-        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gActualDate', '2026-11-01'))
+        self.session.values[snapshot['records'][0]['apqp']][0] = '01.11.2026'
+        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('fPlanDate', '2026-11-01'))
         self.assertEqual(result['preview']['changedFields'], 0)
         self.assertEqual(result['preview']['unchanged'], 3)
 
@@ -285,12 +302,12 @@ class ApiTests(unittest.TestCase):
         self.session.grid.rows[0][3] = '0000'
         snapshot = self.snapshot()
         self.assertEqual(snapshot['records'][0]['plant'], '0000')
-        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gActualDate', '2026-11-01'))
+        result = self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('fPlanDate', '2026-11-01'))
         self.assertEqual(result['records'][0]['plant'], '0000')
         self.assertEqual(result['preview']['changedFields'], 1)
         self.session.grid.rows[0][3] = 'C100'
         with self.assertRaises(ApqpDateIssue) as issue:
-            self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gActualDate', '2026-11-01'))
+            self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('fPlanDate', '2026-11-01'))
         self.assertEqual(issue.exception.code, 'APQP_IDENTITY_CHANGED')
 
     def test_business_query_reads_only_six_identity_columns_even_in_104_column_grid(self):
@@ -324,18 +341,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.session.state, 'detail')
         self.assertNotIn(('back', 'detail'), self.session.calls)
 
-    def test_qa_query_uses_actual_ceq_client_100(self):
+    def test_hub_date_management_rejects_qa_and_only_uses_949(self):
         self.session = DateSession(count=1, system='CEQ')
         self.app = application(self.session)
         self.query['environment'] = 'QA'
-        result = self.snapshot()
-        self.assertEqual(result['session']['system'], 'CEQ')
-        self.assertEqual(result['session']['client'], '100')
+        with self.assertRaises(ApqpDateIssue) as caught: self.snapshot()
+        self.assertEqual(caught.exception.code, 'APQP_DATE_PRODUCTION_ONLY')
+        self.assertEqual(self.session.calls, [])
 
     def test_preview_will_not_use_another_account_or_changed_identity(self):
         snapshot = self.snapshot()
         self.session.Info.User = 'OTHER'
-        with self.assertRaises(ApqpDateIssue): self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('gActualDate', '2026-11-01'))
+        with self.assertRaises(ApqpDateIssue): self.preview(snapshot, lambda edits: edits[0]['dates'].__setitem__('fPlanDate', '2026-11-01'))
 
     def test_missing_field_does_not_become_a_valid_blank(self):
         self.session.dates.pop(DATE_FIELDS[0].control_id)

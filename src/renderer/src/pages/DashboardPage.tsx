@@ -85,13 +85,13 @@ export function DashboardPage({
 
       <section className={`card ${styles.savings}`} aria-label={zh ? '预计节省时间' : 'Estimated time saved'}>
         <div><h3>{zh ? '预计节省时间' : 'Estimated time saved'}</h3><p>{zh ? '根据本机保留记录和当前人工耗时基准估算。' : 'Estimated from retained local history and current manual-time assumptions.'}</p></div>
-        {savings && <span style={{marginTop:'-10px'}}>{zh ? '人工基准：Key User 已校准' : 'Manual baseline: key-user calibrated' }</span>}
         <div className={styles.savingsMetrics}>
           <div><span>{zh ? '今日' : 'Today'}</span><strong>{savingsLoading ? '…' : savings ? savedTime(savings.today.savedMs, zh) : '—'}</strong><small>{savings ? `${savings.today.runs} ${zh ? '次已确认运行' : 'confirmed runs'}` : zh ? '统计暂不可用' : 'Statistics unavailable'}</small></div>
           <div><span>{zh ? '最近 30 天' : 'Last 30 days'}</span><strong>{savingsLoading ? '…' : savings ? savedTime(savings.last30Days.savedMs, zh) : '—'}</strong><small>{savings ? `${savings.last30Days.successfulUnits} ${zh ? '个成功分组／记录' : 'successful groups / records'}` : '—'}</small></div>
         </div>
         {savings && <details><summary>{zh ? '计算依据与基准' : 'Calculation and baselines'}</summary>
           <p>{zh ? '人工预计耗时 = 已确认成功数量 × 人工单次耗时；预计节省 = 人工预计耗时 − 整批实际耗时（包含 SAP 等待和人工暂停，下限为 0）。并发不会重复扣除实际耗时。' : 'Manual estimate = confirmed successful units × manual seconds per unit. Savings = manual estimate − full batch elapsed time, including SAP and human waits, floored at zero. Worker counts never multiply elapsed time.'}</p>
+          <p>{zh ? `APQP 日期修改：每个已保存并验证的字段按人工 1 分钟估算，再扣除整批实际耗时。最近 30 天已完成 ${savings.last30Days.successfulDateFields ?? 0} 个日期字段。` : `APQP date updates: 1 manual minute per saved and verified field, minus the full batch time. ${savings.last30Days.successfulDateFields ?? 0} date fields completed in the last 30 days.`}</p>
           <p>{zh ? '失败、取消、演练、跳过、未核查和缺少数量／耗时的记录不计入成功量。删除历史或 60 天清理后，统计仅反映仍保留的记录。' : 'Failed, cancelled, dry-run, skipped, unresolved or incomplete records are not counted as successful work. Statistics reflect only retained history after history deletion or retention cleanup.'}</p>
           <p>{savings.calibrated ? zh ? '基准：Key User 已标记校准。' : 'Baseline: marked calibrated by a key user.' : zh ? '基准：系统内置参考值，尚未校准；无需用户配置。' : 'Baseline: built-in reference assumptions, not calibrated. No user configuration is required.'}</p>
           <ul>{Object.entries(savings.baselines).map(([id, seconds]) => <li key={id}>{id === 'create-rfq' ? 'RFQ' : id === 'me12-batch' ? 'SLT' : id === 'me01-source-list' ? 'Source List' : 'APQP'}: {seconds} {zh ? '秒' : 'sec'} / {id === 'create-rfq' ? zh ? '分组' : 'group' : zh ? '记录' : 'record'}</li>)}</ul>

@@ -22,6 +22,7 @@
 .tableControls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .6fr); gap: 16px; align-items: end; }
 .viewSummary { margin: 10px 0 0; color: var(--text-muted); line-height: 1.6; font-size: .9rem; }
 .viewSummary strong { color: var(--warning-strong); }
+.rowState { display: block; max-width: 160px; margin-top: 6px; white-space: normal; color: var(--warning-strong); line-height: 1.5; }
 .runPanel { border-top: 3px solid var(--primary); }
 .runFacts { margin: 0; }
 .runFacts > div { display: grid; grid-template-columns: minmax(85px, .8fr) minmax(0, 1.2fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); }

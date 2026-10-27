@@ -1,8 +1,4 @@
-"""Hub APQP date query/preview protocol. Deliberately contains NO SAP date writes.
-
-The execute boundary rejects even direct engine calls until controlled QA
-acceptance proves detail identity, direct assignment and Save/re-read semantics.
-"""
+"""Hub APQP planned-date protocol: query, changed-only Save and reopen verification."""
 import json
 import os
 from pathlib import Path
@@ -14,7 +10,7 @@ from uuid import uuid4
 
 from apqp_date_discovery import ApqpDiscovery
 from apqp_date_sessions import select_reader, target_environment
-from apqp_dates import ApqpDateIssue, compare_dates, fingerprint
+from apqp_dates import ApqpDateIssue, FIELD_SCHEMA, compare_dates, fingerprint
 import apqp_date_update as date_update
 from hub_user_interaction import HubStopped, HubUserInteraction
 
@@ -110,7 +106,7 @@ def read_records(reader, grid, wanted, emit, persist):
                  'SAP 四个日期中存在不可读取的值，不会将其当作空白日期。', identity['apqp'])
         dates = {key: value['date'] for key, value in detail['fields'].items()}
         records.append({key: identity[key] for key in ('apqp', 'material', 'vendor', 'plant', 'project')}
-                       | dict(dates=dates, readable=True))
+                       | dict(dates=dates, readable=True, editable={key: value.get('changeableObserved') is True for key, value in detail['fields'].items()}))
         persist(records)  # Preserve each completed read before attempting any return/navigation.
         reader.return_read_detail()
         emit('record', message=f"Read APQP {identity['apqp']}.", current=number, total=len(wanted), status='READ', elapsedMs=round((time.monotonic() - started) * 1000),
@@ -127,6 +123,8 @@ def run(request, legacy, app, stop, emit, persist, checkpoint=None):
     if (query.get('environment') not in {'QA', 'PROD'} or any(not isinstance(query.get(key), str)
             or not re.fullmatch(r'[A-Za-z0-9_/-]{1,32}', query[key]) for key in ('project', 'userId'))):
         raise ValueError('Invalid NPL/User/environment.')
+    if query['environment'] != 'PROD':
+        fail('APQP_DATE_PRODUCTION_ONLY', 'APQP date management uses SAP 949.', 'APQP 日期管理固定使用 SAP 949。')
     if action == 'execute' and not date_update.writes_enabled(query['environment']):
         fail('APQP_DATE_PRODUCTION_LOCKED' if query['environment'] == 'PROD' else WRITE_GATE,
              'Date writes are not enabled for this environment.', '此环境的日期写入尚未开放。')
@@ -144,7 +142,7 @@ def run(request, legacy, app, stop, emit, persist, checkpoint=None):
             queue = identities(grid, query['project'], query['userId'])
             records = read_records(reader, grid, list(queue.values()), emit, persist)
             reader.metrics['totalMs'] = round((time.monotonic() - started) * 1000)
-            return dict(records=records, session=reader.latest['session'], stageOnly=date_update.STAGE_ONLY, queryEvidence=reader.latest.get('query'),
+            return dict(records=records, fieldSchema=FIELD_SCHEMA, session=reader.latest['session'], stageOnly=date_update.STAGE_ONLY, queryEvidence=reader.latest.get('query'),
                         performance=reader.metrics,
                         findings=dict(uniqueAcrossReturnedResult=True, businessIdentityOnDetailConfirmed=False,
                                       allMatchingRecordsConfirmed=False, writesEnabled=False))
@@ -191,14 +189,16 @@ def run(request, legacy, app, stop, emit, persist, checkpoint=None):
         return dict(records=observations, session=session, preview=preview)
 
 
-def locate_update_targets(reader, originals, project, owner):
+def locate_update_targets(reader, originals, project, owner, *, fresh_scan=None):
     """Scan only APQP numbers, then verify all six identity cells of targets.
 
     Never trust a cached row position: row fingerprints and detail identity are
     still verified immediately before input. Scan all IDs to detect duplicates.
     """
     started, before = time.monotonic(), reader.metrics['gridCellReads']
-    scan = reader.inspect_grid(10000, scroll=True, required_columns=('APQPNO',), batch_rows=True)
+    # Only reuse the immediately preceding owned query, never an old/cached row
+    # index. After Save the caller always requests a fresh APQP-number scan.
+    scan = fresh_scan if fresh_scan is not None else reader.inspect_grid(10000, scroll=True, required_columns=('APQPNO',), batch_rows=True)
     if not scan['complete']:
         fail('SAP_GRID_INCOMPLETE', 'The APQP number list is incomplete.', 'APQP 编号列表不完整，未打开详情。')
     indices = {}
@@ -244,9 +244,107 @@ def locate_update_targets(reader, originals, project, owner):
     return evidence, queue
 
 
+def run_candidates(request, legacy, app, stop, emit, persist, checkpoint, wanted, desired, comments):
+    """Skip proven pre-input failures; save/reopen each successful planned update.
+
+    A warning/error after any input dispatch, an unknown popup, session/identity
+    change or uncertain navigation is never caught as an ordinary record issue.
+    """
+    query, session = request['query'], request['session']
+    records, issues, staged, skipped, succeeded, saved_fields, reader = [], [], 0, 0, 0, 0, None
+    stage_only = date_update.STAGE_ONLY
+    total = len(wanted)
+    emit('workers', workers=1, current=0, total=total, message='Updating changed APQP planned dates.')
+
+    def record_issue(row, code, en, zh, navigation):
+        item = {key: row[key] for key in ('apqp', 'material', 'vendor')}
+        item.update(code=code, message=en, messageZh=zh, navigation=navigation)
+        checkpoint('RECORD_SKIPPED_BEFORE_INPUT', inputDispatched=False, saveDispatched=False, **item)
+        issues.append(item)
+        emit('record', current=len(records)+len(issues), total=total, status='FAILED', step='RECORD_SKIPPED_BEFORE_INPUT',
+             **{key: row[key] for key in ('apqp', 'material', 'vendor')}, message=en, issue=item)
+
+    for row in wanted:
+        fresh_scan = None
+        if stop.is_set(): fail('CANCELLED', 'APQP update stopped. Review previously recorded results.', '已停止 APQP 修改，请核查已记录的结果。')
+        proposal = compare_dates(row['dates'], row['dates'], desired[row['apqp']])
+        invalid_comment = bool(comments[row['apqp']])
+        if proposal['status'] == 'VALIDATION_ERROR' or invalid_comment:
+            record_issue(row, 'APQP_DATE_VALIDATION_FAILED',
+                         'Planned-date maintenance does not edit SD Comment.' if invalid_comment else 'Populated dates cannot be cleared. Nothing was entered.',
+                         '计划日期维护不修改 SD Comment。' if invalid_comment else '已有日期不能清空，本条未输入。', 'NOT_OPENED')
+            continue
+        if reader is None:
+            reader = select_reader(legacy, app, SimpleNamespace(mode='discover', session_id=session['sessionId'], allow_navigation=True), stop)
+            if reader.latest['session'] != session:
+                fail('SAP_SESSION_LOST', 'Use the original SAP environment/window/account.', '请使用原 SAP 环境、窗口及账号。')
+            # One fresh selection per batch also handles an APQP list left on
+            # unrelated filters. Never infer the target is absent from a stale
+            # list, and never repeat the full per-detail date read here.
+            emit('notice', step='NAVIGATING_APQP', message='Opening ZMFM050035 in the original SAP window.')
+            fresh_scan = reader.discover(query['project'], query['userId'], scroll=True, required_columns=IDENTITY_COLUMNS,
+                                         allow_navigation=True, batch_rows=True)
+            reader.bulk_detail_enabled = True
+        emit('notice', step='LOCATING_APQP', current=len(records)+len(issues), total=total,
+             **{key: row[key] for key in ('apqp', 'material', 'vendor')}, message='Locating the next edited APQP.')
+        grid, _ = locate_update_targets(reader, [row], query['project'], query['userId'], fresh_scan=fresh_scan)
+        reader.latest['grid'] = grid
+        index = next(item['index'] for item in grid['rows'] if item['values']['APQPNO'].strip() == row['apqp'])
+        reader.open_observed_row(index, load_dates=False)
+        input_dispatched = False
+
+        def record_checkpoint(stage, **data):
+            nonlocal input_dispatched
+            if stage in {'SD_CONFIRM_INPUT_DISPATCHED', 'DATE_INPUT_DISPATCHED', 'SD_COMMENT_INPUT_DISPATCHED', 'SAVE_DISPATCHED'}:
+                input_dispatched = True  # Even an ambiguous setter must stop, not skip.
+            checkpoint(stage, **{key: row[key] for key in ('apqp', 'material', 'vendor')}, **data)
+            emit('notice', step=stage, current=len(records)+len(issues), total=total,
+                 **{key: row[key] for key in ('apqp', 'material', 'vendor')}, message=stage)
+        try:
+            def reopen(verifier, identity):
+                if verifier.optional(legacy.ID_RESULT_GRID) is None:
+                    date_update.return_to_list(verifier)
+                fresh = ApqpDiscovery(legacy, verifier.ref, app, verifier.stop)
+                fresh.bulk_detail_enabled = True
+                evidence, matches = locate_update_targets(fresh, [identity], query['project'], query['userId'])
+                fresh.latest['grid'] = evidence
+                fresh.open_observed_row(matches[identity['apqp']][0], load_dates=False)
+                return fresh
+            outcome = date_update.update_open_record(reader, row, row['dates'], desired[row['apqp']], record_checkpoint,
+                reopen, environment=query['environment'], comments=comments[row['apqp']], stage_only=stage_only)
+        except ApqpDateIssue as error:
+            if input_dispatched or error.code not in date_update.SAFE_PREINPUT_ISSUES:
+                raise
+            record_checkpoint('SKIP_RETURN_DISPATCHED', code=error.code, reason=error.issue_summary)
+            date_update.return_unchanged_input_detail(reader, row)
+            detail = getattr(error, 'details', '')
+            record_issue(row, error.code, error.issue_summary + ((' ' + detail) if detail else ''),
+                         error.issue_summary_zh + ((' ' + detail) if detail else ''), 'RETURNED_UNCHANGED')
+            continue
+        reader = outcome['reader']
+        reader.stop = stop.is_set
+        fields_saved = outcome['changedFields'] if outcome['status'] == 'VERIFIED' else 0
+        records.append(dict(row, dates=outcome['dates'], readable=True, saved=outcome['status'] == 'VERIFIED', inputStatus=outcome['status'], changedFieldsSaved=fields_saved))
+        persist(records)
+        staged += outcome['status'] == 'STAGED'
+        skipped += outcome['status'] == 'UNCHANGED'
+        succeeded += outcome['status'] == 'VERIFIED'
+        saved_fields += fields_saved
+        emit('record', current=len(records)+len(issues), total=total, status=outcome['status'],
+             **{key: row[key] for key in ('apqp', 'material', 'vendor')}, message=outcome['status'])
+        if staged or stop.is_set(): break  # Never Back/next after uncommitted input.
+        if outcome['status'] == 'VERIFIED':
+            reader.return_read_detail()  # Reopened values were verified as saved, not edit-buffer values.
+        else:
+            date_update.return_unchanged_input_detail(reader, row)
+    return dict(records=records, fieldSchema=FIELD_SCHEMA, session=session, performance=reader.metrics if reader else {},
+                update=dict(total=total, processed=len(records)+len(issues), succeeded=succeeded, skipped=skipped,
+                            staged=staged, failed=len(issues), issues=issues, savedFields=saved_fields, stageOnly=stage_only, cancelled=stop.is_set()))
+
+
 def run_updates(request, legacy, app, stop, emit, persist, checkpoint):
-    """Single-click, single-worker update with per-record compare immediately before input."""
-    originals, edits, query, session = request['originals'], request['edits'], request['query'], request['session']
+    """Single-click planned-date batch, with a fresh comparison before each input."""
+    originals, edits = request['originals'], request['edits']
     desired = {row['apqp']: row['dates'] for row in edits}
     comments = {row['apqp']: date_update.sd_comments(row.get('sdComments')) for row in edits}
     if (len(desired) != len(edits) or len({row['apqp'] for row in originals}) != len(originals)
@@ -254,62 +352,11 @@ def run_updates(request, legacy, app, stop, emit, persist, checkpoint):
         raise ValueError('The edited APQP set differs from the trusted snapshot.')
     wanted = []
     for row in originals:
-        if any(row['dates'][date_update.SD_CONTROLS[group]['actual']] == desired[row['apqp']][date_update.SD_CONTROLS[group]['actual']]
-               for group in comments[row['apqp']]):
-            fail('APQP_DATE_VALIDATION_FAILED', 'SD Comment requires an edited matching actual date.',
-                 'SD Comment 只能随对应实际日期的修改一起填写。', row['apqp'])
-        plan = compare_dates(row['dates'], row['dates'], desired[row['apqp']])
-        if plan['status'] == 'VALIDATION_ERROR':
-            fail('APQP_DATE_VALIDATION_FAILED', 'Populated dates cannot be cleared. Nothing was saved.', '已有日期不能清空，本次未保存。', row['apqp'])
-        if plan['changes']: wanted.append(row)
-    reader = select_reader(legacy, app, SimpleNamespace(mode='inspect-grid', session_id=session['sessionId']), stop)
-    if reader.latest['session'] != session:
-        fail('SAP_SESSION_LOST', 'Use the original SAP environment/window/account.', '请使用查询时的原 SAP 环境、窗口及账号。')
-    stage_only = date_update.STAGE_ONLY
-    active = wanted[:1] if stage_only else wanted
-    emit('notice', step='LOCATING_APQP', current=0, total=len(wanted), message='Locating only the edited APQP record.',
-         **({key: active[0][key] for key in ('apqp', 'material', 'vendor')} if active else {}))
-    def load_grid(current):
-        return locate_update_targets(current, active, query['project'], query['userId'])
-    grid, queue = load_grid(reader)
-    def open_identity(current, original, current_grid, current_queue):
-        if original['apqp'] not in current_queue:
-            fail('APQP_NOT_FOUND', 'The APQP is no longer in the original result.', '原结果中已找不到 APQP。', original['apqp'])
-        index, identity = current_queue[original['apqp']]
-        if any(identity[key] != original[key] for key in ('material', 'vendor', 'plant', 'project')):
-            fail('APQP_IDENTITY_CHANGED', 'APQP identity changed. Query again.', 'APQP 标识已变化，请重新查询。', original['apqp'])
-        fresh = ApqpDiscovery(legacy, current.ref, app, current.stop)
-        fresh.latest['grid'] = current_grid
-        fresh.open_observed_row(index, load_dates=False)
-        return fresh
-    def reopen(verifier, original):
-        if verifier.optional(legacy.ID_RESULT_GRID) is None: date_update.return_to_list(verifier)
-        fresh_grid, fresh_queue = load_grid(verifier)
-        return open_identity(verifier, original, fresh_grid, fresh_queue)
-    completed, succeeded, skipped, staged = [], 0, 0, 0
-    emit('workers', workers=1, current=0, total=len(wanted), message=f"Checking and updating changed {query['environment']} APQPs.")
-    for row in active:
-        reader.check_stop()
-        emit('notice', step='CHECKING_DATES', apqp=row['apqp'], material=row['material'], vendor=row['vendor'], current=len(completed), total=len(wanted), message='Checking current SAP dates before input.')
-        opened = open_identity(reader, row, grid, queue)
-        def record_checkpoint(stage, **data):
-            checkpoint(stage, apqp=row['apqp'], material=row['material'], vendor=row['vendor'], **data)
-            emit('notice', step=stage, apqp=row['apqp'], material=row['material'], vendor=row['vendor'], current=len(completed), total=len(wanted), message=stage)
-        outcome = date_update.update_open_record(opened, row, row['dates'], desired[row['apqp']], record_checkpoint, reopen,
-                                                 environment=query['environment'], comments=comments[row['apqp']], stage_only=stage_only)
-        completed.append(dict(row, dates=outcome['dates'], readable=True, saved=outcome['status'] == 'VERIFIED', inputStatus=outcome['status']))
-        succeeded += outcome['status'] == 'VERIFIED'
-        skipped += outcome['status'] == 'UNCHANGED'
-        staged += outcome['status'] == 'STAGED'
-        persist(completed)
-        emit('record', current=len(completed), total=len(wanted), status=outcome['status'], apqp=row['apqp'], material=row['material'], vendor=row['vendor'], message=outcome['status'])
-        if stage_only or stop.is_set(): break  # Do NOT leave/back from unsaved test inputs.
-        date_update.return_to_list(outcome['reader'])
-        reader = ApqpDiscovery(legacy, reader.ref, app, stop.is_set)
-        grid, queue = load_grid(reader)
-    return dict(records=completed, session=session, performance=reader.metrics,
-                update=dict(total=len(wanted), processed=len(completed), succeeded=succeeded, skipped=skipped,
-                            staged=staged, stageOnly=stage_only, cancelled=stop.is_set()))
+        if set(row['dates']) != {field.key for field in date_update.DATE_FIELDS} or set(desired[row['apqp']]) != set(row['dates']):
+            fail('APQP_DATE_SCHEMA_CHANGED', 'The date layout changed. Read the four planned dates again.', '日期字段已更新，请重新读取四个计划日期。')
+        if any(row['dates'][key] != desired[row['apqp']][key] for key in row['dates']) or comments[row['apqp']]:
+            wanted.append(row)
+    return run_candidates(request, legacy, app, stop, emit, persist, checkpoint, wanted, desired, comments)
 
 
 def main():

@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto'
+import type { ApqpDateCache } from './apqp-date-cache'
 import type { ApqpRunner } from '../automation/apqp-runner'
 import type { GuidanceContext } from '../automation/native-interaction-bridge'
 import type { ApqpProgress } from '../../shared/apqp-types'
-import { APQP_DATE_CAPABILITIES, APQP_DATE_KEYS, isApqpDates, isApqpSdComments, type ApqpDateError,
+import { APQP_DATE_CAPABILITIES, APQP_DATE_KEYS, APQP_DATE_SCHEMA, isApqpDates, isApqpSdComments, type ApqpDateError,
   type ApqpDateExecuteRequest, type ApqpDateExecuteResult, type ApqpDatePreview, type ApqpDatePreviewRequest,
   type ApqpDatePreviewResult, type ApqpDateQuery, type ApqpDateQueryResult, type ApqpDateSnapshot,
   type ApqpNativeDateData, type ApqpDateRecord } from '../../shared/apqp-date-types'
 
-interface StoredSnapshot { snapshot: ApqpDateSnapshot; session: ApqpNativeDateData['session']; expires: number; nativeStageOnly: boolean }
+interface StoredSnapshot { snapshot: ApqpDateSnapshot; session: ApqpNativeDateData['session']; expires: number }
 const HOUR = 3_600_000
 const rejected = (message: string, messageZh: string, errorCode: string): ApqpDateError => ({ success: false, message, messageZh, errorCode })
 
@@ -15,14 +16,36 @@ const rejected = (message: string, messageZh: string, errorCode: string): ApqpDa
 export class ApqpDateService {
   private snapshots = new Map<string, StoredSnapshot>()
   private previews = new Map<string, ApqpDatePreview>()
-  constructor(private readonly runner: ApqpRunner, private readonly now: () => number = Date.now) {}
+  constructor(private readonly runner: ApqpRunner, private readonly now: () => number = Date.now,
+    private readonly cache?: Pick<ApqpDateCache, 'load'>) {}
   capabilities(): typeof APQP_DATE_CAPABILITIES { return { ...APQP_DATE_CAPABILITIES } }
+
+  async loadCached(query: ApqpDateQuery): Promise<ApqpDateQueryResult> {
+    this.prune()
+    if (query.environment !== 'PROD') return rejected('APQP date management uses SAP 949.', 'APQP 日期管理固定使用 SAP 949。', 'APQP_DATE_PRODUCTION_ONLY')
+    const cached = await this.cache?.load(query)
+    if (!cached || cached.fieldSchema !== APQP_DATE_SCHEMA || cached.snapshot.environment !== query.environment || cached.snapshot.project !== query.project
+      || cached.snapshot.userId.toUpperCase() !== query.userId.toUpperCase()
+      || !Number.isFinite(Date.parse(cached.snapshot.createdAt)) || !validRecords(cached.snapshot.records) || !validSession(cached.session)
+      || cached.session.system !== (query.environment === 'PROD' ? 'VCE' : 'CEQ') || cached.session.client !== '100'
+      || cached.snapshot.records.some(row => !['C100', '0000'].includes(row.plant) || row.project !== query.project)) {
+      return rejected('No reusable local result was found. Read from SAP first.', '暂无可复用的本地结果，请先从 SAP 读取。', 'APQP_DATE_CACHE_MISSING')
+    }
+    const snapshot = structuredClone(cached.snapshot)
+    snapshot.id = randomUUID() // An old execution token is never revived.
+    snapshot.cached = true
+    this.snapshots.set(snapshot.id, { snapshot, session: structuredClone(cached.session), expires: this.now() + HOUR })
+    // Execution still checks the original session, live list/target identity and
+    // current target dates. Cached values never remove conflict/permission gates.
+    return { success: true, snapshot: structuredClone(snapshot) }
+  }
 
   async query(query: ApqpDateQuery, report: (event: ApqpProgress) => void, context: GuidanceContext): Promise<ApqpDateQueryResult> {
     this.prune()
+    if (query.environment !== 'PROD') return rejected('APQP date management uses SAP 949.', 'APQP 日期管理固定使用 SAP 949。', 'APQP_DATE_PRODUCTION_ONLY')
     const result = await this.runner.dates({ action: 'query', query }, report, context)
     if (!result.success) return result
-    if (!result.data || !validRecords(result.data.records) || !validSession(result.data.session)
+    if (!result.data || result.data.fieldSchema !== APQP_DATE_SCHEMA || !validRecords(result.data.records) || !validSession(result.data.session)
       || result.data.session.system !== (query.environment === 'PROD' ? 'VCE' : 'CEQ') || result.data.session.client !== '100') {
       return rejected('The native date snapshot is incomplete. Query again.', '原生日期快照不完整，请重新查询。', 'APQP_DATE_INVALID_SNAPSHOT')
     }
@@ -31,7 +54,7 @@ export class ApqpDateService {
     }
     const snapshot: ApqpDateSnapshot = { ...query, id: context.runId, createdAt: new Date(this.now()).toISOString(),
       records: structuredClone(result.data.records), resultPath: result.resultPath }
-    this.snapshots.set(snapshot.id, { snapshot, session: structuredClone(result.data.session), expires: this.now() + HOUR, nativeStageOnly: result.data.stageOnly === true })
+    this.snapshots.set(snapshot.id, { snapshot, session: structuredClone(result.data.session), expires: this.now() + HOUR })
     return { success: true, snapshot: structuredClone(snapshot) }
   }
 
@@ -75,23 +98,21 @@ export class ApqpDateService {
         || row.sdComments !== undefined && !isApqpSdComments(row.sdComments))) {
       return rejected('The edited list differs from the original query.', '修改清单与原查询不一致，请重新查询。', 'APQP_DATE_IDENTITY_MISMATCH')
     }
-    if (input.edits.some(row => Object.entries(row.sdComments ?? {}).some(([group, text]) => text.trim()
-      && row.dates[group === 'g' ? 'gActualDate' : 'hActualDate'] === expected.get(row.apqp)!.dates[group === 'g' ? 'gActualDate' : 'hActualDate']))) {
-      return rejected('SD Comment is optional and can be entered only with a changed matching actual date.',
-        'SD Comment 为选填，只能随对应实际日期的修改一起填写。', 'APQP_DATE_VALIDATION_FAILED')
+    const invalidComments = (row: typeof input.edits[number]): boolean => Object.values(row.sdComments ?? {}).some(text => Boolean(text.trim()))
+    const clearsDate = (row: typeof input.edits[number]): boolean => APQP_DATE_KEYS.some(key => row.dates[key] === null && expected.get(row.apqp)!.dates[key] !== null)
+    const changed = input.edits.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== expected.get(row.apqp)!.dates[key]) || Object.values(row.sdComments ?? {}).some(text => text.trim()))
+    const allInvalid = changed.length > 0 && changed.every(row => invalidComments(row) || clearsDate(row))
+    if (input.edits.some(invalidComments)) {
+      return rejected('Planned-date maintenance does not edit SD Comment or SD conf.',
+        '计划日期维护不修改 SD Comment 或 SD conf。', 'APQP_DATE_VALIDATION_FAILED')
     }
-    const changed = input.edits.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== expected.get(row.apqp)!.dates[key]))
     const changedById = new Map(changed.map(row => [row.apqp, row]))
-    if (changed.some(row => APQP_DATE_KEYS.some(key => row.dates[key] === null && expected.get(row.apqp)!.dates[key] !== null))) {
+    if (changed.some(clearsDate) && allInvalid) {
       return rejected('Populated dates cannot be cleared. Restore the date before updating.', '已有日期不能清空，请恢复误删日期后再修改。', 'APQP_DATE_VALIDATION_FAILED')
     }
     if (!changed.length) return rejected('No edited dates to update.', '没有待修改的日期。', 'APQP_DATE_NO_CHANGES')
     // Capabilities originate in main, never in editable renderer request flags.
     const gate = this.capabilities()
-    if (gate.stageOnly && !original.nativeStageOnly) {
-      return rejected('The native engine does not confirm input-only support. Update it before testing; no execution was started.',
-        '当前引擎未确认支持“仅填入、不保存”，请更新引擎后测试；未启动修改。', 'APQP_DATE_ENGINE_UPDATE_REQUIRED')
-    }
     if (original.snapshot.environment === 'PROD' && (!gate.writesEnabled || !gate.productionWritesEnabled)) {
       return rejected('Production date updates are disabled by the application policy.', '应用策略尚未开放正式系统日期写入。', 'APQP_DATE_PRODUCTION_LOCKED')
     }
@@ -112,13 +133,33 @@ export class ApqpDateService {
     const completed = result.data?.records
     const stageOnly = gate.stageOnly === true
     const staged = update?.staged ?? 0
-    if (!update || !validRecords(completed) || !validSession(result.data.session)
+    const failed = update?.failed ?? 0, issues = update?.issues ?? []
+    const fieldsSaved = (row: ApqpDateRecord): number => (row as ApqpDateRecord & { changedFieldsSaved?: number }).changedFieldsSaved ?? 0
+    const issueCodes = ['APQP_DATE_CONFLICT', 'APQP_DATE_VALIDATION_FAILED', 'APQP_DATE_READ_ONLY', 'APQP_SD_READ_ONLY', 'APQP_RECORD_WARNING', 'APQP_RECORD_ERROR']
+    if (!update || result.data.fieldSchema !== APQP_DATE_SCHEMA || !validRecords(completed) || !validSession(result.data.session)
       || (Object.keys(original.session) as (keyof typeof original.session)[]).some(key => result.data.session[key] !== original.session[key])
       || ![update.total, update.processed, update.succeeded, update.skipped].every(value => Number.isInteger(value) && value >= 0)
       || !Number.isInteger(staged) || staged < 0 || stageOnly !== (update.stageOnly === true)
-      || stageOnly && (update.succeeded !== 0 || update.processed > 1 || staged > 1)
+      || !Number.isInteger(failed) || failed < 0 || !Array.isArray(issues) || issues.length !== failed
+      || issues.some(item => !item || !changedById.has(item.apqp) || !issueCodes.includes(item.code)
+        || !['NOT_OPENED', 'RETURNED_UNCHANGED'].includes(item.navigation)
+        || item.navigation === 'NOT_OPENED' && item.code !== 'APQP_DATE_VALIDATION_FAILED'
+        || typeof item.message !== 'string' || typeof item.messageZh !== 'string'
+        || ['material', 'vendor'].some(key => item[key as 'material' | 'vendor'] !== expected.get(item.apqp)![key as 'material' | 'vendor']))
+      || new Set([...completed.map(row => row.apqp), ...issues.map(item => item.apqp)]).size !== completed.length + failed
+      || stageOnly && (update.succeeded !== 0 || staged > 1)
+      || stageOnly && completed.some(row => (row as ApqpDateRecord & { saved?: boolean }).saved === true)
+      || stageOnly && completed.some(row => 'inputStatus' in row)
+        && completed.filter(row => (row as ApqpDateRecord & { inputStatus?: string }).inputStatus === 'STAGED').length !== staged
       || !stageOnly && staged !== 0
-      || update.total !== changed.length || update.processed !== completed.length || update.succeeded + update.skipped + staged !== update.processed
+      || !stageOnly && (completed.filter(row => (row as ApqpDateRecord & { inputStatus?: string }).inputStatus === 'VERIFIED' && (row as ApqpDateRecord & { saved?: boolean }).saved === true).length !== update.succeeded
+        || completed.filter(row => (row as ApqpDateRecord & { inputStatus?: string }).inputStatus === 'UNCHANGED').length !== update.skipped)
+      || !Number.isInteger(update.savedFields) || update.savedFields! < 0 || update.savedFields !== completed.reduce((sum, row) => sum + fieldsSaved(row), 0)
+      || completed.some(row => !Number.isInteger(fieldsSaved(row)) || fieldsSaved(row) < 0
+        || fieldsSaved(row) > APQP_DATE_KEYS.filter(key => changedById.get(row.apqp)?.dates[key] !== expected.get(row.apqp)?.dates[key]).length
+        || (row as ApqpDateRecord & { saved?: boolean }).saved !== true && fieldsSaved(row) !== 0
+        || (row as ApqpDateRecord & { saved?: boolean }).saved === true && fieldsSaved(row) < 1)
+      || update.total !== changed.length || update.processed !== completed.length + failed || update.succeeded + update.skipped + staged + failed !== update.processed
       || update.processed > update.total || typeof update.cancelled !== 'boolean'
       || !stageOnly && !update.cancelled && update.processed !== update.total
       || completed.some(row => !changedById.has(row.apqp)
@@ -131,7 +172,8 @@ export class ApqpDateService {
     if (stageOnly) {
       // Staged edit-buffer values are NOT persisted SAP data. Invalidate this
       // source for execution; leave its unchanged values for honest UI display.
-      this.snapshots.delete(input.snapshotId)
+      if (staged) this.snapshots.delete(input.snapshotId)
+      update.stagedApqp = staged ? completed.find(row => (row as ApqpDateRecord & { inputStatus?: string }).inputStatus === 'STAGED')?.apqp ?? completed.at(-1)?.apqp : undefined
       return { success: true, snapshot: structuredClone(original.snapshot), update, resultPath: result.resultPath }
     }
     const done = new Map(completed.map(row => [row.apqp, row]))
@@ -148,6 +190,7 @@ export class ApqpDateService {
 
 function validRecords(rows: unknown): rows is ApqpDateRecord[] {
   return Array.isArray(rows) && rows.length <= 10000 && rows.every(row => row && row.readable === true && isApqpDates(row.dates)
+    && row.editable && Object.keys(row.editable).length === APQP_DATE_KEYS.length && APQP_DATE_KEYS.every(key => typeof row.editable[key] === 'boolean')
     && ['apqp', 'material', 'vendor', 'plant', 'project'].every(key => typeof row[key] === 'string' && row[key].length <= 100)
     && /^[A-Za-z0-9_-]{1,40}$/.test(row.apqp)) && new Set(rows.map(row => row.apqp)).size === rows.length
 }

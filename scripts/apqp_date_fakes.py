@@ -17,7 +17,7 @@ class DateSession(base.Session):
         self.grid.rows = [[str(2000000000 + index), str(10000000 + index), '0041889', 'C100', '775773', 'EE00221'] for index in range(count)]
         self.grid.VisibleRowCount = 10
         self.grid.virtualized = True
-        self.values = {row[0]: ['20.10.2026', '', '25.12.2026', ''] for row in self.grid.rows}
+        self.values = {row[0]: ['', '20.10.2026', '25.12.2026', ''] for row in self.grid.rows}
         self.unknown_return_popup = False
 
     def execute(self):

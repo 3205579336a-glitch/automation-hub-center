@@ -15,7 +15,7 @@ export function ApqpPlanClosurePage({ notify, onBack }: { notify: Notify; onBack
   return <div className="page">
     <button className={styles.back} onClick={onBack}><ArrowLeft size={15} />{zh ? '返回操作中心' : 'Back to Operations'}</button>
     <div className="page-heading"><div><h2>{zh ? 'APQP 日期管理' : 'APQP Date Management'}</h2>
-      <p>{zh ? '按项目查找 APQP、编辑四个日期，或沿用 Excel 批量查询计划关闭日期。' : 'Find APQPs by project and edit four dates, or keep using the Excel plan-closure query.'}</p></div></div>
+      <p>{zh ? '按项目查找并修改 APQP 计划日期，或使用 Excel 批量查询关闭日期。' : 'Find and update APQP planned dates by project, or query closure dates using Excel.'}</p></div></div>
     <div className={styles.tabs} role="tablist" aria-label={zh ? 'APQP 操作' : 'APQP workflow'}>
       <button role="tab" id="apqp-dates-tab" aria-controls="apqp-dates-panel" aria-selected={mode === 'dates'} disabled={dateBusy || closureBusy} onClick={() => setMode('dates')}><CalendarClock size={18} /><span>{zh ? '查找 APQP 并编辑日期' : 'Find APQPs & Edit Dates'}</span></button>
       <button role="tab" id="apqp-closure-tab" aria-controls="apqp-closure-panel" aria-selected={mode === 'closure'} disabled={dateBusy || closureBusy} onClick={() => setMode('closure')}><Search size={18} /><span>{zh ? '批量查询计划关闭日期' : 'Query Plan Closure Date'}</span></button>

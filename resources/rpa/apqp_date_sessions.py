@@ -22,8 +22,9 @@ def target_environment(legacy, environment):
 
 
 def select_reader(legacy, app, args, stop):
-    # Only the end-user's new query may leave another T-code. Developer
-    # inspection and update/preview must keep their original APQP screen.
+    # Only explicit end-user discovery/navigation may leave another page.
+    # Updates constrain it to the original session/account; developer inspection
+    # and preview stay on their existing result screen.
     navigate = args.mode == 'discover' and getattr(args, 'allow_navigation', False)
     # Inventory all eligible windows before choosing. MAX_WORKERS=1 limits work,
     # not identity/ambiguity checks (never silently pick the first business window).
@@ -42,17 +43,18 @@ def select_reader(legacy, app, args, stop):
         elif args.mode == 'discover' and (legacy.readable_transaction(reader.session) in HOME_TRANSACTIONS
                 or reader.selection() is not None or reader.optional(legacy.ID_RESULT_GRID) is not None):
             candidates.append((0, reader))
-        elif navigate and legacy.readable_transaction(reader.session) != legacy.TCODE:
+        elif navigate:
             candidates.append((1, reader))
     if args.mode == 'discover' and candidates:
         # Prefer one idle/query/list window over unrelated business windows.
-        # Never guess between equally eligible windows or abandon an APQP detail.
+        # Never guess between equally eligible windows. Explicit navigation can
+        # leave a clean detail; save/discard prompts are never auto-confirmed.
         priority = min(item[0] for item in candidates)
         candidates = [reader for rank, reader in candidates if rank == priority]
     if not candidates:
         raise ApqpDateIssue('SAP_SESSION_UNAVAILABLE',
-            'Prepare a matching signed-in SAP window. Existing APQP detail work is not abandoned; preview/update requires the original result list.',
-            '请准备对应系统已登录的 SAP 窗口。不会退出已有 APQP 详情；修改时需保留原结果列表。')
+            'Prepare the original matching signed-in SAP window. Handle any sign-in or save/discard dialog manually.',
+            '请准备原系统已登录的 SAP 窗口，登录或保存/放弃弹窗需手动处理。')
     if len(candidates) > 1:
         raise ApqpDateIssue('SAP_SESSION_AMBIGUOUS', 'More than one matching APQP window is available. Keep one eligible window ready.',
                             '有多个匹配的 APQP 窗口，请仅保留一个可用工作窗口。')

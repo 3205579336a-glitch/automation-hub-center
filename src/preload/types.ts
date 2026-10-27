@@ -49,6 +49,7 @@ import type { ApqpDateCapabilities, ApqpDateQuery, ApqpDateQueryResult, ApqpDate
 export interface SapAutomationApi {
   getApqpDateCapabilities: () => Promise<ApqpDateCapabilities | null>
   queryApqpDates: (input: ApqpDateQuery) => Promise<ApqpDateQueryResult>
+  loadCachedApqpDates: (input: ApqpDateQuery) => Promise<ApqpDateQueryResult>
   previewApqpDateChanges: (input: ApqpDatePreviewRequest) => Promise<ApqpDatePreviewResult>
   executeApqpDateChanges: (input: ApqpDateExecuteRequest) => Promise<ApqpDateExecuteResult>
   getTimeSavings: () => Promise<TimeSavingsSummary>

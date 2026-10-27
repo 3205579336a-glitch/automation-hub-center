@@ -12,6 +12,15 @@ export function registerApqpDateHandlers(service: ApqpDateService, guided: Guide
   history: ExecutionHistoryService, logger: DiagnosticLogger, intelligence?: LocalIntelligenceService): void {
   const invalid = (): ApqpDateError => ({ success: false, message: 'Invalid APQP date request.', messageZh: '无效的 APQP 日期请求。', errorCode: 'APQP_DATE_INVALID_REQUEST' })
   ipcMain.handle(IPC_CHANNELS.apqpDateCapabilities, event => isTrustedRenderer(event) ? service.capabilities() : null)
+  ipcMain.handle(IPC_CHANNELS.loadCachedApqpDates, async (event, input: unknown) => {
+    if (!isTrustedRenderer(event) || !isApqpDateQuery(input)) return invalid()
+    if (guided.isRunning()) return { success: false, message: 'Finish or stop the running automation first.', messageZh: '请先完成或停止正在运行的自动化。', errorCode: 'APQP_DATE_BUSY' }
+    try {
+      const result = await service.loadCached(input)
+      if (result.success) guided.registerArtifacts(result.snapshot.resultPath)
+      return result // Local display only: no new execution history, success count or timing sample.
+    } catch { return { success: false, message: 'The local result is unavailable. Read from SAP again.', messageZh: '本地结果不可用，请重新从 SAP 读取。', errorCode: 'APQP_DATE_CACHE_MISSING' } }
+  })
   ipcMain.handle(IPC_CHANNELS.queryApqpDates, async (event, input: unknown) => {
     if (!isTrustedRenderer(event) || !isApqpDateQuery(input)) return invalid()
     let runId = '', entryId = ''
@@ -73,12 +82,12 @@ export function registerApqpDateHandlers(service: ApqpDateService, guided: Guide
       entryId = entry.id
       intelligence?.begin(entryId, 'apqp-date-update', runId)
       const result = await service.execute(input, progress => { intelligence?.observe(entryId, progress); if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress) }, { service: guided, runId })
-      const status = result.success ? result.update.cancelled ? 'Cancelled' : result.update.stageOnly ? 'Partial' : 'Success' : result.cancelled ? 'Cancelled' : 'Failed'
+      const status = result.success ? result.update.cancelled ? 'Cancelled' : result.update.stageOnly || result.update.failed ? 'Partial' : 'Success' : result.cancelled ? 'Cancelled' : 'Failed'
       const performance = intelligence?.finish(entryId, status)
       await history.finish(entryId, result.success ? { status, performance, total: result.update.total, processed: result.update.processed,
-        succeeded: result.update.succeeded, skipped: result.update.skipped, sessionCount: 1, resultPath: result.resultPath,
+        succeeded: result.update.succeeded, skipped: result.update.skipped, failed: result.update.failed ?? 0, apqpDateFieldsSaved: result.update.savedFields ?? 0, sessionCount: 1, resultPath: result.resultPath,
         ...(result.update.stageOnly ? { dryRun: true, apqpStaged: result.update.staged ?? 0 } : {}),
-        summary: result.update.stageOnly ? `${result.update.staged ?? 0} APQP staged for inspection. NOT SAVED. No Save was sent; the detail remains open.` : `${result.update.succeeded} APQPs saved and verified; ${result.update.skipped} unchanged.` }
+        summary: result.update.stageOnly ? `${result.update.staged ?? 0} APQP staged. ${result.update.failed ?? 0} record issue(s) safely skipped before input. NOT SAVED. No Save was sent.` : `${result.update.succeeded} APQPs saved and verified; ${result.update.skipped} unchanged; ${result.update.failed ?? 0} record issue(s) skipped before input.` }
         : { status, performance, summary: result.message, logPath: result.logPath, succeeded: result.succeeded })
       if (result.success) guided.registerArtifacts(result.resultPath)
       else if (result.logPath) guided.registerArtifacts(result.logPath)

@@ -1,6 +1,6 @@
 {
   "name": "sap-automation-toolbox",
-  "version": "0.2.4-hotfix.2",
+  "version": "0.2.5",
   "description": "A secure Windows desktop foundation for SAP WebGUI automation.",
   "main": "./out/main/index.js",
   "type": "module",
@@ -18,7 +18,7 @@
     "test:artifacts": "node --test scripts/test-generated-artifacts.mjs && py -3 scripts/test-hub-artifacts.py",
     "smoke:safe-recovery": "npm run build && node scripts/safe-recovery-smoke-test.mjs",
     "test:apqp": "node --test scripts/test-apqp-template-header.mjs scripts/test-apqp-saved-preview.mjs && py -3 scripts/test-apqp-plan-closure.py",
-    "test:apqp-dates": "py -3 scripts/test-apqp-date-discovery.py && py -3 scripts/test-apqp-date-api.py && py -3 scripts/test-apqp-date-update.py && node --test scripts/test-apqp-date-service.mjs scripts/test-apqp-date-view.mjs",
+    "test:apqp-dates": "py -3 scripts/test-apqp-date-discovery.py && py -3 scripts/test-apqp-date-api.py && py -3 scripts/test-apqp-date-update.py && node --test scripts/test-apqp-date-service.mjs scripts/test-apqp-date-view.mjs scripts/test-apqp-date-cache.mjs",
     "test:guided": "node --test scripts/test-guided-automation.mjs && py -3 scripts/test-hub-user-interaction.py",
     "test:sap-startup": "py -3 scripts/test-sap-gui-connection.py && node --test scripts/test-me12-startup.mjs",
     "test:intelligence": "node --test scripts/test-local-intelligence.mjs",

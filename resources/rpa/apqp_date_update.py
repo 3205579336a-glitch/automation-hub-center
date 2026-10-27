@@ -10,7 +10,11 @@ import re
 QA_WRITES_VALIDATED = False  # Set only after the owner-authorized live QA acceptance.
 PRODUCTION_WRITES_VALIDATED = False
 PRODUCTION_WRITES_AUTHORIZED = True  # Explicit owner request, 2026-10-20; not QA/production acceptance evidence.
-STAGE_ONLY = True  # Owner request, 2026-10-22: fill ONE record, never press Save.
+STAGE_ONLY = False  # Owner request, 2026-10-27: save and verify planned F/G/H/M dates.
+QA_WRITES_AUTHORIZED = True  # Workflow authorization, not a claim of live acceptance.
+# Only record-level failures proven to precede every setter can be skipped.
+SAFE_PREINPUT_ISSUES = {'APQP_DATE_CONFLICT', 'APQP_DATE_VALIDATION_FAILED',
+                       'APQP_DATE_READ_ONLY', 'APQP_SD_READ_ONLY', 'APQP_RECORD_WARNING', 'APQP_RECORD_ERROR'}
 PREFIX = 'wnd[0]/usr/tabsTAB_ST/tabpTAB1/ssubSUB1:ZMFM050035_N:0901/'
 DETAIL_IDENTITY = {'apqp': PREFIX + 'txtGS_ITAB-APQPNO',
                    'material': PREFIX + 'txtGS_ITAB-MATNR', 'vendor': PREFIX + 'txtGS_ITAB-LIFNR'}
@@ -123,12 +127,13 @@ def issue(code, en, zh, details=''):
 
 
 def writes_enabled(environment):
-    return QA_WRITES_VALIDATED if environment == 'QA' else PRODUCTION_WRITES_AUTHORIZED if environment == 'PROD' else False
+    return QA_WRITES_AUTHORIZED if environment == 'QA' else PRODUCTION_WRITES_AUTHORIZED if environment == 'PROD' else False
 
 
 def write_policy():
     return dict(productionOwnerAuthorized=PRODUCTION_WRITES_AUTHORIZED,
-                authorization='OWNER_REQUEST_2026-10-20' if PRODUCTION_WRITES_AUTHORIZED else 'NOT_AUTHORIZED',
+                authorization='OWNER_REQUEST_2026-10-27' if PRODUCTION_WRITES_AUTHORIZED else 'NOT_AUTHORIZED',
+                qaOwnerAuthorized=QA_WRITES_AUTHORIZED,
                 qaSaveAcceptancePassed=QA_WRITES_VALIDATED, productionSaveAcceptancePassed=PRODUCTION_WRITES_VALIDATED,
                 stageOnly=STAGE_ONLY)
 
@@ -166,130 +171,93 @@ def return_to_list(reader):
     reader.wait(lambda: reader.optional(reader.legacy.ID_RESULT_GRID), 'APQP result list')
 
 
-def update_open_record(reader, identity, original, desired, checkpoint, reopen, *, environment='QA', comments=None, stage_only=True):
-    """Caller selected the exact record in the explicitly requested environment.
-
-    reopen(reader, identity) must locate the same APQP in the returned list and
-    return a freshly opened reader. A Save-dispatched outcome is never retried.
-    """
-    if environment == 'QA' and reader.identity[1:3] != ('CEQ', '100'):
-        issue('APQP_DATE_QA_ONLY', 'Real date tests are restricted to QA CEQ/client 100.', '真实日期测试仅允许 QA CEQ / Client 100。')
-    if environment not in {'QA', 'PROD'} or environment == 'PROD' and reader.identity[1:3] != ('VCE', '100'):
-        issue('APQP_DATE_ENVIRONMENT_MISMATCH', 'The SAP write target does not match the requested environment.',
-              'SAP 写入目标与指定环境不一致，未输入或保存日期。')
-    if environment == 'PROD' and not PRODUCTION_WRITES_AUTHORIZED:
-        issue('APQP_DATE_PRODUCTION_LOCKED', 'Production writes are not authorized.', '正式系统写入尚未授权。')
+def return_unchanged_input_detail(reader, identity):
+    """Leave an owned unchanged detail once; never confirm Save/discard."""
+    baseline = getattr(reader, 'input_baseline', None)
+    if baseline is None:
+        issue('APQP_UNSAFE_RECORD_RETURN', 'No unchanged detail baseline is available. Review SAP.', '无法确认详情未变化，请核查 SAP。')
     verify_detail_identity(reader, identity)
+    if read_dates(reader) != baseline:
+        issue('APQP_UNSAFE_RECORD_RETURN', 'The detail changed before skipping. It was not closed.', '跳过前详情发生变化，未关闭详情。')
+    reader.return_read_detail()
+
+
+def check_input_status(reader):
+    status = reader.optional('wnd[0]/sbar')
+    if status is not None and str(status.MessageType).strip() in {'W', 'E', 'A'} and str(status.Text).strip():
+        warning = str(status.MessageType).strip() == 'W'
+        issue('APQP_RECORD_WARNING' if warning else 'APQP_RECORD_ERROR',
+              'SAP reported a record warning/error. Review this record.', 'SAP 返回本条警告或错误，请核查本条。', str(status.Text).strip())
+
+
+def update_open_record(reader, identity, original, desired, checkpoint, reopen, *, environment='QA', comments=None, stage_only=False):
+    """Changed-only F/G/H/M planned dates. Never edit actual dates or SD flags."""
+    expected_system = 'CEQ' if environment == 'QA' else 'VCE'
+    if environment not in {'QA', 'PROD'} or reader.identity[1:3] != (expected_system, '100'):
+        issue('APQP_DATE_ENVIRONMENT_MISMATCH', 'The SAP target differs from the requested environment.', 'SAP 目标与指定环境不一致，未输入日期。')
+    if not writes_enabled(environment):
+        issue('APQP_DATE_PRODUCTION_LOCKED', 'Date writes are not authorized for this environment.', '此环境尚未授权日期写入。')
+    if comments:
+        issue('APQP_DATE_INVALID_REQUEST', 'Planned-date maintenance does not change SD Comment.', '计划日期维护不修改 SD Comment。')
+    verify_detail_identity(reader, identity)
+    reader.input_baseline = None
     current = read_dates(reader)
-    comments = sd_comments(comments)
+    reader.input_baseline = dict(current)
+    check_input_status(reader)
     plan = compare_dates(original, current, desired)
     if plan['status'] in {'CONFLICT', 'VALIDATION_ERROR'}:
         issue('APQP_DATE_CONFLICT' if plan['status'] == 'CONFLICT' else 'APQP_DATE_VALIDATION_FAILED',
-              'SAP dates changed, or a populated date was cleared. Query again; nothing was saved.',
-              'SAP 日期已变化，或已有日期被清空。请重新查询，本条未保存。', identity['apqp'])
-    edited_actuals = {group for group, config in SD_CONTROLS.items()
-                      if original[config['actual']] != desired[config['actual']]}
-    if set(comments) - edited_actuals:
-        issue('APQP_DATE_VALIDATION_FAILED', 'SD Comment can be entered only with an edited matching actual date.',
-              'SD Comment 只能随对应实际日期的修改一起填写。')
-    groups = {group for group, config in SD_CONTROLS.items()
-              if config['actual'] in {change['field'] for change in plan['changes']}}
-    if set(comments) - groups:
-        issue('APQP_DATE_CONFLICT', 'The actual date was already applied by another change. Refresh before replacing its SD Comment.',
-              '实际日期已被其他修改更新，请刷新后再更改对应 SD Comment。')
+              'SAP dates changed, or a populated date was cleared. Nothing was entered.',
+              'SAP 日期已变化，或已有日期被清空。本条未输入。', identity['apqp'])
     if not plan['changes']:
         return dict(status='UNCHANGED', dates=current, reader=reader, changedFields=0)
+    changes = [(next(field for field in DATE_FIELDS if field.key == item['field']), item['desired']) for item in plan['changes']]
+    for field, _ in changes:
+        if reader.session.FindById(field.control_id).Changeable is not True:
+            issue('APQP_DATE_READ_ONLY', 'This SAP planned date is grey/read-only. Nothing was entered.',
+                  '此 SAP 计划日期为灰色、不可修改，本条未输入。', field.temporary_label + ' / ' + field.technical_name)
     expected = dict(current)
-    expected.update({change['field']: change['desired'] for change in plan['changes']})
-    before_sd = {group: read_sd(reader, group) for group in groups}
-    expected_sd = {group: dict(selected=True, comment=comments.get(group, values['comment']))
-                   for group, values in before_sd.items()}
-    # Checkbox-gated actual dates can become writable after SD conf is selected.
-    # Read-only planned dates and read-only required checkboxes still fail before
-    # any setter. Recheck EVERY date/comment after ticking, before date input.
-    for group in groups:
-        if not before_sd[group]['selected'] and reader.session.FindById(SD_CONTROLS[group]['checkbox']).Changeable is not True:
-            issue('APQP_SD_READ_ONLY', 'The required SD conf checkbox is read-only. Nothing was written.',
-                  '所需 SD conf 勾选框为只读，未写入。', group.upper())
-    for field in DATE_FIELDS:
-        if field.key in {change['field'] for change in plan['changes']}:
-            control = reader.session.FindById(field.control_id)
-            gated = any(SD_CONTROLS[group]['actual'] == field.key and not before_sd[group]['selected'] for group in groups)
-            if control.Changeable is not True and not gated:
-                issue('APQP_DATE_READ_ONLY', 'A requested SAP date is read-only. No dates were written.', '待修改的 SAP 日期为只读，未写入日期。', field.technical_name)
+    expected.update({field.key: value for field, value in changes})
     checkpoint('CURRENT_VALUES_VERIFIED', original=original, current=current, desired=expected,
-               environment=environment, system=reader.identity[1], client=reader.identity[2], writePolicy=write_policy(),
-               sdBefore=before_sd, sdExpected=expected_sd)
+               environment=environment, system=reader.identity[1], client=reader.identity[2], writePolicy=write_policy())
     staged = False
     try:
-        for group in sorted(groups):
+        for field, value in changes:
             reader.guard()
-            if not before_sd[group]['selected']:
-                staged = True
-                checkpoint('SD_CONFIRM_INPUT_DISPATCHED', group=group, selected=True)
-                reader.session.FindById(SD_CONTROLS[group]['checkbox']).Selected = True
-                reader.guard()
-                if read_sd(reader, group)['selected'] is not True:
-                    issue('APQP_SD_INPUT_REJECTED', 'SAP did not retain SD conf. No Save was sent.', 'SAP 未保留 SD conf 勾选，未发送保存。', group.upper())
-        for change in plan['changes']:
-            field = next(field for field in DATE_FIELDS if field.key == change['field'])
-            if reader.session.FindById(field.control_id).Changeable is not True:
-                issue('APQP_DATE_READ_ONLY', 'A requested date is read-only after SD conf. No Save was sent.',
-                      '勾选 SD conf 后待修改日期仍为只读，未发送保存。', field.technical_name)
-        for group in comments.keys() & groups:
-            control = reader.session.FindById(SD_CONTROLS[group]['comment'])
-            if control.Changeable is not True:
-                issue('APQP_SD_READ_ONLY', 'SD Comment is read-only. No Save was sent.', 'SD Comment 为只读，未发送保存。', group.upper())
-        for change in plan['changes']:
-            reader.guard()
-            field = next(field for field in DATE_FIELDS if field.key == change['field'])
             control = reader.session.FindById(field.control_id)
-            staged = True  # Ambiguous setter outcomes are never replayed.
-            checkpoint('DATE_INPUT_DISPATCHED', field=field.key)
-            control.Text = change['desired'][8:10] + '.' + change['desired'][5:7] + '.' + change['desired'][:4]
+            if control.Changeable is not True:
+                issue('APQP_DATE_READ_ONLY', 'SAP edit permission changed. No Save was sent.', 'SAP 编辑权限已变化，未发送保存。', field.technical_name)
+            staged = True  # Even an ambiguous setter is never replayed or skipped.
+            checkpoint('DATE_INPUT_DISPATCHED', field=field.key, technicalName=field.technical_name)
+            control.Text = value[8:10] + '.' + value[5:7] + '.' + value[:4]
             reader.guard()
-            if date_value(control.Text) != change['desired']:
-                issue('APQP_DATE_INPUT_REJECTED', 'SAP did not retain the entered date. No Save was sent.', 'SAP 未保留输入日期，未发送保存。', field.key)
-        for group in sorted(comments.keys() & groups):
-            reader.guard()
-            control = reader.session.FindById(SD_CONTROLS[group]['comment'])
-            if control.Text != comments[group]:
-                staged = True
-                checkpoint('SD_COMMENT_INPUT_DISPATCHED', group=group, comment=comments[group])
-                control.Text = comments[group]
-                reader.guard()
-                if control.Text.rstrip() != comments[group].rstrip():
-                    issue('APQP_SD_INPUT_REJECTED', 'SAP did not retain SD Comment. No Save was sent.', 'SAP 未保留 SD Comment，未发送保存。', group.upper())
+            if date_value(control.Text) != value:
+                issue('APQP_DATE_INPUT_REJECTED', 'SAP did not retain the planned date. No Save was sent.', 'SAP 未保留计划日期，未发送保存。', field.temporary_label)
         verify_detail_identity(reader, identity)
         if read_dates(reader) != expected:
-            issue('APQP_DATE_INPUT_REJECTED', 'Date verification failed before Save.', '保存前日期核对失败，未发送保存。')
-        if any(read_sd(reader, group) != values for group, values in expected_sd.items()):
-            issue('APQP_SD_INPUT_REJECTED', 'SD conf / Comment verification failed before Save.', '保存前 SD conf / Comment 核对失败，未发送保存。')
-        reader.guard()  # Stop before Save leaves staged inputs for manual review.
+            issue('APQP_DATE_INPUT_REJECTED', 'Planned date verification failed before Save.', '保存前计划日期核对失败，未发送保存。')
+        check_input_status(reader)
+        reader.guard()
     except Exception:
         if staged:
-            checkpoint('STAGED_UNSAVED', message='Inputs may be staged in SAP. Review manually; do not blindly retry.')
+            checkpoint('STAGED_UNSAVED', message='SAP may contain unsaved inputs. Review manually; do not blindly retry.')
         raise
     if stage_only:
-        checkpoint('STAGED_READY_NOT_SAVED', dates=expected, sd=expected_sd, saved=False)
-        return dict(status='STAGED', dates=expected, reader=reader, changedFields=len(plan['changes']))
+        checkpoint('STAGED_READY_NOT_SAVED', dates=expected, saved=False)
+        return dict(status='STAGED', dates=expected, reader=reader, changedFields=len(changes))
     checkpoint('SAVE_DISPATCHED', expected=expected)
-    # After dispatch, honour Stop only after bounded verification of this Save.
     verifier = ApqpDiscovery(reader.legacy, reader.ref, reader.application, lambda: False)
     try:
-        reader.session.FindById(SAVE_ID).Press()
+        reader.session.FindById(SAVE_ID).Press()  # Exactly once.
         message = wait_save_response(verifier, checkpoint)
         checkpoint('SAVE_ACKNOWLEDGED', message=message)
         reopened = reopen(verifier, identity)
         verify_detail_identity(reopened, identity)
         after = read_dates(reopened)
         if after != expected:
-            raise ValueError(f'Reopened date values differ: expected={expected}, actual={after}')
-        after_sd = {group: read_sd(reopened, group) for group in groups}
-        if after_sd != expected_sd:
-            raise ValueError(f'Reopened SD values differ: expected={expected_sd}, actual={after_sd}')
-        checkpoint('UPDATE_VERIFIED', dates=after, changedFields=len(plan['changes']), sd=after_sd)
-        return dict(status='VERIFIED', dates=after, reader=reopened, changedFields=len(plan['changes']))
+            raise ValueError(f'Reopened planned dates differ: expected={expected}, actual={after}')
+        checkpoint('UPDATE_VERIFIED', dates=after, changedFields=len(changes))
+        return dict(status='VERIFIED', dates=after, reader=reopened, changedFields=len(changes))
     except Exception as error:
         checkpoint('SAVE_OUTCOME_UNCERTAIN', details=str(error))
         issue('APQP_SAVE_OUTCOME_UNCERTAIN', 'Save was sent once, but could not be verified. Stop and inspect SAP; do not retry automatically.',

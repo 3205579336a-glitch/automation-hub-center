@@ -26,18 +26,36 @@ session = session_type(count=25, state='home' if request['action'] == 'query' el
 # Different suppliers exercise display sorting without changing original SAP row order.
 for index, row in enumerate(session.grid.rows):
     row[2] = ('0041889', '0000101', '0006587')[index % 3]
+if request['query']['userId'] in {'PREINPUT_ERRORS', 'ALL_READONLY', 'DYNAMIC_LOCK'}:
+    for row in session.grid.rows: row[-1] = request['query']['userId']
+    if request['action'] == 'execute':
+        execute = session.execute
+        def record_permissions():
+            opening = session.state == 'grid'
+            execute()
+            if opening:
+                writable = request['query']['userId'] != 'ALL_READONLY' and int(session.grid.SelectedRows) != 0
+                field = apqp_date_update.DATE_FIELDS[1 if request['query']['userId'] == 'DYNAMIC_LOCK' else 0]
+                session.dates[field.control_id].Changeable = writable
+        session.execute = record_permissions
 if request['action'] == 'execute':
     session.save_question = 'Do you want to save the APQP data?'
+    enable_bulk_dates(session)
 if request['action'] == 'query':
     # Exercise automatic same-window navigation and the batched date path through
     # renderer -> IPC -> runner -> native protocol, not just unit tests.
     session.state, session.Info.Transaction = 'other', 'ME11'
     enable_bulk_dates(session)
+    # The recorded example has grey RTS Confirmation. Other fields remain editable.
+    session.dates[apqp_date_update.DATE_FIELDS[0].control_id].Changeable = False
 # A measurable asynchronous operation so UI lock/Stop can be tested deterministically.
 session.grid.on_read = lambda: time.sleep(0.003)
+if request['action'] == 'execute':
+    # Prove updates recover the original same-login window from an unrelated T-code.
+    session.state, session.Info.Transaction = 'other', 'ME11'
 if request['action'] == 'preview' and request['query']['userId'] == 'CONFLICT':
     session.grid.rows = [row[:-1] + ['CONFLICT'] for row in session.grid.rows]
-    session.values['2000000000'][0] = '22.10.2026'
+    session.values['2000000000'][1] = '22.10.2026'
 if request['query']['userId'] == 'CONFLICT':
     session.grid.rows = [row[:-1] + ['CONFLICT'] for row in session.grid.rows]
 if request['query']['userId'] == 'MISMATCH':

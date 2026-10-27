@@ -364,7 +364,7 @@ test('APQP dates: real IPC persists query/preview history and learns separate ti
     load('src/main/ipc/apqp-date-handlers.ts').registerApqpDateHandlers(service, guided, store, logger, intelligence)
     const event = { senderFrame: { url: 'file:///renderer/index.html' }, sender: { isDestroyed: () => true } }
     await handlers.get('apqp:dates:query')(event, { project: '775773', userId: 'EE00221', environment: 'PROD' })
-    await handlers.get('apqp:dates:preview')(event, { snapshotId: '11111111-1111-4111-8111-111111111111', edits: [{ apqp: '2000000000', dates: { gPlanDate: null, gActualDate: '2026-11-01', hPlanDate: null, hActualDate: null } }] })
+    await handlers.get('apqp:dates:preview')(event, { snapshotId: '11111111-1111-4111-8111-111111111111', edits: [{ apqp: '2000000000', dates: { fPlanDate: '2026-11-01', gPlanDate: null, hPlanDate: null, mPlanDate: null } }] })
     // Reopen the actual file: validates both persistence and isHistoryEntry, not a mock array.
     const reopened = new ExecutionHistoryService(path, logger)
     const entries = await reopened.getEntries({ operations: ['apqp-date-management'] })

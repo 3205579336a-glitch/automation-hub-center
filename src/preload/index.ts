@@ -12,6 +12,7 @@ import type { ApqpProgress } from '../shared/apqp-types'
 const sapAutomationApi: SapAutomationApi = {
   getApqpDateCapabilities: () => ipcRenderer.invoke(IPC_CHANNELS.apqpDateCapabilities),
   queryApqpDates: input => ipcRenderer.invoke(IPC_CHANNELS.queryApqpDates, input),
+  loadCachedApqpDates: input => ipcRenderer.invoke(IPC_CHANNELS.loadCachedApqpDates, input),
   previewApqpDateChanges: input => ipcRenderer.invoke(IPC_CHANNELS.previewApqpDateChanges, input),
   executeApqpDateChanges: input => ipcRenderer.invoke(IPC_CHANNELS.executeApqpDateChanges, input),
   getTimeSavings: () => ipcRenderer.invoke(IPC_CHANNELS.getTimeSavings),

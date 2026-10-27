@@ -1,12 +1,13 @@
 /** UI/API contract. No SAP selectors, session indices or write override in renderer inputs. */
-export const APQP_DATE_KEYS = ['gPlanDate', 'gActualDate', 'hPlanDate', 'hActualDate'] as const
+export const APQP_DATE_SCHEMA = 'APQP_PLANNED_FGHM_V1'
+export const APQP_DATE_KEYS = ['fPlanDate', 'gPlanDate', 'hPlanDate', 'mPlanDate'] as const
 export type ApqpDateKey = typeof APQP_DATE_KEYS[number]
-/** Read-only verification of the live SAP detail labels, 2026-10-20. */
+/** Planned-date selectors confirmed by the owner's 2026-10-27 recording. */
 export const APQP_DATE_LABELS: Record<ApqpDateKey, { en: string; zh: string }> = {
   gPlanDate: { en: 'RTS Action & Closure Planned Date', zh: 'RTS 行动关闭计划日期' },
-  gActualDate: { en: 'RTS Action & Closure Actual Date', zh: 'RTS 行动关闭实际日期' },
+  fPlanDate: { en: 'RTS Confirmation Planned Date', zh: 'RTS Confirmation 计划日期' },
   hPlanDate: { en: 'Total PPAP Planned Date', zh: 'Total PPAP 计划日期' },
-  hActualDate: { en: 'Total PPAP Actual Date', zh: 'Total PPAP 实际日期' }
+  mPlanDate: { en: 'APQP Closure Plan Date', zh: 'APQP 关闭计划日期' }
 }
 export type ApqpDates = Record<ApqpDateKey, string | null>
 export type ApqpEnvironment = 'QA' | 'PROD'
@@ -14,9 +15,13 @@ export interface ApqpDateQuery { project: string; userId: string; environment: A
 export interface ApqpDateRecord {
   apqp: string; material: string; vendor: string; plant: string; project: string
   dates: ApqpDates; readable: boolean
+  editable: Record<ApqpDateKey, boolean>
 }
 export interface ApqpDateSnapshot extends ApqpDateQuery {
   id: string; createdAt: string; records: ApqpDateRecord[]; resultPath: string
+  /** Cached values are explicitly historical, never a fresh SAP read. */
+  cached?: boolean
+  lastAttempt?: { apqp: string; at: string; status: 'STAGED' | 'REVIEW_REQUIRED' }
 }
 /** Blank/omitted comments preserve SAP text; only edited matching actual dates use these. */
 export interface ApqpSdComments { g?: string; h?: string }
@@ -30,7 +35,15 @@ export interface ApqpDatePreview {
 }
 /** One user click; current-SAP conflict checks happen inside the execution path. */
 export interface ApqpDateExecuteRequest extends ApqpDatePreviewRequest { confirmed: true }
-export interface ApqpDateUpdateSummary { total: number; processed: number; succeeded: number; skipped: number; cancelled: boolean; staged?: number; stageOnly?: boolean }
+export interface ApqpDateRecordIssue {
+  apqp: string; material: string; vendor: string; code: string; message: string; messageZh: string
+  navigation: 'NOT_OPENED' | 'RETURNED_UNCHANGED'
+}
+export interface ApqpDateUpdateSummary {
+  total: number; processed: number; succeeded: number; skipped: number; cancelled: boolean
+  savedFields?: number
+  staged?: number; stagedApqp?: string; stageOnly?: boolean; failed?: number; issues?: ApqpDateRecordIssue[]
+}
 export interface ApqpDateCapabilities {
   writesEnabled: boolean; productionWritesEnabled: boolean; qaWritesEnabled: boolean
   stageOnly?: boolean
@@ -39,9 +52,9 @@ export interface ApqpDateCapabilities {
 export const APQP_DATE_CAPABILITIES: ApqpDateCapabilities = {
   // Owner explicitly authorized production on 2026-10-20. This is permission to
   // expose the write workflow, NOT a claim that live QA acceptance has passed.
-  writesEnabled: true, productionWritesEnabled: true, qaWritesEnabled: false, stageOnly: true, code: 'APQP_DATE_WRITES_ENABLED',
-  message: 'Test input only: fill ONE APQP and stop on its detail. No Save or save-confirmation Yes is sent. Inspect SAP, then manually save or discard and return to the list before querying again. QA acceptance remains incomplete.',
-  messageZh: '当前仅测试填入：每次只填 1 条 APQP，停在详情页，不点击 Save 或保存确认 Yes。请在 SAP 检查后手动保存或放弃，再返回列表重新查询。QA 保存验收仍未完成。'
+  writesEnabled: true, productionWritesEnabled: true, qaWritesEnabled: false, stageOnly: false, code: 'APQP_DATE_WRITES_ENABLED',
+  message: 'Uses SAP 949. Only edited dates are saved. Grey dates cannot be changed.',
+  messageZh: '使用 SAP 949，只保存你修改的日期。灰色日期不可修改。'
 }
 export interface ApqpQueryMismatch {
   totalRows: number; mismatchRows: number; sampleLimit: number
@@ -57,6 +70,7 @@ export type ApqpDatePreviewResult = { success: true; preview: ApqpDatePreview; r
 export type ApqpDateExecuteResult = { success: true; snapshot: ApqpDateSnapshot; update: ApqpDateUpdateSummary; resultPath: string } | ApqpDateError
 export interface ApqpNativeDateData {
   records: ApqpDateRecord[]
+  fieldSchema?: string
   stageOnly?: boolean
   session: { sessionId: string; system: string; client: string; sapUser: string }
   preview?: Omit<ApqpDatePreview, 'id' | 'snapshotId' | 'expiresAt'>

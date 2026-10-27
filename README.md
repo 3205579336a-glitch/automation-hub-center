@@ -2,6 +2,17 @@
 
 Local-first Windows desktop purchasing automation. Normal users choose a task, download and fill its template, upload, review, and start. No paths, session indices, Python setup, timeouts or transaction parameters are required in normal workflows.
 
+## Version 0.2.5 — source release (2026-10-27)
+
+- APQP date management uses **SAP 949 only**. Enter the project and responsible User ID, find APQPs, edit the dates and save. No environment selection or Open Read Result button is shown.
+- Maintains exactly four planned dates: **RTS Confirmation** (`F_PLNDAT`), **RTS Action & Closure** (`G_PLNDAT`), **Total PPAP** (`H_PLNDAT`) and **APQP Closure Plan Date** (`M_PLNDAT`). Actual dates, SD conf and comments are not changed. Grey SAP fields are disabled in Hub.
+- Official batch Save replaces the former one-record input-only test. Each changed record is saved once, reopened by APQP ID and verified before the next record. Proven pre-input failures are skipped with a reason; partial input, unknown dialogs and uncertain saves stop safely. Unsuccessful drafts remain visible.
+- Faster location uses an APQP-ID hash index from the batch's freshly read list for the first target, avoiding a duplicate full-ID scan. Every post-Save reopen still obtains a fresh index and checks the target identity. Batched detail reads reduce SAP communication, with a compatibility fallback. An offline 48-row test reduces **additional first-target identity reads from 54 to 6**; this is not a live SAP latency guarantee.
+- Dashboard savings now include APQP date updates at **1 manual minute per date field actually saved and verified**, minus the entire batch elapsed time once. Failed/skipped/unchanged fields, read-only queries, input-only tests and unverified outcomes earn no field savings. Old history without verified field counts is not guessed or backfilled.
+- Simpler bilingual instructions, remembered projects, search/supplier sorting, previous-result reuse and reset are included. Clearing the APQP date page retains its query inputs. Old G/H actual-date caches cannot be loaded as the new planned-date layout; read from SAP once after upgrading.
+
+This publishes source code only: no EXE, installer, ZIP, user manual or other document is rebuilt for this version. Regression and desktop smoke tests use fake SAP; no live production write acceptance is claimed.
+
 ## End-user manuals (V0.2.4)
 
 - [English user manual](docs/USER_MANUAL.md)
@@ -10,7 +21,7 @@ Local-first Windows desktop purchasing automation. Normal users choose a task, d
 
 Printable bilingual PDF copies are in `output/pdf/`. Documentation builds use `scripts/build-user-manual.py` with ReportLab and the available Windows fonts; end users do not need these tools to read the PDFs or run the packaged Hub.
 
-The manuals describe the frozen distributed V0.2.4 package. The subsequent [startup, laptop-layout and APQP source update](docs/STARTUP_LAPTOP_APQP.md) has **not** been packaged yet; review the Settings sections/screenshots before issuing the next release/manual.
+The manuals describe the frozen distributed V0.2.4 package, not the current V0.2.5 source. Manuals and PDF files have deliberately not been updated in this source release; screenshots and workflow descriptions must be reviewed before the next distributed package/manual.
 
 ## Operations
 
@@ -18,7 +29,7 @@ The manuals describe the frozen distributed V0.2.4 package. The subsequent [star
 |---|---|---|
 | Create Buyer Receipt / RFQ | Existing RFQ template and accepted Production confirmation | Native SAP GUI; accepted RFQ v32 baseline unchanged |
 | Update Info Record | Info Record / Plant template; target Plant, purchasing organization, lead time, standard/consignment type | Chrome or Edge WebGUI; concurrent independent worker windows |
-| APQP | Material and supplier template; Plant and optional refresh of existing Excel dates | Native SAP GUI; read-only plan close date queries using available idle sessions |
+| APQP Date Management | Project + responsible User ID for four planned dates; or the material/supplier Excel template for plan closure queries | Native SAP GUI; fixed 949; verified batch planned-date Save or read-only Excel query |
 | Update Source List | Material No., Parma, required Dual Sourcing Yes/No | Native SAP GUI; Plant C100; adds/reuses target with Fix + MRP 1; Yes retains other Fix/MRP, No clears all other Fix/MRP; never deletes rows |
 
 Each card has Open and Info. Info shows a bilingual step guide. Only supported purchasing operations are listed; there are no placeholder actions.
@@ -64,7 +75,7 @@ Normal result-open requests are limited to files issued by the current automatio
 
 Dashboard shows **estimated** time saved today and over the last 30 local calendar days. It uses confirmed successful groups/records from retained execution history, not sample dashboard data. Manual estimate = successful quantity × manual baseline; savings = manual estimate minus full batch wall time (including pauses and SAP waits), floored at zero across the period. Worker count does not multiply elapsed time. Failed/cancelled/dry-run/unresolved work, skipped units and legacy diagnostic-only records without measured durations are excluded.
 
-Manual-effort defaults use the owner's business estimates: RFQ **35 minutes/group**, SLT **5 minutes/record**, APQP **5 minutes/record**. Source List **5 minutes/record** remains a reference assumption. These are no longer editable in normal Settings. Untouched old default sets upgrade automatically; existing custom or calibrated values remain preserved. Estimates are recalculated using stored baselines, not presented as measured human productivity. Deleted/expired history no longer contributes; ordinary local history is capped at 500, with running/unresolved records protected.
+Manual-effort defaults use the owner's business estimates: RFQ **35 minutes/group**, SLT **5 minutes/record**, APQP plan-closure Excel queries **5 minutes/record**, and APQP date updates **1 minute/verified saved field**. Source List **5 minutes/record** remains a reference assumption. These are not editable in normal Settings. Existing custom/calibrated baselines for the older operations remain preserved; the APQP date-field baseline is fixed at 60 seconds. Estimates are not measured human productivity. Deleted/expired history no longer contributes; ordinary local history is capped at 500, with running/unresolved records protected.
 
 After restart, a global **Safe Recovery** panel identifies unfinished/uncertain RFQ runs: Project, confirmed completed groups, last confirmed checkpoint, current group details and any saved RFQ numbers. Evidence is atomically persisted in `.local-data/data/rfq-recovery/<run-id>.json`, independently of log retention. A launch handshake records the actual Python/engine PID before SAP access. No run automatically resumes, replays Create/Save, rolls back SAP changes or terminates another process.
 
@@ -124,6 +135,8 @@ npm run smoke:task-controls
 npm run smoke:rfq-runtime
 npm run smoke:rfq-stop
 npm run test:apqp
+npm run test:apqp-dates
+npm run smoke:apqp-dates
 npm run test:me01
 ```
 
