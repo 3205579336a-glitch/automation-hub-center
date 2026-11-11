@@ -8,7 +8,7 @@ export interface Me12BatchConfig {
   targetPlant: string
   purchasingOrganization: string
   targetLeadTime: string
-  infoCategory: 'standard' | 'consignment'
+  infoCategory: 'standard' | 'consignment' | 'both'
   infoRecordWidth: number
   dryRun: boolean
   maxItems: number
@@ -16,10 +16,22 @@ export interface Me12BatchConfig {
   saveEvery: number
 }
 
-export interface Me12PreviewRow {
+export interface Me12FieldUpdates {
+  targetLeadTime: string
+  plannedDeliveryTime: string
+  confirmationControl: string
+}
+
+export interface Me12PreviewRow extends Me12FieldUpdates {
   infoRecord: string
   excelRows: number[]
   plant: string
+}
+
+export type Me12InfoCategory = Exclude<Me12BatchConfig['infoCategory'], 'both'>
+
+export function me12Categories(category: Me12BatchConfig['infoCategory']): Me12InfoCategory[] {
+  return category === 'both' ? ['standard', 'consignment'] : [category]
 }
 
 export interface Me12ExcelPreview {
@@ -131,8 +143,8 @@ export function isMe12BatchConfig(value: unknown): value is Me12BatchConfig {
     typeof candidate.purchasingOrganization === 'string' &&
     /^[a-zA-Z0-9]{1,4}$/.test(candidate.purchasingOrganization) &&
     typeof candidate.targetLeadTime === 'string' &&
-    /^\d{1,3}$/.test(candidate.targetLeadTime) &&
-    (candidate.infoCategory === 'standard' || candidate.infoCategory === 'consignment') &&
+    /^(?:\d{1,3})?$/.test(candidate.targetLeadTime) &&
+    (candidate.infoCategory === 'standard' || candidate.infoCategory === 'consignment' || candidate.infoCategory === 'both') &&
     isIntegerInRange(candidate.infoRecordWidth, 0, 30) &&
     typeof candidate.dryRun === 'boolean' &&
     isIntegerInRange(candidate.maxItems, 0, 100_000) &&

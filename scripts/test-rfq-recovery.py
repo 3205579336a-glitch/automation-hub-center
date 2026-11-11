@@ -84,6 +84,25 @@ class RecoveryTests(unittest.TestCase):
         finally:
             wb.close()
 
+    def test_no_data_group_is_saved_as_skipped_and_next_group_runs(self):
+        self.book([['C100','P1','111','26517','a@example.com','2030-12-31'],
+                   ['C100','P1','222','26518','a@example.com','2030-12-31']])
+        calls = []
+        def process(sap, excel, group):
+            calls.append(group.tasks[0].material)
+            if group.tasks[0].material == '111':
+                raise engine.SapRpaError('NPL_NO_DATA', 'No data')
+            excel.write_status([task.excel_row for task in group.tasks], rfq_status='SUCCESS', rfq_number='MOCK-2')
+            excel.save()
+            return 'SUCCESS', 'MOCK-2'
+        self.assertEqual(self.invoke(process), 0)
+        self.assertEqual(calls, ['111', '222'])
+        result = self.statuses()
+        self.assertEqual(result[0]['RFQ Status'], 'SKIPPED_NPL_NO_DATA')
+        self.assertEqual(result[0]['Error Stage'], 'NPL_NO_DATA')
+        self.assertEqual(result[1]['RFQ Status'], 'SUCCESS')
+        self.assertNotIn('ACTION_REQUIRED', [event['type'] for event in self.events])
+
     def test_normalized_exact_duplicates_only_execute_first(self):
         self.book([['C100','P1','000111','026517','a@example.com','31.12.2030'],
                    ['C100','P1','111','26517','a@example.com','2030-12-31']])

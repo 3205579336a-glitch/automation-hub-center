@@ -40,7 +40,7 @@ export function registerMe12Handlers(
         const result = await downloadTemplateWithSaveDialog({
           event,
           templatePath,
-          suggestedFileName: 'ME12_Supplier_Lead_Time_Template.xlsx',
+          suggestedFileName: 'ME12_Info_Record_Update_Template.xlsx',
           configuredDirectory: settings.defaultDownloadFolder
         })
         if (!result.success) return result
@@ -162,8 +162,8 @@ export function registerMe12Handlers(
         operation: 'me12-batch',
         diagnosticRunId: runId,
         label: input.dryRun
-          ? 'ME12 Supplier Lead Time — Dry Run'
-          : `ME12 Supplier Lead Time — ${input.infoCategory === 'consignment' ? 'Consignment' : 'Standard'}`,
+          ? 'ME12 Info Record Update — Dry Run'
+          : `ME12 Info Record Update — ${input.infoCategory === 'both' ? 'Standard + Consignment' : input.infoCategory === 'consignment' ? 'Consignment' : 'Standard'}`,
         summary: 'ME12 batch is running.',
         tcode: 'ME12',
         dryRun: input.dryRun

@@ -197,7 +197,7 @@ class SapGuiConnector:
         code = re.search(r"\[\d+\]", expected)
         return actual == expected or bool(code and code.group() in actual)
 
-    def select(self, application=None):
+    def select(self, application=None, *, allow_open=True):
         self.check_stop()
         application = application if application is not None else self.application()
         connections = children(application, "Connections")
@@ -209,6 +209,10 @@ class SapGuiConnector:
         if targets:
             index = targets[0]
             return self._select_session(connections[index], labels[index], index)
+
+        if not allow_open:
+            raise SapGuiIssue('SAP_TARGET_NOT_OPEN', 'Sign in to the required SAP system and leave an idle SAP Easy Access window open.',
+                              '请登录本次任务指定的 SAP 系统，并保留一个停在 SAP 首页的空闲窗口。')
 
         # An alias may point to the same backend. Prove absence before opening.
         for connection in connections:

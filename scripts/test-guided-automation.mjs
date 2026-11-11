@@ -151,7 +151,9 @@ test('Guided adapters (no SAP or browsers)', async t => {
       const key = 'xl/worksheets/sheet1.xml'
       let xml = strFromU8(archive[key])
       xml = xml.replace(/<x:c r="A2"[^>]*\/>/, '<x:c r="A2" t="inlineStr"><x:is><x:t>0012345678</x:t></x:is></x:c>')
-        .replace(/<x:c r="B2"[^>]*\/>/, '<x:c r="B2" t="inlineStr"><x:is><x:t>C100</x:t></x:is></x:c>')
+        .replace(/<x:c r="C2"[^>]*\/>/, '<x:c r="C2"><x:v>0</x:v></x:c>')
+        .replace(/<x:c r="D2"[^>]*\/>/, '<x:c r="D2" t="inlineStr"><x:is><x:t>z004</x:t></x:is></x:c>')
+        .replace(/<x:c r="E2"[^>]*\/>/, '<x:c r="E2"><x:v>18</x:v></x:c>')
       archive[key] = strToU8(xml)
       const path = join(folder, 'namespaced.xlsx')
       await writeFile(path, zipSync(archive))
@@ -159,6 +161,9 @@ test('Guided adapters (no SAP or browsers)', async t => {
       const excel = new Me12ExcelService()
       assert.equal((await excel.preview(config)).selectedInfoRecords, 1)
       const session = await excel.prepareRun(config)
+      assert.equal(session.tasks[0].targetLeadTime, '0', 'A valid zero is not a blank or the old batch default')
+      assert.equal(session.tasks[0].plannedDeliveryTime, '18')
+      assert.equal(session.tasks[0].confirmationControl, 'Z004')
       excel.writeTaskResult(session, session.tasks[0], '5', 'SUCCESS')
       const result = await excel.saveCheckpoint(session)
       const resultXml = strFromU8(unzipSync(await readFile(result))[key])
@@ -166,13 +171,36 @@ test('Guided adapters (no SAP or browsers)', async t => {
       assert.match(resultXml, /ME12 Status/)
       assert.match(resultXml, /SUCCESS/)
       assert.equal((await excel.preview(config)).selectedInfoRecords, 1)
+      const invalid = (workbookXml, cell, value) => workbookXml.replace(
+        new RegExp(`<x:c r="${cell}"[^>]*\\s*/>`),
+        `<x:c r="${cell}" t="inlineStr"><x:is><x:t>${value}</x:t></x:is></x:c>`
+      )
+      const conflict = invalid(invalid(xml, 'A3', '0012345678'), 'C3', '5')
+      archive[key] = strToU8(conflict)
+      await writeFile(path, zipSync(archive))
+      await assert.rejects(excel.preview(config), /conflicting changes/)
+      archive[key] = strToU8(xml.replace('>z004<', '>Z!00<'))
+      await writeFile(path, zipSync(archive))
+      await assert.rejects(excel.preview(config), /Confirmation Control must contain/)
+      archive[key] = strToU8(xml.replace('<x:c r="E2"><x:v>18</x:v>', '<x:c r="E2"><x:v>-1</x:v>'))
+      await writeFile(path, zipSync(archive))
+      await assert.rejects(excel.preview(config), /PDT must be a whole number/)
+      archive[key] = strToU8(xml.replace(/<x:c r="C2">[\s\S]*?<\/x:c>/, '<x:c r="C2" />')
+        .replace(/<x:c r="D2" t="inlineStr">[\s\S]*?<\/x:c>/, '<x:c r="D2" />')
+        .replace('PDT (days)', 'Planned Delivery Time (days)'))
+      await writeFile(path, zipSync(archive))
+      const [pdtOnly] = (await excel.preview(config)).sample
+      assert.equal(pdtOnly.targetLeadTime, '', 'PDT must not fall back to the configured SLT')
+      assert.equal(pdtOnly.plannedDeliveryTime, '18')
+      assert.equal(pdtOnly.confirmationControl, '')
     })
     await t.test('Info Record adapter gates all workers and stops only at saved record boundaries', async () => {
       let windows = []
       const makeWindow = () => {
-        const locator = { count: async () => 1, nth() { return this }, isVisible: async () => true }
+        const locator = { count: async () => 1, nth() { return this }, isVisible: async () => true, isEditable: async () => true }
         const frame = { getByRole: () => locator }
-        const window = { signedIn: false, closed: false, page: { on() {}, goto: async () => {}, url: () => 'https://mock.sap/ME12', isClosed: () => window.closed, frames: () => window.signedIn ? [frame] : [] }, context: null }
+        const window = { signedIn: false, closed: false, probes: 0, page: { on() {}, goto: async () => {}, url: () => 'https://mock.sap/ME12', isClosed: () => window.closed,
+          frames: () => { window.probes++; return window.signedIn ? [frame] : [] } }, context: null }
         window.context = { pages: () => [window.page], close: async () => { window.closed = true } }
         return window
       }
@@ -188,15 +216,14 @@ test('Guided adapters (no SAP or browsers)', async t => {
       runner.runTaskWithRetries = async () => { writes++; return { kind: 'success', oldValue: '2', status: 'SUCCESS' } }
       const id = service.begin()
       const running = runner.run(config, () => {}, { service, runId: id })
-      await until(() => service.getInteraction())
+      await until(() => windows.length === 2 && windows.every(window => window.probes > 0))
       assert.equal(writes, 0)
+      const firstProbeCount = windows[0].probes
       windows[0].signedIn = true
-      const first = service.getInteraction()
-      await service.respond({ runId: id, requestId: first.requestId, action: 'continue' })
-      await until(() => service.getInteraction()?.requestId !== first.requestId && service.getInteraction())
+      await until(() => windows[0].probes > firstProbeCount)
       assert.equal(writes, 0, 'One signed-in browser is not enough')
+      assert.equal(service.getInteraction(), null, 'Normal sign-in should not prompt for Continue')
       windows[1].signedIn = true
-      await service.respond({ runId: id, requestId: service.getInteraction().requestId, action: 'continue' })
       assert.equal((await running).succeeded, 3)
       assert.equal(writes, 3)
       assert(windows.every(window => window.closed))

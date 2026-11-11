@@ -1,5 +1,6 @@
 import type { AutomationProgress, AutomationResult, OpenSapRequest } from '../shared/automation-types'
 import type { TimeSavingsSummary } from '../shared/time-savings'
+import type { DashboardSnapshot } from '../shared/dashboard-types'
 import type { RfqRecoveryResult, RfqRecoveryView } from '../shared/rfq-safe-recovery'
 import type { AutomationInteraction, InteractionResponse } from '../shared/automation-interaction'
 import type { EtaSnapshot, LocalIntelligenceSnapshot } from '../shared/local-intelligence'
@@ -41,6 +42,7 @@ import type {
   Me01PreviewResult,
   SelectMe01ExcelResult
 } from '../shared/me01-types'
+import type { Mm02Config, Mm02PreviewResult, Mm02Progress, Mm02Result } from '../shared/mm02-types'
 
 import type { ApqpConfig, ApqpFileResult, ApqpPreviewResult, ApqpProgress, ApqpResult } from '../shared/apqp-types'
 import type { ApqpDateCapabilities, ApqpDateQuery, ApqpDateQueryResult, ApqpDatePreviewRequest, ApqpDatePreviewResult,
@@ -53,6 +55,8 @@ export interface SapAutomationApi {
   previewApqpDateChanges: (input: ApqpDatePreviewRequest) => Promise<ApqpDatePreviewResult>
   executeApqpDateChanges: (input: ApqpDateExecuteRequest) => Promise<ApqpDateExecuteResult>
   getTimeSavings: () => Promise<TimeSavingsSummary>
+  getDashboardSnapshot: () => Promise<DashboardSnapshot>
+  getLocalUsername: () => Promise<string | null>
   getRfqRecovery: () => Promise<RfqRecoveryView[]>
   openRecoveryResult: (runId: string) => Promise<RfqRecoveryResult>
   resolveRfqRecovery: (input: { runId: string; note?: string; verifiedInSap: true; engineStopped: true }) => Promise<RfqRecoveryResult>
@@ -82,6 +86,12 @@ export interface SapAutomationApi {
   startMe01Batch: (config: Me01BatchConfig) => Promise<Me01BatchResult>
   cancelMe01Batch: () => Promise<Me01CancelResult>
   onMe01Progress: (listener: (progress: Me01BatchProgress) => void) => () => void
+  downloadMm02Template: () => Promise<DownloadMe01TemplateResult>
+  selectMm02Excel: () => Promise<SelectMe01ExcelResult>
+  previewMm02Batch: (path: string) => Promise<Mm02PreviewResult>
+  startMm02Batch: (config: Mm02Config) => Promise<Mm02Result>
+  cancelMm02Batch: () => Promise<{ success: boolean }>
+  onMm02Progress: (listener: (progress: Mm02Progress) => void) => () => void
   openAutomationArtifact: (path: string) => Promise<{ success: boolean; message?: string }>
   getExecutionHistory: (query?: ExecutionHistoryQuery) => Promise<ExecutionHistoryResult>
   deleteExecutionHistory: () => Promise<DeleteHistoryResult>

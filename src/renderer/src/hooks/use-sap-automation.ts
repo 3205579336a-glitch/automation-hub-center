@@ -6,7 +6,6 @@ type AutomationState = 'ready' | AutomationProgressStage
 
 export function useSapAutomation(notify: Notify): {
   status: AutomationState
-  statusLabel: string
   busy: boolean
   openSapWebGui: (request?: OpenSapRequest) => Promise<void>
 } {
@@ -64,18 +63,8 @@ export function useSapAutomation(notify: Notify): {
     }
   }, [notify])
 
-  const labels: Record<AutomationState, string> = {
-    ready: 'Ready',
-    'starting-browser': 'Starting Browser',
-    'opening-sap': 'Opening SAP',
-    'waiting-for-login': 'Waiting for Login',
-    complete: 'Ready',
-    failed: 'Attention'
-  }
-
   return {
     status,
-    statusLabel: labels[status],
     busy: status === 'starting-browser' || status === 'opening-sap',
     openSapWebGui
   }

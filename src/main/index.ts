@@ -1,19 +1,23 @@
 import { join } from 'node:path'
-import { homedir } from 'node:os'
-import { app, BrowserWindow, screen, shell } from 'electron'
+import { homedir, userInfo } from 'node:os'
+import { app, BrowserWindow, ipcMain, screen, shell } from 'electron'
 import { BrowserManager } from './automation/browser-manager'
 import { Me12BatchRunner } from './automation/me12-batch-runner'
 import { RfqNativeRunner } from './automation/rfq-native-runner'
 import { Me01NativeRunner } from './automation/me01-native-runner'
+import { Mm02NativeRunner } from './automation/mm02-native-runner'
 import { BrowserSlotManager } from './automation/browser-slot-manager'
 import { registerAutomationHandlers } from './ipc/automation-handlers'
 import { registerDiagnosticHandlers } from './ipc/diagnostic-handlers'
 import { registerSettingsHandlers } from './ipc/settings-handlers'
 import { registerMe12Handlers } from './ipc/me12-handlers'
 import { registerHistoryHandlers } from './ipc/history-handlers'
+import { isTrustedRenderer } from './ipc/ipc-security'
 import { RunDiagnosticCleanup } from './services/run-diagnostic-cleanup'
 import { registerRfqHandlers } from './ipc/rfq-handlers'
 import { registerMe01Handlers } from './ipc/me01-handlers'
+import { registerMm02Handlers } from './ipc/mm02-handlers'
+import { MM02_TEMPLATE } from '../shared/mm02-types'
 import { DiagnosticLogger } from './services/diagnostic-logger'
 import { LocalStoragePaths } from './services/local-storage-paths'
 import { SettingsService } from './services/settings-service'
@@ -80,6 +84,17 @@ function createMainWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  ipcMain.handle(IPC_CHANNELS.getLocalUsername, (event, ...args: unknown[]): string | null => {
+    // Expose only the account name to this app's top-level renderer. Do not
+    // log it, store it, or treat it as a SAP identity.
+    if (args.length || process.platform !== 'win32' || event.sender !== mainWindow?.webContents ||
+        event.senderFrame !== event.sender.mainFrame || !isTrustedRenderer(event)) return null
+    try {
+      const username = userInfo().username.trim()
+      const unsafe = [...username].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+      return username && username.length <= 128 && !unsafe ? username : null
+    } catch { return null }
+  })
   if (!hasInstanceLock) return
   const startupPhases: Record<string, number> = { electronReadyMs: Math.round(performance.now() - startupStarted) }
   const storagePaths = new LocalStoragePaths(app.getPath('userData'))
@@ -183,6 +198,9 @@ app.whenReady().then(async () => {
     guided,
     intelligence
   )
+  const mm02Runner = new Mm02NativeRunner({ executable: sharedEngine,
+    script: join(resourceRoot, 'rpa', 'mm02_sub_commodity.py'), packaged: app.isPackaged }, artifacts)
+  registerMm02Handlers(mm02Runner, join(resourceRoot, 'templates', MM02_TEMPLATE), settingsService, guided, history, logger, intelligence)
   const apqpRunner = new ApqpRunner({
     executable: sharedEngine,
     executableArgs: ['apqp'],
@@ -263,6 +281,7 @@ app.whenReady().then(async () => {
       void rfqRunner.cancel()
       me12Runner.cancel()
       me01Runner.cancel()
+      mm02Runner.cancel()
       apqpRunner.cancel()
       if (!waitingForRfq) {
         waitingForRfq = true

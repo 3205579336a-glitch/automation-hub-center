@@ -23,6 +23,8 @@ export function HistoryPage(): React.JSX.Element {
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
   const request = useRef(0)
+  const previousSearch = useRef(search)
+  const invalidateRequest = useCallback(() => { request.current++ }, [])
 
   const loadHistory = useCallback(async () => {
     const current = ++request.current
@@ -33,7 +35,7 @@ export function HistoryPage(): React.JSX.Element {
         statuses: status === 'all' ? undefined : [status],
         limit: PAGE_SIZE,
         offset: (page - 1) * PAGE_SIZE,
-        operations: ['create-rfq', 'me12-batch', 'me01-source-list', 'apqp-plan-closure', 'apqp-date-management']
+        operations: ['create-rfq', 'me12-batch', 'me01-source-list', 'apqp-plan-closure', 'apqp-date-management', 'mm02-sub-commodity']
       })
       if (current !== request.current) return
       setEntries(result.entries)
@@ -48,8 +50,11 @@ export function HistoryPage(): React.JSX.Element {
   }, [search, status, page])
 
   useEffect(() => {
-    void loadHistory()
-  }, [loadHistory])
+    const delay = search !== previousSearch.current ? 220 : 0
+    previousSearch.current = search
+    const timer = window.setTimeout(() => { void loadHistory() }, delay)
+    return () => { window.clearTimeout(timer); invalidateRequest() }
+  }, [invalidateRequest, loadHistory, search])
 
   const zh = language === 'zh-CN'
   return (
@@ -63,23 +68,29 @@ export function HistoryPage(): React.JSX.Element {
           <RefreshCw size={14} /> {zh ? '刷新' : 'Refresh'}
         </button>
       </div>
-      <ClearLogsButton onCleared={async () => { setPage(1); setExpanded(null); await loadHistory() }} />
-      <section className={`card ${styles.container}`}>
+      <div className={styles.logActions}>
+        <ClearLogsButton onCleared={async () => {
+          setExpanded(null)
+          if (page !== 1) setPage(1)
+          else await loadHistory()
+        }} />
+      </div>
+      <section className={`card ${styles.container}`} aria-busy={loading}>
         <div className={styles.toolbar}>
           <div className={styles.search}>
-            <Search size={14} />
+            <Search size={16} aria-hidden="true" />
             <input
               value={search}
               onChange={(event) => { setSearch(event.target.value); setPage(1); setExpanded(null) }}
               placeholder={zh ? '搜索操作、结果…' : 'Search operation, result…'}
-              aria-label="Search operations"
+              aria-label={zh ? '搜索执行历史' : 'Search operations'}
             />
           </div>
           <select
             className={`select ${styles.statusFilter}`}
             value={status}
             onChange={(event) => { setStatus(normalizeStatus(event.target.value)); setPage(1); setExpanded(null) }}
-            aria-label="History status"
+            aria-label={zh ? '筛选执行状态' : 'History status'}
           >
             <option value="all">{zh ? '全部状态' : 'All statuses'}</option>
             <option value="Running">{zh ? '运行中' : 'Running'}</option>
@@ -121,7 +132,7 @@ export function HistoryPage(): React.JSX.Element {
         </div>
         <div className={styles.footer}>
           <span>{zh ? `共 ${total} 条，本页 ${entries.length} 条` : `${total} total, ${entries.length} on this page`}</span>
-          <span>{zh ? '数据来源：.local-data/data/execution-history.json' : 'Source: .local-data/data/execution-history.json'}</span>
+          <span>{zh ? '记录保存在本机' : 'Stored on this device'}</span>
         </div>
         <LogPagination page={page} totalPages={Math.ceil(total / PAGE_SIZE)} hasMore={page * PAGE_SIZE < total} loading={loading}
           onPage={next => { setPage(next); setExpanded(null) }} />
@@ -152,7 +163,7 @@ function HistoryRows({
         <td><StatusBadge status={entry.status} /></td>
         <td className={styles.result}>{entry.apqpStaged !== undefined ? `${entry.apqpStaged} ${zh ? '已填入 · 未保存' : 'staged · NOT SAVED'}` : entry.processed !== undefined ? `${entry.succeeded ?? 0} ${zh ? '成功' : 'successful'} · ${entry.failed ?? 0} ${zh ? '失败' : 'failed'}` : zh ? '查看详情' : 'View details'}</td>
         <td>
-          <button className={styles.viewButton} aria-label={`View ${operationName(entry, zh)}`} onClick={onToggle}>
+          <button className={styles.viewButton} aria-expanded={expanded} aria-label={zh ? `查看 ${operationName(entry, zh)}` : `View ${operationName(entry, zh)}`} onClick={onToggle}>
             <Eye size={14} /> {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
           </button>
         </td>

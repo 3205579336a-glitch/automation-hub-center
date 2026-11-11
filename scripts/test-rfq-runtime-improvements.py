@@ -101,6 +101,30 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.runtime.wait(self.sap, lambda: True, .2, 'test'), True)
         self.assertEqual(self.events, [])
 
+    def test_npl_no_data_stops_wait_immediately(self):
+        self.runtime.install()
+        self.runtime.npl_query_in_progress = True
+        self.sap.current_transaction = lambda: engine.TCODE_NPL
+        self.sap.is_npl_selection_screen = lambda: True
+        self.sap.find = lambda identifier, **kwargs: SimpleNamespace(Text='New Part List') if identifier == 'wnd[0]' else None
+        self.sap.status_bar = lambda: ('S', 'No data')
+        with self.assertRaises(engine.SapRpaError) as raised:
+            self.sap.wait_grid_columns(engine.ID_GRID_CUSTOMER1, [engine.COL_MATERIAL], timeout=60)
+        self.assertEqual(raised.exception.stage, 'NPL_NO_DATA')
+        self.assertLess(self.clock.value, 1)
+        self.assertNotIn('ACTION_REQUIRED', [kind for kind, _ in self.events])
+
+    def test_no_data_outside_fresh_npl_query_is_not_skipped(self):
+        self.runtime.install()
+        self.sap.current_transaction = lambda: engine.TCODE_NPL
+        self.sap.is_npl_selection_screen = lambda: True
+        self.sap.find = lambda identifier, **kwargs: SimpleNamespace(Text='New Part List') if identifier == 'wnd[0]' else None
+        self.sap.status_bar = lambda: ('S', 'No data')
+        self.runtime.tasks = []
+        with self.assertRaises(engine.SapRpaError) as raised:
+            self.sap.wait_grid_columns(engine.ID_GRID_CUSTOMER1, [engine.COL_MATERIAL], timeout=.1)
+        self.assertEqual(raised.exception.stage, 'SAP_SLOW_HARD_TIMEOUT')
+
     def test_slow_recovered_no_user_action(self):
         result = self.runtime.wait(self.sap, lambda: True if self.clock.value >= .3 else None, .1, 'test')
         self.assertTrue(result)

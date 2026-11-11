@@ -1,8 +1,9 @@
 import { ArrowLeft, Download, Upload } from 'lucide-react'
-import { useEffect, useId, useRef } from 'react'
+import { useId } from 'react'
 import type { AutomationOutcome, AutomationState } from '../../../../shared/guided-automation'
 import { useLocalization } from '../../i18n/use-localization'
 import { stateLabel } from './state-label'
+import { useWorkflowDialog } from './task-run-context'
 import styles from './GuidedAutomation.module.css'
 
 export function AutomationPageLayout({ title, description, onBack, toolbar, children, embedded = false }: {
@@ -47,11 +48,10 @@ export function AutomationProgress({ state, current, total }: { state: Automatio
 export function RunConfirmationModal({ open, title, description, metrics, onStart, onCancel }: {
   open: boolean; title: string; description: string; metrics: { label: string; value: string | number }[]; onStart: () => void; onCancel: () => void
 }): React.JSX.Element {
-  const dialog = useRef<HTMLDialogElement>(null)
+  const dialog = useWorkflowDialog(open)
   const titleId = useId()
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
-  useEffect(() => { if (open && !dialog.current?.open) dialog.current?.showModal(); else if (!open) dialog.current?.close() }, [open])
   return <dialog className={styles.dialog} ref={dialog} aria-labelledby={titleId} onCancel={onCancel}>
     <h2 id={titleId}>{title}</h2><p>{description}</p><PreviewSummary metrics={metrics} />
     <div className={styles.actions}><button className="button" onClick={onCancel}>{zh ? '取消' : 'Cancel'}</button><button className="button primary" onClick={onStart}>{zh ? '开始自动化' : 'Start Automation'}</button></div>
@@ -61,11 +61,10 @@ export function RunConfirmationModal({ open, title, description, metrics, onStar
 export function NoticeConfirmationModal({ notice, onClose, expandedDetails = false }: {
   notice: { title: string; message: string; details?: string } | null; onClose: () => void; expandedDetails?: boolean
 }): React.JSX.Element {
-  const dialog = useRef<HTMLDialogElement>(null)
+  const dialog = useWorkflowDialog(Boolean(notice))
   const titleId = useId(), messageId = useId()
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
-  useEffect(() => { if (notice && !dialog.current?.open) dialog.current?.showModal(); else if (!notice) dialog.current?.close() }, [notice])
   return <dialog className={styles.dialog} ref={dialog} aria-labelledby={titleId} aria-describedby={messageId} onCancel={onClose}>
     <h2 id={titleId}>{notice?.title}</h2><p id={messageId}>{notice?.message}</p>
     {notice?.details && (expandedDetails ? <pre className={styles.details}>{notice.details}</pre>

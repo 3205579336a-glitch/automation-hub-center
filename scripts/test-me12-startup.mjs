@@ -9,7 +9,7 @@ const compiled = ts.transpileModule(readFileSync('src/main/automation/me12-start
 }).outputText
 const module = { exports: {} }
 new Function('module', 'exports', compiled)(module, module.exports)
-const { verifyMe12Startup } = module.exports
+const { Me12StartupPending, verifyMe12Startup, waitForMe12Startup } = module.exports
 const target = new URL('https://mock.sap/webgui?~transaction=ME12#')
 
 function fixture() {
@@ -77,4 +77,64 @@ test('stop or closed window prevents navigation', async () => {
   state.closed = true
   await assert.rejects(verify(), /closed/)
   assert.equal(state.calls, 0)
+})
+
+test('certificate/SSO and delayed ME12 rendering are retried automatically', async () => {
+  const { state, verify } = fixture()
+  state.url = 'about:blank'
+  let checks = 0
+  await waitForMe12Startup([async () => {
+    checks++
+    if (checks === 2) state.url = target.toString()
+    if (checks === 3) state.ready = true
+    await verify()
+  }], () => {}, 3_000)
+  assert.equal(checks, 3)
+  assert.equal(state.calls, 0, 'Do not reload while the user signs in or ME12 is rendering')
+})
+
+test('startup requires all windows to be ready in the same pass', async () => {
+  const first = fixture(), second = fixture()
+  let pass = 0
+  await waitForMe12Startup([
+    async () => {
+      pass++
+      first.state.ready = pass !== 2
+      await first.verify()
+    },
+    async () => {
+      second.state.ready = pass > 1
+      await second.verify()
+    }
+  ], () => {}, 3_000)
+  assert.equal(pass, 3, 'A window that loses readiness must not be treated as ready')
+})
+
+test('expired startup identifies pending windows and allows a fresh manual check', async () => {
+  const first = fixture(), second = fixture()
+  first.state.ready = true
+  const checks = [first.verify, second.verify]
+  await assert.rejects(waitForMe12Startup(checks, () => {}, 0),
+    { name: 'Error', message: /window\(s\) 2\. No record was changed\./ })
+  second.state.ready = true
+  await waitForMe12Startup(checks, () => {}, 0)
+})
+
+test('closed window is not retried and cancellation wins even if checks pass', async () => {
+  const { state, verify } = fixture()
+  state.closed = true
+  await assert.rejects(waitForMe12Startup([verify], () => {}, 3_000),
+    error => !(error instanceof Me12StartupPending) && /closed/.test(error.message))
+  let cancelled = false
+  await assert.rejects(waitForMe12Startup([async () => { cancelled = true }], () => {
+    if (cancelled) throw Error('Cancelled')
+  }, 3_000), /Cancelled/)
+})
+
+test('startup rejects a ready-looking field after navigation away from SAP', async () => {
+  const { state, page } = fixture()
+  await assert.rejects(verifyMe12Startup(page, target, new WeakSet(), async () => {
+    state.url = 'https://sso.example.test/login'
+    return true
+  }, async () => false, () => {}), Me12StartupPending)
 })

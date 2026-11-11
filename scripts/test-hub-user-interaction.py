@@ -136,9 +136,10 @@ class Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'input.xlsx'
             path.write_bytes(b'mocked')
+            results.result_path = path
+            results.writeback_warning = ''
             with patch.dict(os.environ, {'EXCEL_PATH': str(path), 'HUB_RUN_ID': 'MOCK', 'HUB_ARTIFACT_DIR':folder, 'ME01_VALID_FROM':'2026-10-12', 'ME01_VALID_TO':'2099-12-31', 'ME01_PURCH_ORG':'C100'}), patch.object(me01, 'WorkbookResults', return_value=results), patch.object(me01, 'HubUserInteraction', return_value=hub), patch.object(me01, 'find_hub_session', return_value=session), patch.object(me01, 'open_me01'), patch.object(me01, 'maintain_material', side_effect=RuntimeError('unknown')) as maintain, patch.object(me01, 'emit', side_effect=lambda event, **payload: events.append((event, payload))):
                 self.assertEqual(me01.main(), 0)
-            maintain.assert_called_once()
             maintain.assert_called_once()
             self.assertEqual(maintain.call_args.args[:7], (session, '16808656', '41889', False, '2026-10-12','2099-12-31','C100'))
             self.assertEqual(maintain.call_args.args[7]['material'], '16808656')
@@ -156,6 +157,8 @@ class Tests(unittest.TestCase):
             self.assertGreaterEqual(results.save.call_count, 2)
             self.assertTrue(events[-1][1]['cancelled'])
             self.assertEqual(events[-1][1]['processed'], 1)
+            self.assertEqual(events[-1][1]['resultPath'], str(path))
+            self.assertEqual(events[-1][1]['warning'], '')
         me01.HUB_INTERACTION = None
 
     def test_apqp_unknown_query_stops_other_task_scheduling(self):

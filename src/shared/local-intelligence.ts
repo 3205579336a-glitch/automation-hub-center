@@ -1,6 +1,6 @@
 import type { ExecutionHistoryEntry } from './execution-history-types'
 
-export const DEFAULT_TASK_ORDER = ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list'] as const
+export const DEFAULT_TASK_ORDER = ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list', 'mm02-sub-commodity'] as const
 export type AutomationId = typeof DEFAULT_TASK_ORDER[number]
 /** Separate timing models; these two phases still share a single Operations card. */
 export type TimingAutomationId = AutomationId | 'apqp-date-management' | 'apqp-date-preview' | 'apqp-date-update'
@@ -57,6 +57,7 @@ const FALLBACK: Record<TimingAutomationId, { startupMs: number; unitMs: number; 
   'create-rfq': { startupMs: 15_000, unitMs: 60_000, unit: 'groups' },
   'me12-batch': { startupMs: 20_000, unitMs: 15_000, unit: 'rows' },
   'me01-source-list': { startupMs: 12_000, unitMs: 6_000, unit: 'rows' },
+  'mm02-sub-commodity': { startupMs: 10_000, unitMs: 12_000, unit: 'rows' },
   'apqp-plan-closure': { startupMs: 15_000, unitMs: 7_000, unit: 'items' },
   'apqp-date-management': { startupMs: 8_000, unitMs: 4_000, unit: 'items' },
   'apqp-date-preview': { startupMs: 4_000, unitMs: 4_000, unit: 'items' },

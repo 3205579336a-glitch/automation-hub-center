@@ -8,6 +8,7 @@ import ts from 'typescript'
 import { _electron as electron } from 'playwright-core'
 
 const root = resolve('.'), folder = await mkdtemp(join(tmpdir(), 'apqp-dates-ui-'))
+const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).version
 const screenshots = resolve('artifacts/apqp-date-management')
 await mkdir(screenshots, { recursive: true })
 const modules = {}
@@ -18,8 +19,7 @@ async function compile(path) {
   modules[file] = code
   for (const match of code.matchAll(/require\("([^"]+)"\)/g)) if (match[1].startsWith('.')) await compile(join(dirname(file), match[1] + '.ts'))
 }
-for (const path of ['src/main/ipc/apqp-date-handlers.ts', 'src/main/ipc/history-handlers.ts', 'src/main/services/execution-history-service.ts', 'src/main/services/local-intelligence-service.ts', 'src/main/services/apqp-date-service.ts', 'src/main/services/apqp-date-cache.ts', 'src/main/automation/apqp-runner.ts', 'src/main/services/generated-artifacts.ts', 'src/main/services/guided-automation-service.ts']) await compile(path)
-await compile('src/shared/time-savings.ts')
+for (const path of ['src/main/ipc/apqp-date-handlers.ts', 'src/main/ipc/history-handlers.ts', 'src/main/ipc/safe-recovery-handlers.ts', 'src/main/services/execution-history-service.ts', 'src/main/services/local-intelligence-service.ts', 'src/main/services/apqp-date-service.ts', 'src/main/services/apqp-date-cache.ts', 'src/main/automation/apqp-runner.ts', 'src/main/services/generated-artifacts.ts', 'src/main/services/guided-automation-service.ts']) await compile(path)
 let app
 try {
   app = await electron.launch({ args: ['.', '--disable-gpu', `--user-data-dir=${folder}`], env: { ...process.env, LOCALAPPDATA: folder } })
@@ -60,9 +60,10 @@ try {
     for (const channel of ['apqp:dates:capabilities', 'apqp:dates:query', 'apqp:dates:cache', 'apqp:dates:preview', 'apqp:dates:execute', 'apqp:cancel', 'intelligence:get', 'history:get', 'history:delete']) ipcMain.removeHandler(channel)
     registerApqpDateHandlers(service, guided, history, logger, intelligence)
     registerHistoryHandlers(history, intelligence, () => guided.isRunning())
-    const { timeSavings } = get('src/shared/time-savings.ts')
-    ipcMain.removeHandler('dashboard:time-savings')
-    ipcMain.handle('dashboard:time-savings', async () => timeSavings(await history.getEntries({ limit: 500 })))
+    const { registerSafeRecoveryHandlers } = get('src/main/ipc/safe-recovery-handlers.ts')
+    const { IPC_CHANNELS } = get('src/shared/ipc-channels.ts')
+    for (const name of ['getTimeSavings', 'getDashboardSnapshot', 'getRfqRecovery', 'openRecoveryResult', 'resolveRfqRecovery']) ipcMain.removeHandler(IPC_CHANNELS[name])
+    registerSafeRecoveryHandlers({ pending: () => [], protectedIds: () => new Set() }, history, { getSettings: async () => ({}) }, () => guided.isRunning())
     ipcMain.handle('apqp:cancel', () => ({ success: runner.cancel() }))
     // All other business starts remain forbidden in this isolated smoke profile.
     for (const channel of ['rfq:start', 'me01:start', 'me12:start', 'apqp:start', 'automation:open-sap']) {
@@ -81,7 +82,7 @@ const observeAudio = () => {
   await page.getByRole('heading', { name: 'APQP Date Management', exact: true }).locator('..').getByRole('button', { name: 'Open', exact: true }).click()
   const find = page.getByRole('button', { name: 'Find APQPs', exact: true })
   assert.equal(await page.getByLabel('SAP environment', { exact: true }).count(), 0, '949 is fixed, not an end-user choice')
-  assert.equal(await page.getByTitle('0.2.5', { exact: true }).count(), 1)
+  assert.equal(await page.getByTitle(version, { exact: true }).count(), 1)
   assert.equal(await page.getByLabel('NPL / Project Code *', { exact: true }).inputValue(), '775773')
   await page.getByLabel('User ID *', { exact: true }).fill('EE00221')
   await find.evaluate(button => { button.click(); button.click() })
@@ -196,9 +197,9 @@ const observeAudio = () => {
   await page.getByRole('button', { name: '仪表板', exact: true }).click()
   await page.getByRole('region', { name: '预计节省时间', exact: true }).waitFor()
   await page.getByText('计算依据与基准', { exact: true }).click()
-  await page.getByText('最近 30 天已完成 4 个日期字段。', { exact: false }).waitFor()
+  await page.getByText('本机保留记录中共完成 4 个字段。', { exact: false }).waitFor()
   assert.deepEqual(errors, [])
-  console.log('V0.2.5 APQP smoke passed: fixed 949, no read-result button, simple copy, saved-field history and dashboard savings, first-target hash index, bulk reads, exact planned dates, grey field, batch Save verification, safe skips, search/sort, cache/reset and responsive bilingual UI. Fake SAP only; no live SAP access.')
+  console.log(`V${version} APQP smoke passed: fixed 949, no read-result button, simple copy, saved-field history and dashboard savings, first-target hash index, bulk reads, exact planned dates, grey field, batch Save verification, safe skips, search/sort, cache/reset and responsive bilingual UI. Fake SAP only; no live SAP access.`)
 } catch (error) {
   if (app) { const page = await app.firstWindow(); console.error(await page.locator('main').innerText().catch(() => 'No main')); await page.screenshot({ path: join(screenshots, 'failure.png'), fullPage: true }).catch(() => undefined) }
   throw error

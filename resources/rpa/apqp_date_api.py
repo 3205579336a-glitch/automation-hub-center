@@ -15,6 +15,7 @@ import apqp_date_update as date_update
 from hub_user_interaction import HubStopped, HubUserInteraction
 
 WRITE_GATE = 'APQP_DATE_WRITE_NOT_VALIDATED'
+APQP_DATE_POLICY = 'FGHM_PROD_VERIFIED_SAVE_FIELD_COUNTS_V2'
 IDENTITY_COLUMNS = ('APQPNO', 'MATNR', 'LIFNR', 'WERKS', 'PSPID_1', 'SD')  # Live-observed 2026-10-20.
 
 

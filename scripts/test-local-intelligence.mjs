@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
 import { test } from 'node:test'
 import ts from 'typescript'
+import { row, workbookFixture } from './fixtures/mm02-workbook.mjs'
 
 const require = createRequire(import.meta.url)
 const cache = new Map()
@@ -272,7 +273,7 @@ test('Timing observer and local history integration', async t => {
   })
 })
 
-test('Four real IPC adapters observe mocked engines without changing execution', async t => {
+test('Real IPC adapters observe mocked engines without changing execution', async t => {
   const configs = {
     'create-rfq': { excelPath: 'fixture.xlsx', environment: 'PROD', productionConfirmed: true },
     'me12-batch': { excelPath: 'fixture.xlsx', sheetName: '', infoRecordColumn: 1, plantColumn: 2, dataStartRow: 2,
@@ -330,8 +331,19 @@ test('Four real IPC adapters observe mocked engines without changing execution',
       if (id === 'me12-batch') load('src/main/ipc/me12-handlers.ts').registerMe12Handlers(excel, runner, logger, store, '', settings, guided, service)
       if (id === 'me01-source-list') load('src/main/ipc/me01-handlers.ts').registerMe01Handlers(excel, runner, logger, store, '', settings, guided, service)
       if (id === 'apqp-plan-closure') load('src/main/ipc/apqp-handlers.ts').registerApqpHandlers(runner, logger, store, settings, '', guided, service)
-      const channel = id === 'create-rfq' ? 'rfq:start' : id === 'me12-batch' ? 'me12:start' : id === 'me01-source-list' ? 'me01:start' : 'apqp:start'
-      const result = await handlers.get(channel)({ senderFrame: { url: 'file:///renderer/index.html' }, sender: { isDestroyed: () => true } }, configs[id])
+      const event = { senderFrame: { url: 'file:///renderer/index.html' }, sender: { isDestroyed: () => true } }
+      let config = configs[id]
+      if (id === 'mm02-sub-commodity') {
+        load('src/main/ipc/mm02-handlers.ts').registerMm02Handlers(runner, '', settings, guided, store, logger, service)
+        const excelPath = join(folder, 'fixture.xlsx')
+        await writeFile(excelPath, workbookFixture(row(2, '00123', '012345') + row(3, '00234', '123456')))
+        const preview = await handlers.get('mm02:preview')(event, excelPath)
+        assert.equal(preview.success, true)
+        config = { excelPath, previewToken: preview.preview.token, confirmed: true }
+      }
+      const channel = id === 'create-rfq' ? 'rfq:start' : id === 'me12-batch' ? 'me12:start' : id === 'me01-source-list' ? 'me01:start'
+        : id === 'mm02-sub-commodity' ? 'mm02:start' : 'apqp:start'
+      const result = await handlers.get(channel)(event, config)
       assert.equal(result.success, true); assert.equal(executions, 1)
       const [saved] = await store.getEntries({})
       assert.equal(saved.performance.waitingForUserMs, 306000)
@@ -376,7 +388,7 @@ test('APQP dates: real IPC persists query/preview history and learns separate ti
     assert.equal(shared.timingModel(entries, 'apqp-date-management').historicalRuns, 1)
     assert.equal(shared.timingModel(entries, 'apqp-date-preview').historicalRuns, 1)
     assert.equal(shared.timingModel(entries, 'apqp-plan-closure').historicalRuns, 0)
-    assert.equal(shared.DEFAULT_TASK_ORDER.length, 4, 'Only four Operations cards')
+    assert.deepEqual(shared.DEFAULT_TASK_ORDER, ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list', 'mm02-sub-commodity'])
     assert(published.some(eta => eta.automationId === 'apqp-date-management' && eta.completed === 1 && eta.remainingMs > 0))
     assert.equal(intelligence.eta(), null)
     assert.equal(guided.isRunning(), false)

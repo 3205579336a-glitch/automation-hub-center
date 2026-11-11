@@ -14,7 +14,7 @@ await writeFile(input, 'protected input fixture')
 await writeFile(output, 'protected result fixture')
 const modules = [
   { channel: 'rfq', title: 'Automatically Create Buyer Receipts and RFQs in Batch from NPL' },
-  { channel: 'me12', title: 'Automatically Update Supplier Lead Times (SLT) in Batch' },
+  { channel: 'me12', title: 'Batch Update Purchasing Info Records (IR)' },
   { channel: 'apqp', title: 'APQP Date Management' },
   { channel: 'me01', title: 'Automatically Maintain Source Lists in Batch' }
 ]
@@ -30,7 +30,7 @@ try {
     const previews = {
       rfq: { sheetName: 'Mock', totalRows: 1, validRows: 1, invalidRows: 0, skippedRows: 0, skippedBlankRows: 0, groupCount: 1,
         groups: [{ key: 'MOCK', plant: 'C100', supplier: '41889', project: '775773', materials: ['16808656'] }], plants: ['C100'], warnings: [], sample: [], fingerprint: 'MOCK' },
-      me12: { selectedInfoRecords: 1, duplicateRows: 0, sample: [{ infoRecord: '0012345678', plant: 'C100', excelRows: [2] }] },
+      me12: { selectedInfoRecords: 1, duplicateRows: 0, sample: [{ infoRecord: '0012345678', plant: 'C100', excelRows: [2], targetLeadTime: '9', plannedDeliveryTime: '18', confirmationControl: 'Z004' }] },
       apqp: { selected: 1, skipped: 0, invalid: 0, sample: [{ material: '16808656', vendor: '41889', excelRow: 2 }] },
       me01: { uniqueMaterials: 1, uniqueSuppliers: 1, duplicateRows: 0, dualSourcingMaterials: 0, singleSourcingMaterials: 1, sample: [{ material: '16808656', parma: '41889', dualSourcing: false, excelRows: [2] }] }
     }
@@ -55,6 +55,10 @@ try {
           ...(globalThis.controls.mode === 'copy' ? { warning: 'EXCEL_TEST_LOCKED: completed results saved in the log folder; do not rerun SAP.' } : {})
         }
         return new Promise(resolve => { globalThis.controls.pending[channel] = () => {
+          if (channel === 'me01' && globalThis.controls.mode === 'background-error') {
+            resolve({ success: false, errorCode: 'EXECUTION_FAILED', message: 'Background Source List test error' })
+            return
+          }
           owner.webContents.send(channel + ':progress', { type: 'RUN_COMPLETED', stage: 'complete', message: 'Mock finished', current: 1, total: 1 })
           resolve({ success: true, message: 'Mock finished', processed: 1, total: 1, succeeded: 1, failed: 0, skipped: 0, resultPath: output, rfqNumbers: ['MOCK-RFQ'] })
         } })
@@ -69,6 +73,10 @@ try {
     }
     replace('rfq:open-artifact', () => ({ success: true }))
     replace('automation:open-artifact', () => ({ success: true }))
+    replace('apqp:dates:query', () => {
+      globalThis.controls.calls.apqpDate = (globalThis.controls.calls.apqpDate ?? 0) + 1
+      return { success: false, message: 'Mock boundary: no SAP access' }
+    })
     globalThis.emitLateProgress = channel => owner.webContents.send(channel + ':progress', { type: 'RFQ_CREATED', stage: 'processing', message: 'STALE_EVENT', rfqNumber: 'STALE-RFQ' })
   }, { input, output })
   const open = async module => {
@@ -100,8 +108,7 @@ try {
     await upload.click()
     await page.waitForFunction(() => [...document.querySelectorAll('section[aria-label="Task controls"] button')].some(button => button.offsetParent !== null && /Start /.test(button.textContent) && !button.disabled))
     if (module.channel === 'me12') {
-      await page.getByLabel(/^Supplier Lead Time \(days\)/).fill('9')
-      await page.getByLabel(/^Purchasing Type/).selectOption('consignment')
+      await page.getByLabel('Purchasing Type', { exact: true }).selectOption('consignment')
     } else if (module.channel === 'apqp') await page.getByLabel(/^Refresh dates already in Excel/).selectOption('yes')
     await open(module)
     assert(await clear.isEnabled(), 'Navigation preserves task data')
@@ -113,8 +120,8 @@ try {
     assert(await clear.isDisabled())
     assert.equal(await page.getByText(/Uploaded file:|Template saved:|Downloaded:/).count(), 0)
     if (module.channel === 'me12') {
-      assert.equal(await page.getByLabel(/^Supplier Lead Time \(days\)/).inputValue(), '1')
-      assert.equal(await page.getByLabel(/^Purchasing Type/).inputValue(), 'standard')
+      assert.equal(await page.getByLabel('Purchasing Type', { exact: true }).inputValue(), 'both')
+      assert.equal(await page.getByLabel(/^Purchasing Organization/).inputValue(), 'C100')
       assert.equal(await page.getByLabel('Plant *', { exact: true }).inputValue(), 'C100')
     } else if (module.channel === 'apqp') assert.equal(await page.getByLabel(/^Refresh dates already in Excel/).inputValue(), 'no')
     await upload.click()
@@ -139,6 +146,31 @@ try {
     else if (module.channel !== 'apqp') await page.getByRole('dialog', { name: 'Ready to update', exact: true }).getByRole('button', { name: 'Start Automation', exact: true }).click()
     await page.locator('header').getByText('Running', { exact: true }).waitFor()
     assert(await clear.isDisabled(), 'Active task cannot be cleared')
+    if (module.channel === 'rfq') {
+      await page.getByRole('navigation').getByRole('button', { name: 'Dashboard', exact: true }).click()
+      await page.getByRole('heading', { name: 'Welcome back', exact: true }).waitFor()
+      await page.locator('header').getByText('Running', { exact: true }).waitFor()
+      const available = page.getByRole('region', { name: 'Automation summary' }).locator('article').filter({ hasText: 'Available Operations' })
+      assert(!/running/i.test(await available.innerText()), 'Only the live header reports active work')
+      await open(modules[1])
+      await upload.click()
+      await toolbar.getByText('1 records ready to process', { exact: true }).waitFor()
+      const blocked = toolbar.getByRole('button', { name: 'Start Automation', exact: true })
+      assert(await blocked.isDisabled(), 'A prepared second task cannot enter confirmation or run while RFQ owns the gate')
+      await blocked.evaluate(button => button.click())
+      assert.equal(await page.getByRole('dialog').count(), 0)
+      assert.equal(await app.evaluate(() => globalThis.controls.calls.me12 ?? 0), 0, 'Second task never reaches IPC')
+      await page.locator('header').getByText('Running', { exact: true }).waitFor()
+      await open(modules[2])
+      await page.getByRole('tab', { name: 'Find APQPs & Edit Dates', exact: true }).click()
+      await page.getByLabel('User ID *', { exact: true }).fill('E000001')
+      const find = toolbar.getByRole('button', { name: 'Find APQPs', exact: true })
+      assert(await find.isDisabled(), 'Read-only APQP SAP queries share the same run gate')
+      await find.evaluate(button => button.click())
+      assert.equal(await app.evaluate(() => globalThis.controls.calls.apqpDate ?? 0), 0)
+      await toolbar.getByRole('button', { name: 'Go to running task', exact: true }).click()
+      await toolbar.getByRole('button', { name: 'Stop safely', exact: true }).waitFor()
+    }
     await toolbar.getByRole('button', { name: 'Stop safely', exact: true }).click()
     await toolbar.getByRole('button', { name: 'Stop safely', exact: true }).waitFor()
     assert(await toolbar.getByRole('button', { name: 'Stop safely', exact: true }).isEnabled(), 'Rejected stop permits safe retry')
@@ -158,7 +190,32 @@ try {
     assert.equal(await readFile(input, 'utf8'), 'protected input fixture')
     assert.equal(await readFile(output, 'utf8'), 'protected result fixture')
     assert.equal(await app.evaluate((_electron, channel) => globalThis.controls.calls[channel], module.channel), 1, 'Clear must not start or retry SAP')
+    if (module.channel === 'rfq') {
+      await open(modules[1])
+      assert(await toolbar.getByRole('button', { name: 'Start Automation', exact: true }).isEnabled(), 'The second task remains prepared and is unlocked once RFQ finishes')
+      await reset()
+    }
   }
+  // A native result dialog from a background page must not block the visible page.
+  await open(modules[3])
+  await upload.click()
+  await toolbar.getByText('1 records ready to process', { exact: true }).waitFor()
+  await toolbar.getByRole('button', { name: 'Start Automation', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Ready to update', exact: true }).getByRole('button', { name: 'Start Automation', exact: true }).click()
+  await page.locator('header').getByText('Running', { exact: true }).waitFor()
+  await open(modules[1])
+  await app.evaluate(() => {
+    globalThis.controls.mode = 'background-error'
+    globalThis.controls.pending.me01()
+  })
+  await page.locator('header').getByText('Ready', { exact: true }).waitFor()
+  assert.equal(await page.locator('dialog[open]').count(), 0, 'No hidden modal may make the current document inert')
+  await open(modules[3])
+  const deferredNotice = page.getByRole('dialog', { name: 'Source List could not finish', exact: true })
+  await deferredNotice.getByText('Background Source List test error', { exact: true }).waitFor()
+  await deferredNotice.getByRole('button', { name: 'OK, understood', exact: true }).click()
+  await reset()
+  await app.evaluate(() => { globalThis.controls.mode = '' })
   // A preview already in flight must not return stale data after Clear.
   await open(modules[1])
   await app.evaluate(() => { globalThis.controls.mode = 'defer' })
@@ -225,12 +282,12 @@ try {
   await page.getByLabel('Language', { exact: true }).selectOption('zh-CN')
   await page.getByRole('button', { name: 'Save Settings', exact: true }).click()
   await page.getByRole('button', { name: '操作中心', exact: true }).click()
-  await page.getByRole('heading', { name: '自动批量更新供应商交货时间（SLT）', exact: true }).locator('..').getByRole('button', { name: '打开', exact: true }).click()
+  await page.getByRole('heading', { name: '批量维护采购信息记录（IR）', exact: true }).locator('..').getByRole('button', { name: '打开', exact: true }).click()
   await page.getByRole('button', { name: '清空本页', exact: true }).click()
   await page.getByRole('dialog', { name: '清空当前页面？', exact: true }).getByRole('button', { name: '确认清空', exact: true }).click()
   assert(await page.getByRole('button', { name: '开始自动化', exact: true }).isDisabled())
   assert.deepEqual(errors, [])
-  console.log('Task controls smoke passed: all four top toolbars; bilingual confirmed reset; default business options; route persistence and page isolation; same-file re-upload; active-run reset lock; rejected stop retry; stale preview/progress protection; error/result reset; light/dark/large responsive layouts. No SAP accessed or files deleted.')
+  console.log('Task controls smoke passed: cross-task launch lock, no hidden result modal, return to active run, and automatic unlock with the draft intact; reset, safe stop, and responsive layout. No SAP accessed or files deleted.')
 } catch (error) {
   if (app) await (await app.firstWindow()).screenshot({ path: join(artifacts, 'task-controls-failure.png'), fullPage: true }).catch(() => undefined)
   throw error

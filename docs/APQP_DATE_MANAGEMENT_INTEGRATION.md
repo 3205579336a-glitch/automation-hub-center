@@ -2,7 +2,7 @@
 
 2026-10-20. Source changes only; no portable package was produced.
 
-**Current policy override — 2026-10-22:** the owner requested input-only testing. The Hub now fills at most one edited APQP and leaves its detail open, without Save, Yes, Back or the next record. History and results say NOT SAVED and report zero saved successes. The full Save design below is retained for later authorized restoration, not active in this test policy. See [APQP_SD_CONFIRMATION.md](APQP_SD_CONFIRMATION.md) for the current boundary and the new remembered-project/search/supplier-sort controls.
+**Current policy override — 2026-10-27:** the owner replaced input-only testing with formal batch Save for the recorded F/G/H/M planned dates. SAP grey fields are disabled in Hub and rechecked before input. Actual dates and SD controls are not maintained. The historical G/H planned/actual design below is superseded by [APQP_PLANNED_DATES.md](APQP_PLANNED_DATES.md); old cache schemas cannot execute against the new fields.
 
 ## One operation, two workflows
 

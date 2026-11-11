@@ -5,6 +5,7 @@ export type PageId =
   | 'create-rfq'
   | 'me12-lead-time'
   | 'me01-source-list'
+  | 'mm02-sub-commodity'
   | 'apqp-plan-closure'
   | 'operations'
   | 'history'
@@ -15,6 +16,7 @@ export const PAGE_TITLES: Record<PageId, string> = {
   'create-rfq': operationCopy('create-rfq', 'en').shortTitle,
   'me12-lead-time': operationCopy('me12-lead-time', 'en').shortTitle,
   'me01-source-list': operationCopy('me01-source-list', 'en').shortTitle,
+  'mm02-sub-commodity': operationCopy('mm02-sub-commodity', 'en').shortTitle,
   'apqp-plan-closure': operationCopy('apqp-plan-closure', 'en').shortTitle,
   operations: 'Operations',
   history: 'Execution History',

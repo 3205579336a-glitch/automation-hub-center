@@ -165,7 +165,7 @@ try {
   await page.getByRole('button',{name:'Execution History',exact:true}).click()
   await page.getByText('1 total, 1 on this page',{exact:true}).waitFor()
   await capture('11-history')
-  await open('Automatically Update Supplier Lead Times (SLT) in Batch')
+  await open('Batch Update Purchasing Info Records (IR)')
   await capture('12-slt')
   await open('APQP Date Management'); await page.getByRole('tab', { name: 'Query Plan Closure Date', exact: true }).click(); await capture('13-apqp')
   await open('Automatically Maintain Source Lists in Batch')

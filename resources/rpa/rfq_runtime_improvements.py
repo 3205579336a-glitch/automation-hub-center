@@ -191,6 +191,17 @@ class RuntimeImprovements:
 
     def install(self):
         engine, runtime = self.engine, self
+        # Restrict No data recognition to the result of a freshly dispatched
+        # NPL query; other screens/status messages must retain normal recovery.
+        self.npl_query_in_progress = False
+        original_query = engine.SapSession._execute_npl_query
+        def query(sap, group):
+            runtime.npl_query_in_progress = True
+            try:
+                return original_query(sap, group)
+            finally:
+                runtime.npl_query_in_progress = False
+        self.replace(engine.SapSession, '_execute_npl_query', query)
         original_process = engine.process_group
         def process(sap, excel, group):
             runtime.group, runtime.tasks, runtime.phase = group, list(group.tasks), 'NPL'
@@ -259,6 +270,13 @@ class RuntimeImprovements:
                     text = sap.window_text('wnd[1]')
                     if text:
                         raise engine.SapRpaError('SAP_POPUP', text)
+                if (runtime.npl_query_in_progress and runtime.phase == 'NPL'
+                        and not runtime.write_started and control_id == engine.ID_GRID_CUSTOMER1
+                        and sap.current_transaction() == engine.TCODE_NPL
+                        and sap.is_npl_selection_screen()):
+                    message_type, status_text = sap.status_bar()
+                    if message_type == 'S' and status_text.strip().casefold() == 'no data':
+                        raise engine.SapRpaError('NPL_NO_DATA', 'SAP NPL returned No data for this group.')
                 return None
             # Only NPL can safely continue here: no BR creation or commit has
             # happened, and exact matching + Commodity validation still follow.

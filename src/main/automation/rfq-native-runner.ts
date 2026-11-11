@@ -89,6 +89,8 @@ export class RfqNativeRunner {
       if (readyFile) args.push('--hub-ready-file', readyFile)
       if (config.productionConfirmed) args.push('--production-confirmed')
       const output = await this.invoke(launch, args, directory, (event) => {
+        // Timings are diagnostic log entries, not user-facing progress states.
+        if (event.type === 'STARTUP_TIMING') return
         if (event.type === 'ENGINE_READY' && this.recovery && readyFile) {
           // py.exe/PyInstaller may launch a different PID. Track the actual engine before releasing the gate.
           const pid = (event as EngineEvent & { pid?: number }).pid

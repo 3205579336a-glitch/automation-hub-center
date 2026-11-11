@@ -2,35 +2,32 @@
 
 Local-first Windows desktop purchasing automation. Normal users choose a task, download and fill its template, upload, review, and start. No paths, session indices, Python setup, timeouts or transaction parameters are required in normal workflows.
 
-## Version 0.2.5 — source release (2026-10-27)
+## Version 0.3.0 — Windows portable release
 
-- APQP date management uses **SAP 949 only**. Enter the project and responsible User ID, find APQPs, edit the dates and save. No environment selection or Open Read Result button is shown.
-- Maintains exactly four planned dates: **RTS Confirmation** (`F_PLNDAT`), **RTS Action & Closure** (`G_PLNDAT`), **Total PPAP** (`H_PLNDAT`) and **APQP Closure Plan Date** (`M_PLNDAT`). Actual dates, SD conf and comments are not changed. Grey SAP fields are disabled in Hub.
-- Official batch Save replaces the former one-record input-only test. Each changed record is saved once, reopened by APQP ID and verified before the next record. Proven pre-input failures are skipped with a reason; partial input, unknown dialogs and uncertain saves stop safely. Unsuccessful drafts remain visible.
-- Faster location uses an APQP-ID hash index from the batch's freshly read list for the first target, avoiding a duplicate full-ID scan. Every post-Save reopen still obtains a fresh index and checks the target identity. Batched detail reads reduce SAP communication, with a compatibility fallback. An offline 48-row test reduces **additional first-target identity reads from 54 to 6**; this is not a live SAP latency guarantee.
-- Dashboard savings now include APQP date updates at **1 manual minute per date field actually saved and verified**, minus the entire batch elapsed time once. Failed/skipped/unchanged fields, read-only queries, input-only tests and unverified outcomes earn no field savings. Old history without verified field counts is not guessed or backfilled.
-- Simpler bilingual instructions, remembered projects, search/supplier sorting, previous-result reuse and reset are included. Clearing the APQP date page retains its query inputs. Old G/H actual-date caches cannot be loaded as the new planned-date layout; read from SAP once after upgrading.
+- One task can run at a time. Other pages remain available for preparation, but their SAP Start actions are disabled until the current task ends. Use **Go to running task** to return. Background result dialogs do not block the page you are using.
+- Refreshed bilingual dashboard, Operations, Settings and History; the sidebar collapses from its footer. The header reports live task status. The estimated savings card shows today and all retained local history.
+- Workflow screens load on demand; navigation can preload the intended page. Concurrent local history reads are shared, and typing in History does not issue a new query on every key.
+- APQP date management uses **SAP 949 only** and pre-fills the Windows login as an editable owner filter. It saves and verifies only four planned dates: RTS Confirmation, RTS Action & Closure, Total PPAP and APQP Closure. Grey fields are not edited. The Excel closure-date query remains read-only in SAP.
+- ME12 supports independent SLT, PDT and confirmation-control updates for Standard and Consignment. MM02 adds a six-digit Sub-commodity task with its own template and result workbook.
 
-This publishes source code only: no EXE, installer, ZIP, user manual or other document is rebuilt for this version. Regression and desktop smoke tests use fake SAP; no live production write acceptance is claimed.
+Download the Windows ZIP from [v0.3.0 Releases](https://github.com/3205579336a-glitch/automation-hub-center/releases/tag/v0.3.0). Extract it completely into a new local folder, then open **SAP Automation Toolbox.exe**. The Python runtime is bundled; company SAP/Excel/browser prerequisites and security policy still apply. See [release notes](docs/RELEASE_0.3.0.md). Offline and packaged checks do not authorize or claim live production writes.
 
-## End-user manuals (V0.2.4)
+## End-user documentation
 
-- [English user manual](docs/USER_MANUAL.md)
-- [中文用户操作手册](docs/USER_MANUAL_ZH.md)
-- [Manual verification and release notes](docs/USER_MANUAL_VERIFICATION.md)
+- [0.3.0 English user guide](docs/USER_GUIDE_0.3.0_EN.md)
+- [0.3.0 中文操作指南](docs/USER_GUIDE_0.3.0_ZH.md)
 
-Printable bilingual PDF copies are in `output/pdf/`. Documentation builds use `scripts/build-user-manual.py` with ReportLab and the available Windows fonts; end users do not need these tools to read the PDFs or run the packaged Hub.
-
-The manuals describe the frozen distributed V0.2.4 package, not the current V0.2.5 source. Manuals and PDF files have deliberately not been updated in this source release; screenshots and workflow descriptions must be reviewed before the next distributed package/manual.
+The earlier [English manual](docs/USER_MANUAL.md), [中文手册](docs/USER_MANUAL_ZH.md), and printable PDFs in `output/pdf/` are archived **0.2.4** references, not current workflow instructions.
 
 ## Operations
 
 | Task | Business inputs | SAP access |
 |---|---|---|
 | Create Buyer Receipt / RFQ | Existing RFQ template and accepted Production confirmation | Native SAP GUI; accepted RFQ v32 baseline unchanged |
-| Update Info Record | Info Record / Plant template; target Plant, purchasing organization, lead time, standard/consignment type | Chrome or Edge WebGUI; concurrent independent worker windows |
+| Update Info Record | Independent SLT, PDT and Conf. Ctrl. per Excel row. Default Plant/Org C100 and Standard + Consignment. Blank change fields keep the current SAP values. | Chrome or Edge WebGUI; both types of each IR run in the same worker |
 | APQP Date Management | Project + responsible User ID for four planned dates; or the material/supplier Excel template for plan closure queries | Native SAP GUI; fixed 949; verified batch planned-date Save or read-only Excel query |
-| Update Source List | Material No., Parma, required Dual Sourcing Yes/No | Native SAP GUI; Plant C100; adds/reuses target with Fix + MRP 1; Yes retains other Fix/MRP, No clears all other Fix/MRP; never deletes rows |
+| Update Source List | Material No., Parma, required Dual Sourcing Yes/No | Native SAP GUI; Plant C100; skips an existing target Parma. For new targets, adds Fix + MRP 1; Yes retains other Fix/MRP, No clears other Fix/MRP; never deletes rows |
+| Batch Update Sub-commodity | Material and exactly six digits in Sub-commodity (keep leading zeros) | Native SAP GUI MM02; verified, idle Production 949 session; updates the named characteristic under `YY_COMMODITY` and verifies by reopening |
 
 Each card has Open and Info. Info shows a bilingual step guide. Only supported purchasing operations are listed; there are no placeholder actions.
 
@@ -39,17 +36,19 @@ Each card has Open and Info. Info shows a bilingual step guide. Only supported p
 1. Download template: choose a save location; the app reports the actual saved filename and reveals it in Explorer.
 2. Fill the input columns and save Excel. Excel may remain open.
 3. Upload: RFQ/APQP first check the saved workbook headers without starting the native engine, then run full data validation. The application detects the input sheet and required columns and displays business counts and a sample.
-4. Review: writing tasks show one batch confirmation immediately before starting. APQP does not require a SAP-write confirmation.
+4. Review: RFQ, Info Record, Source List and MM02 show a batch confirmation. In APQP date management, **Save dates** starts the write; **Query Plan Closure Date** does not write to SAP.
 5. Run: progress is shown in the app. Navigating does not discard an active task.
 6. Result: Total / Successful / Skipped / Failed, Open Result, View Details and Run Another Task.
 
-All four task pages have a top action bar with Start / Stop safely and Clear this page. Navigation keeps page data. Confirmed Clear resets only the current page's inputs, business options, preview, messages and displayed results to defaults; it never deletes Excel files, templates, history or logs, and never rolls back SAP changes. Clear is unavailable during a run or file upload/download. Result locations remain in Execution History.
+All five task pages have a top action bar. Navigation keeps page data. Confirmed Clear resets that page's preparation and displayed results (APQP date management keeps the query filters); it never deletes Excel files, templates, history or logs, and never rolls back SAP changes. Clear is unavailable while that task is running or its file picker is in use. Result locations remain in Execution History.
 
-ME12 writes a separate result workbook under managed logs if Windows locks the original. Source List and APQP still use Excel COM to update workbooks already open, without closing them. Backups, temporary files, error screenshots and independent result files go to `<Electron userData>/.local-data/logs/automation-runs/<UUID>/`; RFQ snapshots/results go to `logs/rfq-runs/<UUID>/`. No generated sidecars are added beside the selected workbook. User-selected template downloads are unchanged. Do not edit purchasing inputs during a running batch.
+ME12 writes a separate result workbook under managed logs if Windows locks the original. Source List and APQP still use Excel COM to update workbooks already open, without closing them. MM02 reads the saved workbook without modifying it and always writes a separate result. Backups, temporary files, error screenshots and independent result files go to `<Electron userData>/.local-data/logs/automation-runs/<UUID>/`; RFQ snapshots/results go to `logs/rfq-runs/<UUID>/`. No generated sidecars are added beside the selected workbook. User-selected template downloads are unchanged. Do not edit purchasing inputs during a running batch.
+
+For MM02, sign in to Production 949 with SAP GUI Scripting and MM02 classification-change authorization, then leave one idle SAP Easy Access window open. No new login or session is created. Matching codes are skipped; conflicting duplicate rows or changed input after preview block the run. The engine will not write a characteristic it cannot uniquely identify, will not approve an unexpected popup, and will not repeat Save if the outcome is uncertain.
 
 At startup and every 24 hours while idle, finished, app-owned generated run files older than 60 days are removed, including backups and independent result workbooks. Save important generated results elsewhere before expiry. Original user workbooks are never included. Running/unfinished manifests and unresolved RFQ evidence remain protected; corrupt manifests, linked/junction paths and locked files are kept for review/retry. Manual Clear All Logs still preserves business workbooks; it is not the same as the scheduled expiry policy. Old external sidecars are not guessed, moved or deleted; legacy RFQ results remain available to Safe Recovery. Settings, browser sign-in profiles and recovery ledgers are persistent app data, not disposable logs.
 
-ME12 input needs numeric Info Record identifiers up to 10 digits and Plant headers. Source List needs Material No., Parma and required Dual Sourcing Yes/No; blank is invalid. Its page defaults to execution-day validity start, 31.12.2099 end and purchasing organization C100, editable and shown in confirmation. A target supplier/organization row covering the requested interval is reused; otherwise a verified empty row is filled with the new dates, supplier, organization, Fix and MRP 1. Yes preserves all other Fix/MRP; No clears all other Fix/MRP, including expired/future rows, without deleting records or changing their dates. Conflicting template suppliers/modes, overlapping/ambiguous target intervals, unavailable empty rows or unreadable/read-only controls stop safely. Table cells are discovered by the recorded technical field IDs, not numeric GetCell. Excel SUCCESS never bypasses SAP rechecking; matching states skip Save. Error details include stage and Excel rows, with UTF-8 traces under the managed run logs. APQP uses A: Part No., B: Vendor, C: APQP plan closure date; the previous five-column A–E layout remains compatible. Incomplete material/supplier pairs block Start. Existing dates are kept unless Refresh is chosen.
+ME12 needs numeric Info Record identifiers up to 10 digits and the template headers. Source List requires Material No., Parma and Dual Sourcing Yes/No. The form defaults to today, 31.12.2099 and purchasing organization C100. An existing target Parma is skipped without changes, regardless of its dates, purchasing organization or Fix/MRP values. Otherwise a verified empty row receives the new dates, supplier, organization, Fix and MRP 1. Yes preserves other Fix/MRP; No clears them without deleting any rows or changing their dates. Invalid or uncertain SAP states stop safely. APQP Excel queries require complete material/supplier pairs; existing dates are kept unless Refresh is chosen.
 
 ## Pauses and safe stopping
 
@@ -57,13 +56,15 @@ The three guided modules share READY, VALIDATING, READY_TO_START, RUNNING, WAITI
 
 Certificate selection and SAP credentials remain manual. The Hub does not read certificate private keys or store passwords. It can open installed SAP Logon when no SAP GUI is available; users sign in themselves. Native operations automatically detect one signed-in environment and idle eligible windows. When multiple environments/users are open, the Hub asks users to leave one intended environment available rather than guessing.
 
+ME12 starts automatically when all browser windows reach the editable selection screen and reuses that screen for the first IR. It checks the requested scope and fields before saving, skips a category only when SAP explicitly reports that it is not maintained, and writes each category's outcome back to Excel. An unconfirmed save is not retried.
+
 A global Action Required dialog persists across routes. Continue performs read-only verification first; a failed check remains paused. Unknown or uncertain write outcomes offer Stop only. Source List verifies the original signed-in session, material and Plant while reading/editing rows; unknown failures show actual stage/error, Excel rows and a technical log path, then stop without Save replay. ME12 waits for all browsers to sign in before any record write; on an unverified record, workers finish their current records, save partial results, and stop scheduling new work before the pause appears.
 
 Stop preserves saved SAP changes; it is not rollback. Closing the app during a task requests safe stopping and waits for the engine to finish. Interaction snapshots are local diagnostics, not automatic crash-resume instructions.
 
 ## Settings and diagnostics
 
-Normal Settings: Language, Theme, Text Size, Notification Sounds and Open Result After Completion (the three guided modules), followed by Diagnostics. The source update removes Advanced / Key User Settings and manual-effort editing from the UI. Technical parameters/reference baselines stay internal; existing stored configuration is preserved when appearance preferences are saved.
+Normal Settings: Language, Theme, Text Size, Notification Sounds and Open Result After Completion (Info Record, Excel APQP and Source List). Diagnostics are under **Support & logs**. Technical parameters/reference baselines stay internal; existing stored configuration is preserved when appearance preferences are saved.
 
 Sounds are generated locally, optional, lightweight and non-blocking: success, attention, error. Audio failure does not change the automation state.
 
@@ -73,7 +74,7 @@ Normal result-open requests are limited to files issued by the current automatio
 
 ## Estimated time saved and Safe Recovery
 
-Dashboard shows **estimated** time saved today and over the last 30 local calendar days. It uses confirmed successful groups/records from retained execution history, not sample dashboard data. Manual estimate = successful quantity × manual baseline; savings = manual estimate minus full batch wall time (including pauses and SAP waits), floored at zero across the period. Worker count does not multiply elapsed time. Failed/cancelled/dry-run/unresolved work, skipped units and legacy diagnostic-only records without measured durations are excluded.
+Dashboard shows **estimated** time saved today and across all retained local history. The all-time figure has no separate date cutoff, but does not include records already removed by retention or log cleanup. Manual estimate = confirmed successful quantity × manual baseline; savings = manual estimate minus full batch wall time (including pauses and SAP waits), floored at zero across the period. Worker count does not multiply elapsed time. Failed/cancelled/dry-run/unresolved work, skipped units and legacy diagnostic-only records without measured durations are excluded.
 
 Manual-effort defaults use the owner's business estimates: RFQ **35 minutes/group**, SLT **5 minutes/record**, APQP plan-closure Excel queries **5 minutes/record**, and APQP date updates **1 minute/verified saved field**. Source List **5 minutes/record** remains a reference assumption. These are not editable in normal Settings. Existing custom/calibrated baselines for the older operations remain preserved; the APQP date-field baseline is fixed at 60 seconds. Estimates are not measured human productivity. Deleted/expired history no longer contributes; ordinary local history is capped at 500, with running/unresolved records protected.
 
@@ -97,7 +98,7 @@ Everything stays in the existing local `execution-history.json`. At most 100 tim
 
 ## Create RFQ validation and launch
 
-Open **Operations → Create RFQ**: download the template, fill and save Excel, upload, review validation and Parma groups, then confirm Production VCE [949] / Client 100 once. `[949]` is the SAP Logon entry code, not the client. Existing signed-in, ready target sessions are reused; an existing mismatched or not-ready target connection stops the run instead of creating another login. No `.env`, Python path, SAP password or technical settings are required. The source workbook is not modified; a local working copy receives the supplied engine's status columns and RFQ numbers.
+Open **Operations → Create RFQ**: download the template, fill and save Excel, upload, review validation and Parma groups, then confirm the Production target once. Existing eligible target sessions are reused. No `.env`, Python path, SAP password or technical settings are required. The Hub reports whether RFQ numbers and status were written back to the original workbook; when writeback cannot be verified, use the preserved local copy rather than repeating SAP.
 
 The supplied native SAP GUI RFQ v32 engine performs NPL → Buyer Receipt → RFQ in `ZMFM050072`. Plant + Project + Parma grouping (up to 50 materials), green Buyer Receipt verification, existing-RFQ skips, PPAP handling, recovery, number extraction and workbook saving are retained. Validation never opens SAP. Modified inputs require a new preview. Exact normalized business duplicates are automatically skipped; rows with different input values retain validation errors showing the differences. The original upload remains unchanged.
 
@@ -105,11 +106,11 @@ User-fixable SAP issues pause execution with a shared application modal, attenti
 
 RFQ runtime hooks check `ZCOMCODE` on freshly matched NPL rows using project field `ZPSPID` before creating a Buyer Receipt. Empty Commodity pauses for manual maintenance; technical read failures have a separate message and never imply missing master data. An exact NPL re-query is required before resuming. Ordinary slow SAP responses show a waiting status; a hard limit pauses instead of replaying Save/Create. All four task pages show Running while active, including across navigation, with paused/checking states taking precedence. Execution history (25/page) and diagnostics (20/page) support pagination and confirmed Clear All, not individual delete buttons. Completed history and identified logs older than 60 days are cleaned at startup and daily while idle; source/result workbooks, backups and unfinished records are protected. See [runtime improvements and acceptance limits](docs/RFQ_RUNTIME_IMPROVEMENTS.md).
 
-See [RFQ integration handoff](docs/RFQ_V32_INTEGRATION.md) for defaults, file inventory, offline tests, runtime folders and manual release checks. Production has **not** been tested by this implementation. The owner authorized portable release 0.2.4; no additional RFQ write-flow optimization was included for packaging.
+See [RFQ integration handoff](docs/RFQ_V32_INTEGRATION.md) and [original workbook writeback](docs/RFQ_ORIGINAL_WORKBOOK_WRITEBACK.md) for technical detail. Production writes are not performed by release tests.
 
 ## Developer setup and tests
 
-Development requires Windows, Node/npm, Python with the existing engine dependencies, installed SAP GUI with Scripting for native acceptance tests, and Chrome/Edge for WebGUI acceptance tests. The portable 0.2.4 distribution includes its own Python runtime; company SAP/Excel/browser prerequisites still apply.
+Development requires Windows, Node/npm, Python with the engine dependencies, installed SAP GUI with Scripting for native acceptance tests, and Chrome/Edge for WebGUI acceptance tests. The portable distribution includes its own Python runtime; company SAP/Excel/browser prerequisites still apply.
 
 ```powershell
 npm install

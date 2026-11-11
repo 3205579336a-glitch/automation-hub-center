@@ -4,6 +4,7 @@ import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import type {
   Me12BatchConfig,
   Me12ExcelPreview,
+  Me12FieldUpdates,
   Me12PreviewRow
 } from '../../shared/me12-types'
 import type { GeneratedArtifacts } from './generated-artifacts'
@@ -11,6 +12,9 @@ import type { GeneratedArtifacts } from './generated-artifacts'
 const STATUS_HEADER = 'ME12 Status'
 const OLD_VALUE_HEADER = 'Old Supplier Lead Time'
 const UPDATED_AT_HEADER = 'ME12 Updated At'
+const SLT_HEADERS = ['slt (days)', 'slt', 'supplier lead time (days)', 'supplier lead time', '供应商交货时间（天）']
+const PDT_HEADERS = ['pdt (days)', 'pdt', 'planned delivery time (days)', 'planned delivery time', 'pl. deliv. time', '计划交货时间（天）']
+const CONFIRMATION_HEADERS = ['conf. ctrl.', 'conf. ctrl', 'confirmation control', '确认控制码']
 
 interface ParsedCell {
   column: number
@@ -26,7 +30,7 @@ interface ParsedWorksheet {
   maxRow: number
 }
 
-export interface Me12ExcelTask {
+export interface Me12ExcelTask extends Me12FieldUpdates {
   infoRecord: string
   excelRows: number[]
 }
@@ -66,11 +70,10 @@ export class Me12ExcelService {
     await validateExcelFile(config.excelPath)
     const artifactDirectory = await this.artifacts?.create('me12-batch', runId)
     const backupPath = createTimestampedPath(artifactDirectory ? join(artifactDirectory, parse(config.excelPath).base) : config.excelPath, 'backup')
-    await copyFile(config.excelPath, backupPath)
-
     const workbook = await readWorkbook(config.excelPath, config.sheetName)
     const effectiveConfig = detectColumnMapping(workbook.worksheet, config)
     const analysis = analyzeWorksheet(workbook.worksheet, effectiveConfig)
+    await copyFile(config.excelPath, backupPath)
     const resultColumns = findResultColumns(workbook.worksheet)
     const updates = new Map<number, Map<number, string>>()
     queueUpdate(updates, 1, resultColumns.status, STATUS_HEADER)
@@ -275,7 +278,7 @@ function parseCells(rowXml: string, sharedStrings: string[]): ParsedCell[] {
       value = extractTextNodes(body)
     } else {
       const raw = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i)?.[1] ?? ''
-      value = type === 's'
+      value = type === 'b' || type === 'e' ? '#INVALID' : type === 's'
         ? sharedStrings[Number(raw)] ?? ''
         : decodeXml(raw)
     }
@@ -288,38 +291,73 @@ function analyzeWorksheet(
   worksheet: ParsedWorksheet,
   config: Me12BatchConfig
 ): { preview: Me12ExcelPreview; tasks: Me12ExcelTask[] } {
-  const rowsByInfoRecord = new Map<string, number[]>()
+  const headers = worksheet.rows.get(1) ?? new Map<number, string>()
+  const findColumn = (names: string[]): number | undefined => {
+    const normalize = (value: string): string => value.toLowerCase().replace(/[\s.:]+/g, '')
+    const allowed = new Set(names.map(normalize))
+    const matches = [...headers].filter(([, value]) => allowed.has(normalize(value)))
+    if (matches.length > 1) throw new Error(`Duplicate Excel header: ${names[0]}.`)
+    return matches[0]?.[0]
+  }
+  const leadColumn = findColumn(SLT_HEADERS)
+  const pdtColumn = findColumn(PDT_HEADERS)
+  const confirmationColumn = findColumn(CONFIRMATION_HEADERS)
+  const legacy = !leadColumn && !pdtColumn && !confirmationColumn && Boolean(config.targetLeadTime)
+  if (!leadColumn && !pdtColumn && !confirmationColumn && !legacy) {
+    throw new Error('Download the new IR template with SLT (days), PDT (days) and Conf. Ctrl. columns.')
+  }
+  const rowsByInfoRecord = new Map<string, Me12ExcelTask>()
+  let totalDataRows = 0
   let matchedRows = 0
   let skippedOtherPlant = 0
   let skippedEmptyInfoRecord = 0
 
-  for (let row = config.dataStartRow; row <= worksheet.maxRow; row += 1) {
-    const cells = worksheet.rows.get(row)
-    const plant = (cells?.get(config.plantColumn) ?? '').trim().toUpperCase()
+  for (const [row, cells] of [...worksheet.rows].sort(([a], [b]) => a - b)) {
+    if (row < config.dataStartRow) continue
+    const rawPlant = (cells.get(config.plantColumn) ?? '').trim().toUpperCase()
+    const rawRecord = (cells.get(config.infoRecordColumn) ?? '').trim()
+    const lead = (leadColumn ? cells.get(leadColumn) ?? '' : legacy && rawRecord ? config.targetLeadTime : '').trim()
+    const delivery = (pdtColumn ? cells.get(pdtColumn) ?? '' : '').trim()
+    const confirmationControl = (confirmationColumn ? cells.get(confirmationColumn) ?? '' : '').trim().toUpperCase()
+    const hasChanges = Boolean(lead || delivery || confirmationControl)
+    if (!rawRecord && !hasChanges) continue
+    totalDataRows++
+    const plant = rawPlant || config.targetPlant.toUpperCase()
+    if (!/^[A-Z0-9]{1,4}$/.test(plant)) throw new Error(`Excel row ${row}: invalid Plant.`)
     if (plant !== config.targetPlant.toUpperCase()) {
       skippedOtherPlant += 1
       continue
     }
 
     matchedRows += 1
-    const infoRecord = normalizeCode(
-      cells?.get(config.infoRecordColumn) ?? '',
-      config.infoRecordWidth
-    )
+    const infoRecord = normalizeCode(rawRecord, config.infoRecordWidth)
     if (!infoRecord) {
+      if (hasChanges) throw new Error(`Excel row ${row}: enter the Info Record number before specifying changes.`)
       skippedEmptyInfoRecord += 1
       continue
     }
     if (!/^\d{1,10}$/.test(infoRecord)) throw new Error(`Excel row ${row}: Info Record must be a numeric identifier up to 10 digits.`)
-    const rows = rowsByInfoRecord.get(infoRecord) ?? []
-    rows.push(row)
-    rowsByInfoRecord.set(infoRecord, rows)
+    if (!hasChanges) throw new Error(`Excel row ${row}: enter at least one of SLT (days), PDT (days) or Conf. Ctrl.`)
+    if (lead && !/^\d{1,3}$/.test(lead)) throw new Error(`Excel row ${row}: SLT must be a whole number from 0 to 999.`)
+    if (delivery && !/^\d{1,3}$/.test(delivery)) throw new Error(`Excel row ${row}: PDT must be a whole number from 0 to 999.`)
+    if (confirmationControl && !/^[A-Z0-9]{1,4}$/.test(confirmationControl)) {
+      throw new Error(`Excel row ${row}: Confirmation Control must contain 1–4 letters or numbers.`)
+    }
+    const targetLeadTime = lead ? String(Number(lead)) : ''
+    const plannedDeliveryTime = delivery ? String(Number(delivery)) : ''
+    const previous = rowsByInfoRecord.get(infoRecord)
+    if (previous) {
+      if (previous.targetLeadTime !== targetLeadTime || previous.plannedDeliveryTime !== plannedDeliveryTime ||
+          previous.confirmationControl !== confirmationControl) {
+        throw new Error(`Excel rows ${previous.excelRows[0]} and ${row}: conflicting changes for Info Record ${infoRecord}.`)
+      }
+      previous.excelRows.push(row)
+    } else {
+      rowsByInfoRecord.set(infoRecord, { infoRecord, excelRows: [row], targetLeadTime, plannedDeliveryTime, confirmationControl })
+    }
   }
 
-  const allTasks = [...rowsByInfoRecord.entries()].map(([infoRecord, excelRows]) => ({
-    infoRecord,
-    excelRows
-  }))
+  const allTasks = [...rowsByInfoRecord.values()]
   const tasks = config.maxItems > 0 ? allTasks.slice(0, config.maxItems) : allTasks
   const sample: Me12PreviewRow[] = tasks.slice(0, 10).map((task) => ({
     ...task,
@@ -333,7 +371,7 @@ function analyzeWorksheet(
       infoRecordColumn: config.infoRecordColumn,
       plantColumn: config.plantColumn,
       dataStartRow: config.dataStartRow,
-      totalDataRows: Math.max(0, worksheet.maxRow - config.dataStartRow + 1),
+      totalDataRows,
       matchedRows,
       uniqueInfoRecords: allTasks.length,
       selectedInfoRecords: tasks.length,
@@ -363,9 +401,11 @@ function detectColumnMapping(
       header === 'purchasing info record' ||
       header === 'info record'
     ) {
+      if (infoRecordColumn !== undefined) throw new Error('Duplicate Info Record columns.')
       infoRecordColumn = column
     }
     if (header === 'plant') {
+      if (plantColumn !== undefined) throw new Error('Duplicate Plant columns.')
       plantColumn = column
     }
   }

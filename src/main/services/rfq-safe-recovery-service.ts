@@ -70,14 +70,17 @@ export class RfqSafeRecoveryService implements RfqRecoveryRecorder {
         engineClosed: false, phase: 'review', projects: [], totalGroups: null, completedGroupKeys: [], rfqNumbers: [], resultPath: entry.resultPath })
     }
   }
-  pending(): RfqRecoveryView[] {
+  private pendingRecords(): RfqRecoveryRecord[] {
     return readdirSync(this.directory).filter(name => RFQ_RUN_ID.test(name.replace(/\.json$/, '')) && name.endsWith('.json'))
       .map(name => this.require(name.slice(0, -5)))
       .filter(record => !this.active.has(record.runId) && ['active', 'review'].includes(record.phase))
-      .map(record => ({ ...record, processStatus: this.status(record), resultAvailable: Boolean(record.resultPath && this.safeResult(record.runId, record.resultPath)),
+  }
+  pending(): RfqRecoveryView[] {
+    return this.pendingRecords().map(record => ({ ...record, processStatus: this.status(record), resultAvailable: Boolean(record.resultPath && this.safeResult(record.runId, record.resultPath)),
         completedGroups: record.completedGroupKeys.length })).sort((a, b) => b.startedAt.localeCompare(a.startedAt))
   }
-  protectedIds(): Set<string> { return new Set(this.pending().map(record => record.runId)) }
+  /** Ledger membership is sufficient for retention/savings; only the review UI needs process and workbook probes. */
+  protectedIds(): Set<string> { return new Set(this.pendingRecords().map(record => record.runId)) }
   resolve(runId: string, note: string): void {
     const record = this.require(runId)
     if (this.active.has(runId) || this.status(record) === 'alive') throw new Error('The old Hub or RFQ engine may still be running. Stop it safely before marking this run resolved.')

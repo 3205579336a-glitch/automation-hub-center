@@ -17,22 +17,24 @@ import { AutomationPageLayout, AutomationProgress, AutomationResult, FileUploade
   RunConfirmationModal, TemplateDownloadButton, ValidationSummary, ViewDetailsPanel, NoticeConfirmationModal } from './AutomationPageLayout'
 import { stateLabel } from './state-label'
 import { AutomationTaskToolbar } from './AutomationTaskToolbar'
+import { useTaskRun } from './task-run-context'
 import styles from './GuidedAutomation.module.css'
 
 type Module = 'info-record' | 'source-list' | 'apqp'
 type Preview = Me12ExcelPreview | Me01ExcelPreview | ApqpPreview
 const me12Defaults: Me12BatchConfig = { excelPath: '', sheetName: '', infoRecordColumn: 1, plantColumn: 2, dataStartRow: 2,
-  targetPlant: 'C100', purchasingOrganization: 'C100', targetLeadTime: '1', infoCategory: 'standard', infoRecordWidth: 10,
+  targetPlant: 'C100', purchasingOrganization: 'C100', targetLeadTime: '', infoCategory: 'both', infoRecordWidth: 10,
   dryRun: false, maxItems: 0, maxRetries: 2, saveEvery: 5 }
 const apqpDefaults: ApqpConfig = { excelPath: '', sheetName: '', plant: 'C100', system: '', client: '', maxWorkers: 3,
   createSessions: false, maxItems: 0, overwriteExisting: false, confirmed: false }
 const automationNames = { 'info-record': 'Info Record', 'source-list': 'Source List', apqp: 'APQP' }
-const defaultBusiness = (): { plant: string; org: string; leadTime: string; category: string; overwrite: boolean; validFrom: string; validTo: string } => ({
-  plant: 'C100', org: 'C100', leadTime: '1', category: 'standard', overwrite: false,
+const defaultBusiness = (): { plant: string; org: string; category: string; overwrite: boolean; validFrom: string; validTo: string } => ({
+  plant: 'C100', org: 'C100', category: 'both', overwrite: false,
   validFrom: me01BusinessDefaults().validFrom, validTo: '2099-12-31' })
 
 export function GuidedAutomationPage({ module, notify, onBack, embedded = false, onBusyChange }: { module: Module; notify: Notify; onBack: () => void; embedded?: boolean; onBusyChange?: (busy: boolean) => void }): React.JSX.Element {
   const { language } = useLocalization()
+  const { tryStart } = useTaskRun()
   const zh = language === 'zh-CN'
   const t = (en: string, cn: string): string => zh ? cn : en
   const { title, description, permissionNotice } = operationCopy(module === 'info-record' ? 'me12-lead-time' : module === 'source-list' ? 'me01-source-list' : 'apqp-plan-closure', language)
@@ -64,7 +66,7 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
   const api = window.sapAutomation
   const config = useMemo(() => module === 'info-record'
     ? { ...me12Defaults, excelPath: file, targetPlant: business.plant, purchasingOrganization: business.org,
-        targetLeadTime: business.leadTime, infoCategory: business.category as Me12BatchConfig['infoCategory'] }
+        infoCategory: business.category as Me12BatchConfig['infoCategory'] }
     : module === 'source-list' ? { excelPath: file, confirmed: false, purchasingOrganization: business.org, validFrom: business.validFrom, validTo: business.validTo }
     : { ...apqpDefaults, excelPath: file, plant: business.plant, overwriteExisting: business.overwrite }, [file, business, module])
   // APQP refresh chooses rows from one upload snapshot. Plant/re-upload still
@@ -95,8 +97,8 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
     const timer = window.setTimeout(() => {
       const invalidBusiness = module !== 'source-list' && !/^[A-Z0-9]{1,4}$/.test(business.plant)
         ? t('Enter a Plant code using 1–4 letters or numbers.', '请输入 1–4 位字母或数字组成的工厂代码。')
-        : module === 'info-record' && (!/^[A-Z0-9]{1,4}$/.test(business.org) || !/^\d{1,3}$/.test(business.leadTime))
-          ? t('Enter a valid purchasing organization and a whole-number lead time between 0 and 999 days.', '请输入有效采购组织，以及 0–999 的整数交货天数。') : ''
+        : module === 'info-record' && !/^[A-Z0-9]{1,4}$/.test(business.org)
+          ? t('Enter a valid purchasing organization.', '请输入有效采购组织。') : ''
       if (invalidBusiness) { setState('READY'); setError(invalidBusiness); return }
       if (module === 'source-list') {
         try { resolveMe01Business(config as Me01BatchConfig) } catch (reason) { setState('READY'); setError(String(reason)); setSourceNotice({ title: t('Check Source List settings', '请检查货源清单设置'), message: String(reason) }); return }
@@ -126,8 +128,10 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
         if (!count) setError(t('No pending records. Check your input and business choices, then upload again.', '没有待处理记录，请检查输入和业务选项后重新上传。'))
       }).catch((reason: unknown) => {
         if (!active) return
-        setState('READY'); setTechnicalError(reason instanceof Error ? reason.message : String(reason))
-        setError(t('We could not validate this file. Check the required template columns and try again.', '文件未通过校验。请检查模板必填字段，保存后重新上传。'))
+        const detail = reason instanceof Error ? reason.message : String(reason)
+        setState('READY'); setTechnicalError(detail)
+        setError(module === 'info-record' && /^(?:Excel rows? \d|Download the new IR template|Duplicate (?:Excel header|Info Record|Plant))/i.test(detail) ? detail
+          : t('We could not validate this file. Check the required template columns and try again.', '文件未通过校验。请检查模板必填字段，保存后重新上传。'))
         if (module === 'source-list') setSourceNotice({ title: t('Source List file could not be validated', '货源清单文件校验未通过'), message: reason instanceof Error ? reason.message : String(reason) })
         notify({ kind: 'error', title: t('Check your file', '请检查文件'), message: t('Review the validation details before continuing.', '请查看校验详情后重试。') })
       })
@@ -139,6 +143,10 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
   const records = preview ? 'selectedInfoRecords' in preview ? preview.selectedInfoRecords : 'uniqueMaterials' in preview ? preview.uniqueMaterials : preview.selected : 0
   const invalid = preview && 'invalid' in preview ? preview.invalid : 0
   const metrics: { label: string; value: string | number }[] = [{ label: t('Records to process', '待处理记录'), value: records }, { label: t('Plant', '工厂'), value: module === 'source-list' ? 'C100' : business.plant }]
+  const purchasingType = business.category === 'both' ? t('Standard + Consignment', '标准＋寄售')
+    : business.category === 'standard' ? t('Standard', '标准') : t('Consignment', '寄售')
+  if (module === 'info-record') metrics.push({ label: t('Purchasing Organization', '采购组织'), value: business.org },
+    { label: t('Purchasing Type', '采购类型'), value: purchasingType })
   if (preview && 'uniqueMaterials' in preview) metrics.push({ label: t('Materials', '物料数'), value: preview.uniqueMaterials },
     { label: t('Suppliers', '供应商数'), value: preview.uniqueSuppliers ?? '—' })
   if (preview && 'selected' in preview) metrics.push({ label: t('Existing dates skipped', '跳过已有日期'), value: preview.skipped }, { label: t('Incomplete rows', '不完整行'), value: preview.invalid })
@@ -176,9 +184,10 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
   }
   const start = async (): Promise<void> => {
     if (!canRun || runInFlight.current) return
+    const release = tryStart(module === 'info-record' ? 'me12-lead-time' : module === 'source-list' ? 'me01-source-list' : 'apqp-plan-closure')
+    if (!release) { setConfirming(false); return }
     runInFlight.current = true; runningRef.current = true
     setConfirming(false); setSourceNotice(null); setRunning(true); setStopping(false); setState('RUNNING'); setEvents([]); setOutcome(null); setCompleted(0)
-    window.dispatchEvent(new CustomEvent('guided-running', { detail: true }))
     try {
       const response = module === 'info-record' ? await api.startMe12Batch({ ...(config as Me12BatchConfig), confirmed: true })
         : module === 'source-list' ? await api.startMe01Batch({ ...(config as Me01BatchConfig), confirmed: true }) : await api.startApqp(config as ApqpConfig)
@@ -198,7 +207,7 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
       setOutcome(outcomeOf({ success: false, message: String(reason) }, records)); setState('FAILED')
       if (module === 'source-list') setSourceNotice({ title: t('Source List could not finish', '货源清单未能完成'), message: String(reason) })
       notify({ kind: 'error', title: t('Could not complete', '未能完成'), message: t('Review details before retrying.', '请查看详情后再重试。') })
-    } finally { runningRef.current = false; runInFlight.current = false; setRunning(false); setStopping(false); window.dispatchEvent(new CustomEvent('guided-running', { detail: false })) }
+    } finally { runningRef.current = false; runInFlight.current = false; setRunning(false); setStopping(false); release() }
   }
   const cancel = async (): Promise<void> => {
     if (stopping || !runningRef.current) return
@@ -246,13 +255,14 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
     <div className={styles.body}><section className={`card ${styles.section}`}>
       <div className={styles.sectionTitle}><span className={styles.sectionIcon}><FileSpreadsheet size={20} /></span><div><h3>{t('Prepare your Excel', '准备 Excel 文件')}</h3><p>{t('Fill the input columns only; results are written automatically.', '只填输入列，结果由系统自动回写。')}</p></div></div>
       <p>{t('Save Excel before upload. It may remain open during the run.', '上传前请保存 Excel；运行时可以保持打开。')}</p>
+      {module === 'info-record' && <p>{t('Fill any of SLT (days), PDT (days) and Conf. Ctrl. in Excel. Only filled fields are updated. Blank Plant uses the Plant below.', '在 Excel 中填写需要修改的 SLT（天）、PDT（天）或确认控制码。只更新已填写的字段；工厂留空使用下方设置。')}</p>}
       {module === 'apqp' && (parsedPreview as ApqpPreview | null)?.source === 'saved-file' && <p>{t('Fast preview uses the saved file. Before querying SAP, the app rechecks the current Excel data, including unsaved edits.', '快速预览读取已保存文件；开始查询 SAP 前会重新校验 Excel 当前数据，包括未保存的修改。')}</p>}
       <div className={styles.actions}><TemplateDownloadButton busy={busy || running} onDownload={() => void download()} /><FileUploader busy={busy || running} onUpload={() => void upload()} /></div>
       {downloaded && <p className={styles.filename}>{t('Downloaded', '已下载')}: {downloaded.split(/[\\/]/).pop()}</p>}
       {file && <p className={styles.filename}>{t('Uploaded file', '已上传文件')}: {file.split(/[\\/]/).pop()}</p>}
       {module === 'info-record' && <><h3>{t('2. What should be updated?', '2. 本次更新内容')}</h3><div className={styles.fields}>
-        {[['plant', t('Plant', '工厂')], ['org', t('Purchasing Organization', '采购组织')], ['leadTime', t('Supplier Lead Time (days)', '供应商交货时间（天）')]].map(([key, label]) => <label className="field" key={key}><span>{label} *</span><input className="input" disabled={running} value={business[key as 'plant' | 'org' | 'leadTime']} onChange={event => update(key as 'plant' | 'org' | 'leadTime', event.target.value.toUpperCase())} /></label>)}
-        <label className="field"><span>{t('Purchasing Type', '采购类型')}</span><select className="select" disabled={running} value={business.category} onChange={event => update('category', event.target.value)}><option value="standard">{t('Standard', '标准采购')}</option><option value="consignment">{t('Consignment', '寄售采购')}</option></select></label>
+        {(['plant', 'org'] as const).map(key => <label className="field" key={key}><span>{key === 'plant' ? t('Plant', '工厂') : t('Purchasing Organization', '采购组织')} *</span><input className="input" disabled={running} value={business[key]} onChange={event => update(key, event.target.value.toUpperCase())} /></label>)}
+        <label className="field"><span>{t('Purchasing Type', '采购类型')}</span><select className="select" aria-label={t('Purchasing Type', '采购类型')} disabled={running} value={business.category} onChange={event => update('category', event.target.value)}><option value="both">{t('Standard + Consignment', '标准＋寄售')}</option><option value="standard">{t('Standard', '标准采购')}</option><option value="consignment">{t('Consignment', '寄售采购')}</option></select></label>
       </div></>}
       {module === 'apqp' && <><p className={styles.notice}>{t('Read-only SAP query. Dates are written to Excel, not SAP.', '只查询 SAP，日期回写到 Excel，不修改 SAP 数据。')}</p><div className={styles.fields}><label className="field"><span>{t('Plant', '工厂')}</span><input className="input" disabled={running} value={business.plant} onChange={event => update('plant', event.target.value.toUpperCase())} /></label>
         <label className="field"><span>{t('Refresh dates already in Excel', '刷新 Excel 中已有日期')}</span><select className="select" aria-label={t('Refresh dates already in Excel', '刷新 Excel 中已有日期')} value={business.overwrite ? 'yes' : 'no'} disabled={running} onChange={event => update('overwrite', event.target.value === 'yes')}><option value="no">{t('No — keep existing dates', '否，保留已有日期')}</option><option value="yes">{t('Yes — query again', '是，重新查询')}</option></select></label></div></>}
@@ -266,7 +276,11 @@ export function GuidedAutomationPage({ module, notify, onBack, embedded = false,
       {!preview && !running && !outcome && <div className={styles.emptyPreview}><FileCheck2 size={28} /><strong>{state === 'VALIDATING' ? t('Checking your Excel…', '正在校验 Excel…') : t('Your preview appears here', '上传后，这里会显示预览')}</strong><p>{t('Upload a completed template. The Hub checks it before enabling Start above.', '上传已填写模板，系统校验通过后会启用上方开始按钮。')}</p></div>}
       {preview && <><PreviewSummary metrics={metrics} />
         {invalid > 0 && <p className={styles.warning}>{t('Some rows are incomplete. Fill both material and supplier, then upload again.', '有不完整行，请补全物料和供应商后重新上传。')}</p>}
-        <p>{t('Sample of your business data', '业务数据抽样')}</p><table className={styles.table}><thead><tr><th>{t('Record / Material', '记录 / 物料')}</th><th>{t('Supplier', '供应商')}</th>{module === 'source-list' && <th>{t('Dual Sourcing', '是否双供')}</th>}</tr></thead><tbody>{preview.sample.map((row, i) => <tr key={i}><td>{'infoRecord' in row ? row.infoRecord : row.material}</td><td>{'parma' in row ? row.parma : 'vendor' in row ? row.vendor : '—'}</td>{module === 'source-list' && <td>{'dualSourcing' in row ? row.dualSourcing ? t('Yes — retain other Fix', 'Yes — 保留其他 Fix') : t('No — switch source', 'No — 切换货源') : '—'}</td>}</tr>)}</tbody></table><ViewDetailsPanel><pre>{JSON.stringify(preview, null, 2)}</pre></ViewDetailsPanel>
+        <p>{t('Sample of your business data', '业务数据抽样')}</p>
+        {'selectedInfoRecords' in preview ? <table className={styles.table}><thead><tr><th>Info Record</th><th>{t('SLT (days)', 'SLT（天）')}</th><th>{t('PDT (days)', 'PDT（天）')}</th><th>{t('Conf. Ctrl.', '确认控制码')}</th></tr></thead>
+          <tbody>{preview.sample.map(row => <tr key={row.infoRecord}><td>{row.infoRecord}</td><td>{row.targetLeadTime || t('Keep', '保留原值')}</td><td>{row.plannedDeliveryTime || t('Keep', '保留原值')}</td><td>{row.confirmationControl || t('Keep', '保留原值')}</td></tr>)}</tbody></table>
+          : <table className={styles.table}><thead><tr><th>{t('Material', '物料')}</th><th>{t('Supplier', '供应商')}</th>{module === 'source-list' && <th>{t('Dual Sourcing', '是否双供')}</th>}</tr></thead><tbody>{preview.sample.map((row, i) => <tr key={i}><td>{row.material}</td><td>{'parma' in row ? row.parma : row.vendor}</td>{module === 'source-list' && <td>{'dualSourcing' in row ? row.dualSourcing ? t('Yes — retain other Fix', 'Yes — 保留其他 Fix') : t('No — switch source', 'No — 切换货源') : '—'}</td>}</tr>)}</tbody></table>}
+        <ViewDetailsPanel><pre>{JSON.stringify(preview, null, 2)}</pre></ViewDetailsPanel>
       </>}
       {running && <><AutomationProgress state={state} current={completed} total={records} />
         <AdaptiveEta eta={eta} unavailable={etaUnavailable} automationId={automationId} total={records}

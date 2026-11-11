@@ -7,14 +7,16 @@ import { completedUnits } from '../../../shared/local-intelligence'
 import { useAdaptiveEta } from '../hooks/use-adaptive-eta'
 import { AdaptiveEta } from '../components/automation/AdaptiveEta'
 import { AutomationTaskToolbar } from '../components/automation/AutomationTaskToolbar'
+import { useTaskRun, useWorkflowDialog } from '../components/automation/task-run-context'
 import type { Notify } from '../types/notifications'
 import styles from './CreateRfqPage.module.css'
 
-interface CreateRfqPageProps { notify: Notify; onBack: () => void; onRunningChange: (running: boolean) => void }
+interface CreateRfqPageProps { notify: Notify; onBack: () => void }
 
-export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPageProps): React.JSX.Element {
+export function CreateRfqPage({ notify, onBack }: CreateRfqPageProps): React.JSX.Element {
   const { language } = useLocalization()
   const zh = language === 'zh-CN'
+  const { tryStart } = useTaskRun()
   const text = operationCopy('create-rfq', language)
   const t = (cn: string, en: string): string => zh ? cn : en
   const [excelPath, setExcelPath] = useState('')
@@ -23,7 +25,6 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
   const [events, setEvents] = useState<RfqBatchProgress[]>([])
   const [result, setResult] = useState<RfqBatchResult | null>(null)
   const [running, setRunning] = useState(false)
-  useEffect(() => { onRunningChange(running) }, [running, onRunningChange])
   const { eta, unavailable: etaUnavailable } = useAdaptiveEta('create-rfq', running)
   const [loading, setLoading] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -32,7 +33,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
   const [numbers, setNumbers] = useState<string[]>([])
   const [slowWait, setSlowWait] = useState<RfqBatchProgress | null>(null)
   const [stopDeferred, setStopDeferred] = useState(false)
-  const dialog = useRef<HTMLDialogElement>(null)
+  const dialog = useWorkflowDialog(confirming)
   const attentionNotified = useRef(false)
   const runInFlight = useRef(false)
   const latest = events[events.length - 1]
@@ -67,11 +68,6 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
     }
   }), [notify])
 
-  useEffect(() => {
-    if (confirming) dialog.current?.showModal()
-    else dialog.current?.close()
-  }, [confirming])
-
   const reportError = (error: unknown): void => notify({ kind: 'error', title: t('RFQ 操作失败', 'RFQ action failed'), message: String(error instanceof Error ? error.message : error) })
 
   const download = async (): Promise<void> => {
@@ -102,6 +98,8 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
 
   const start = async (): Promise<void> => {
     if (!canRun || !preview || !confirming || runInFlight.current) return
+    const release = tryStart('create-rfq')
+    if (!release) { setConfirming(false); return }
     runInFlight.current = true
     setConfirming(false); setRunning(true); setStopping(false); setEvents([]); setResult(null); setAttention(null); setNumbers([])
     attentionNotified.current = false; setSlowWait(null); setStopDeferred(false)
@@ -112,7 +110,7 @@ export function CreateRfqPage({ notify, onBack, onRunningChange }: CreateRfqPage
       const warning = response.success && (response.failed > 0 || response.skipped > 0 || (response.withSkips ?? 0) > 0 || response.sourceWriteback?.status === 'pending')
       notify({ kind: response.success ? warning ? 'warning' : 'success' : response.errorCode === 'CANCELLED' ? 'warning' : 'error',
         title: response.success ? t('RFQ 执行结束', 'RFQ run finished') : t('RFQ 已停止', 'RFQ stopped'), message: response.message })
-    } catch (error) { reportError(error) } finally { runInFlight.current = false; setRunning(false); setStopping(false); window.dispatchEvent(new Event('rfq-run-finished')) }
+    } catch (error) { reportError(error) } finally { runInFlight.current = false; setRunning(false); setStopping(false); release() }
   }
 
   const stop = async (): Promise<void> => {

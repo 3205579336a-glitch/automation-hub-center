@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+from pathlib import Path
 import sys
 
 
@@ -30,6 +31,7 @@ configure_utf8_streams()
 ENGINES = {
     "rfq": "rfq_engine",
     "me01": "me01_source_list",
+    "mm02": "mm02_sub_commodity",
     "me52n": "me52n_project_ref",
     "apqp": "apqp_plan_closure",
 }
@@ -56,9 +58,17 @@ def self_test() -> int:
     from apqp_plan_closure import APQP_SESSION_POLICY
     from sap_gui_connection import SAP_CONNECTION_POLICY
     from rfq_source_writeback import SOURCE_WRITEBACK_POLICY
+    from apqp_date_api import APQP_DATE_POLICY
+    from apqp_dates import DATE_FIELDS, FIELD_SCHEMA
+    from apqp_date_update import STAGE_ONLY
+    manifest_path = Path(__file__).with_name('build-manifest.json')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig')) if manifest_path.is_file() else None
     print(json.dumps({"status": "ok", "engines": loaded, "rfqEngineVersion": ENGINE_VERSION,
                       "apqpSessionPolicy": APQP_SESSION_POLICY, "sapConnectionPolicy": SAP_CONNECTION_POLICY,
-                      "rfqSourceWritebackPolicy": SOURCE_WRITEBACK_POLICY}))
+                      "rfqSourceWritebackPolicy": SOURCE_WRITEBACK_POLICY, "buildManifest": manifest,
+                      "apqpDatePolicy": APQP_DATE_POLICY, "apqpDateSchema": FIELD_SCHEMA,
+                      "apqpDateFields": [field.technical_name for field in DATE_FIELDS],
+                      "apqpDateStageOnly": STAGE_ONLY}))
     return 0
 
 
@@ -66,7 +76,7 @@ def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
         return self_test()
     if len(sys.argv) < 2:
-        print("Usage: automation-engine.exe <rfq|me01|me52n|apqp> [arguments]", file=sys.stderr)
+        print("Usage: automation-engine.exe <rfq|me01|mm02|me52n|apqp> [arguments]", file=sys.stderr)
         return 2
 
     engine_name = sys.argv[1]

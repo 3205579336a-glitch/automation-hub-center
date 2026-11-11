@@ -46,14 +46,16 @@ test('savings deducts full wall time once; counts confirmed success not skips; e
   assert.equal(summary.today.actualMs, 160000)
   assert.equal(summary.today.successfulUnits, 12)
   assert.equal(summary.today.runs, 2)
+  assert.equal(summary.allTime.savedMs, 6340000)
+  assert.equal(summary.allTime.runs, 3)
   assert.equal(summary.excludedRuns, 6)
 })
 test('periods use completion dates and include negative runs conservatively before flooring to zero', () => {
   const summary = timeSavings([entry('slow', { succeeded: 1, durationMs: 4000000 }), entry('yesterday', { completedAt: new Date('2026-10-08T10:00:00').toISOString() }),
     entry('future', { completedAt: '2099-01-01T00:00:00Z' }), entry('invalid', { durationMs: Infinity })], DEFAULT_MANUAL_SECONDS, true, new Set(), now)
   assert.equal(summary.today.savedMs, 0)
-  assert.equal(summary.last30Days.savedMs, 0)
-  assert.equal(summary.last30Days.runs, 2)
+  assert.equal(summary.allTime.savedMs, 0)
+  assert.equal(summary.allTime.runs, 2)
   assert.equal(summary.calibrated, true)
 })
 
@@ -94,6 +96,30 @@ async function fixture(probe = () => 'dead') {
   }
   return { root, ledger, runs, recovery, history, start, close: () => rm(root, { recursive: true, force: true }) }
 }
+test('concurrent history queries share the same read but see a subsequent write', async () => {
+  const f = await fixture()
+  try {
+    const history = f.history
+    const [first, second] = await Promise.all([history.getRetainedEntries(), history.getRetainedEntries()])
+    assert.strictEqual(first, second)
+    const added = await history.start({ operation: 'me12-batch', label: 'new run', summary: 'Started' })
+    const entries = await history.getRetainedEntries()
+    assert.deepEqual(entries.map(e => e.id), [added.id])
+    assert.equal(first.length, 0)
+  } finally { await f.close() }
+})
+test('protected recovery membership does not probe the old process or workbook', async () => {
+  const f = await fixture()
+  try {
+    const { id } = await f.start()
+    let probes = 0
+    const reopened = new RfqSafeRecoveryService(f.ledger, f.runs, () => { probes++; return 'alive' })
+    assert.deepEqual([...reopened.protectedIds()], [id])
+    assert.equal(probes, 0)
+    assert.equal(reopened.pending()[0].processStatus, 'alive')
+    assert.equal(probes, 1)
+  } finally { await f.close() }
+})
 test('atomic ledger replacement retries transient Windows locks, but preserves old evidence on persistent failure', async () => {
   const f = await fixture()
   try {

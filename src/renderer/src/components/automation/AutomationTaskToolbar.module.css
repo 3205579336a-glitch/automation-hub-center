@@ -1,4 +1,4 @@
-.toolbar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; padding: 1.1rem 1.3rem; margin-bottom: 1.2rem; border-top: 3px solid var(--primary); }
+.toolbar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .85rem; padding: .85rem var(--panel-padding); margin-bottom: 1rem; }
 .copy { display: flex; flex: 1 1 260px; gap: .8rem; align-items: flex-start; min-width: 0; }
 .copy strong { color: var(--text-strong); font-size: 1rem; }
 .copy p { color: var(--text-muted); font-size: .88rem; line-height: 1.55; margin: .35rem 0 0; overflow-wrap: anywhere; }
@@ -6,4 +6,6 @@
 .ready { background: var(--success); }
 .active { background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; }
+.runLock { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem .8rem; padding: .6rem .75rem; border-radius: var(--control-radius); background: var(--primary-soft); }
+.runLock p { flex: 1 1 240px; min-width: 0; margin: 0; color: var(--text); line-height: 1.45; }
 @media (max-width: 760px) { .actions { width: 100%; } .actions button { flex: 1 1 auto; } }

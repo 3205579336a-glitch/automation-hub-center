@@ -10,8 +10,12 @@ $launcherPath = Join-Path $sourceRoot 'automation_engine_launcher.py'
 $distPath = Join-Path $projectRoot 'resources\rpa-engine'
 $workPath = Join-Path $buildRoot 'pyinstaller-work'
 $specPath = Join-Path $buildRoot 'spec'
+. (Join-Path $PSScriptRoot 'automation-build-manifest.ps1')
 
 New-Item -ItemType Directory -Force -Path $buildRoot, $distPath | Out-Null
+$manifestPath = Join-Path $buildRoot 'build-manifest.json'
+$manifest = Get-AutomationBuildManifest -ProjectRoot $projectRoot
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 
 if (-not (Test-Path -LiteralPath $pythonPath)) {
   py -3 -m venv $venvPath
@@ -27,6 +31,7 @@ if (-not $SkipDependencyInstall) {
   --onedir `
   --name automation-engine `
   --paths $sourceRoot `
+  --add-data "$manifestPath;." `
   --hidden-import rfq_engine `
   --hidden-import rfq_runtime `
   --hidden-import rfq_source_writeback `
@@ -36,6 +41,7 @@ if (-not $SkipDependencyInstall) {
   --hidden-import hub_artifacts `
   --hidden-import sap_gui_connection `
   --hidden-import me01_source_list `
+  --hidden-import mm02_sub_commodity `
   --hidden-import me01_source_table `
   --hidden-import me52n_project_ref `
   --hidden-import apqp_plan_closure `

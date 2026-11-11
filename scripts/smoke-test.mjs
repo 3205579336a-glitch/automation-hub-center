@@ -11,7 +11,7 @@ const folder = await mkdtemp(join(tmpdir(), 'hub-guided-smoke-'))
 const artifacts = resolve('artifacts')
 await mkdir(artifacts, { recursive: true })
 const modules = [
-  { card: 'Automatically Update Supplier Lead Times (SLT) in Batch', title: 'Automatically Update Supplier Lead Times (SLT) in Batch', template: 'ME12_Supplier_Lead_Time_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['B', 'C100']], name: 'Info Record' },
+  { card: 'Batch Update Purchasing Info Records (IR)', title: 'Batch Update Purchasing Info Records (IR)', template: 'ME12_Supplier_Lead_Time_Template.xlsx', downloadedTemplate: 'ME12_Info_Record_Update_Template.xlsx', channel: 'me12', cells: [['A', '0012345678'], ['C', '0'], ['D', 'Z004'], ['E', '18']], name: 'Info Record' },
   { card: 'APQP Date Management', title: 'APQP Date Management', template: 'APQP_Plan_Closure_Template.xlsx', channel: 'apqp', cells: [['A', '16808656'], ['B', '41889']], name: 'APQP' },
   { card: 'Automatically Maintain Source Lists in Batch', title: 'Automatically Maintain Source Lists in Batch', template: 'ME01_Source_List_Template.xlsx', channel: 'me01', cells: [['A', '16808656'], ['B', '41889'], ['C', 'No']], name: 'Source List' }
 ]
@@ -60,7 +60,7 @@ try {
     }
   }
   await operations()
-  assert.equal(await page.getByRole('button', { name: 'Open', exact: true }).count(), 4)
+  assert.equal(await page.getByRole('button', { name: 'Open', exact: true }).count(), 5)
   assert.equal(await page.getByText(/ME52N|PR Modification|Project Ref/).count(), 0)
   assert.equal(await page.evaluate(() => Object.keys(window.sapAutomation).some(key => key.toLowerCase().includes('me52'))), false)
   await page.getByRole('button', { name: 'Info', exact: true }).first().click()
@@ -75,7 +75,8 @@ try {
     await open(module)
     if (module.channel === 'me12') await page.getByRole('note').getByText(/Permission required: SAP ME12/).waitFor()
     await page.getByRole('button', { name: 'Download template', exact: true }).click()
-    await stat(join(folder, module.template))
+    await page.getByText(`Downloaded: ${module.downloadedTemplate ?? module.template}`, { exact: true }).waitFor()
+    await stat(join(folder, module.downloadedTemplate ?? module.template))
     const before = await readFile(module.path)
     await app.evaluate(({ dialog }, path) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [path] }) }, module.path)
     await page.getByRole('button', { name: 'Upload completed template', exact: true }).click()
@@ -84,6 +85,14 @@ try {
     await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => ['Start Automation', 'Start query'].includes(button.textContent.trim()) && !button.disabled && button.offsetParent !== null), { timeout: 45000 })
     assert.deepEqual(await readFile(module.path), before, 'Real preview must not modify the uploaded workbook')
     assert.equal(await page.getByLabel(/Sheet name|Session|Python|Starting row|Retry/).count(), 0)
+    if (module.channel === 'me12') {
+      assert.equal(await page.getByLabel('Purchasing Type', { exact: true }).inputValue(), 'both')
+      assert.equal(await page.getByLabel(/^Purchasing Organization/).inputValue(), 'C100')
+      const row = page.getByRole('row').filter({ hasText: '0012345678' })
+      await row.getByRole('cell', { name: '0', exact: true }).waitFor()
+      await row.getByRole('cell', { name: '18', exact: true }).waitFor()
+      await row.getByRole('cell', { name: 'Z004', exact: true }).waitFor()
+    }
     if (module.channel === 'me01') {
       assert.equal(await page.getByLabel(/^Valid to/).inputValue(),'2099-12-31')
       await page.getByLabel(/^Valid from/).fill('2026-10-12')
@@ -216,7 +225,8 @@ try {
   await page.getByRole('button', { name: 'Execution History', exact: true }).click()
   await page.getByRole('heading', { name: 'Execution history', exact: true }).waitFor()
   await page.getByRole('button', { name: 'Dashboard', exact: true }).click()
-  assert.equal(await page.getByText('Available Operations', { exact: true }).locator('..').locator('strong').innerText(), '4')
+  await page.getByRole('region', { name: 'Automation summary' }).locator('article')
+    .filter({ hasText: 'Available Operations' }).getByText('5', { exact: true }).waitFor()
   // Long task names must remain readable in both languages with large text.
   await operations()
   for (const title of ['Automatically Create Buyer Receipts and RFQs in Batch from NPL', ...modules.map(module => module.card)]) {
@@ -237,7 +247,7 @@ try {
   await page.getByLabel('Language', { exact: true }).selectOption('zh-CN')
   await page.getByRole('button', { name: 'Save Settings', exact: true }).click()
   await page.getByRole('button', { name: '操作中心', exact: true }).click()
-  for (const title of ['在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', '自动批量更新供应商交货时间（SLT）', 'APQP 日期管理', '自动批量 Source List 维护']) {
+  for (const title of ['在 NPL 中自动批量创建 Buyer Receipt 和 RFQ', '批量维护采购信息记录（IR）', 'APQP 日期管理', '自动批量 Source List 维护']) {
     await page.getByRole('heading', { name: title, exact: true }).waitFor()
   }
   await checkCards()

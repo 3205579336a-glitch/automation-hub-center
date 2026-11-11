@@ -6,6 +6,7 @@ import type { RfqBatchProgress } from '../shared/rfq-batch-types'
 import type { AutomationInteraction } from '../shared/automation-interaction'
 import type { EtaSnapshot } from '../shared/local-intelligence'
 import type { Me01BatchProgress } from '../shared/me01-types'
+import type { Mm02Progress } from '../shared/mm02-types'
 import type { SapAutomationApi } from './types'
 import type { ApqpProgress } from '../shared/apqp-types'
 
@@ -16,6 +17,8 @@ const sapAutomationApi: SapAutomationApi = {
   previewApqpDateChanges: input => ipcRenderer.invoke(IPC_CHANNELS.previewApqpDateChanges, input),
   executeApqpDateChanges: input => ipcRenderer.invoke(IPC_CHANNELS.executeApqpDateChanges, input),
   getTimeSavings: () => ipcRenderer.invoke(IPC_CHANNELS.getTimeSavings),
+  getDashboardSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getDashboardSnapshot),
+  getLocalUsername: () => ipcRenderer.invoke(IPC_CHANNELS.getLocalUsername),
   getRfqRecovery: () => ipcRenderer.invoke(IPC_CHANNELS.getRfqRecovery),
   openRecoveryResult: runId => ipcRenderer.invoke(IPC_CHANNELS.openRecoveryResult, runId),
   resolveRfqRecovery: input => ipcRenderer.invoke(IPC_CHANNELS.resolveRfqRecovery, input),
@@ -74,6 +77,16 @@ const sapAutomationApi: SapAutomationApi = {
     }
     ipcRenderer.on(IPC_CHANNELS.me01Progress, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.me01Progress, handler)
+  },
+  downloadMm02Template: () => ipcRenderer.invoke(IPC_CHANNELS.downloadMm02Template),
+  selectMm02Excel: () => ipcRenderer.invoke(IPC_CHANNELS.selectMm02Excel),
+  previewMm02Batch: path => ipcRenderer.invoke(IPC_CHANNELS.previewMm02Batch, path),
+  startMm02Batch: config => ipcRenderer.invoke(IPC_CHANNELS.startMm02Batch, config),
+  cancelMm02Batch: () => ipcRenderer.invoke(IPC_CHANNELS.cancelMm02Batch),
+  onMm02Progress: listener => {
+    const handler = (_event: Electron.IpcRendererEvent, progress: Mm02Progress): void => listener(progress)
+    ipcRenderer.on(IPC_CHANNELS.mm02Progress, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.mm02Progress, handler)
   },
   openAutomationArtifact: (path) => ipcRenderer.invoke(IPC_CHANNELS.openAutomationArtifact, path),
   selectRfqExcelFile: () => ipcRenderer.invoke(IPC_CHANNELS.selectRfqExcelFile),

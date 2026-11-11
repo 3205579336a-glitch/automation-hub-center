@@ -1,5 +1,5 @@
 .workflow { display: grid; gap: 1.4rem; }
-.steps { display: flex; gap: .7rem; flex-wrap: wrap; padding: 1rem 1.25rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.steps { display: flex; gap: .7rem 1rem; flex-wrap: wrap; padding: .85rem var(--panel-padding); border: 1px solid var(--border); border-radius: var(--panel-radius); background: var(--surface); }
 .steps span { display: flex; align-items: center; gap: .5rem; color: var(--text-muted); }
 .steps b { display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); border-radius: 50%; width: 1.65rem; height: 1.65rem; }
 .body { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, 1fr); gap: 1.4rem; align-items: start; }
@@ -10,7 +10,7 @@
 .emptyPreview { display: grid; gap: .8rem; justify-items: center; padding: 2rem 1rem; border: 1px dashed var(--border-strong); border-radius: 12px; background: var(--surface-muted); color: var(--text-muted); text-align: center; }
 .emptyPreview strong { color: var(--text-strong); }
 .emptyPreview p { max-width: 28rem; }
-.section { padding: 1.4rem; display: grid; gap: 1rem; min-width: 0; }
+.section { padding: var(--panel-padding); display: grid; gap: 1rem; min-width: 0; }
 .section h3, .section p { margin: 0; }
 .section p { color: var(--text-muted); line-height: 1.65; }
 .actions { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
@@ -20,8 +20,8 @@
 .metrics span { color: var(--text-muted); }
 .metrics strong { font-size: 1.35rem; overflow-wrap: anywhere; }
 .filename { overflow-wrap: anywhere; padding: .75rem; background: var(--primary-soft); border-radius: 8px; }
-.notice { border-left: 4px solid var(--primary); padding: .8rem 1rem; background: var(--primary-soft); border-radius: 8px; line-height: 1.65; }
-.warning { border-left: 4px solid #d69b37; padding: .8rem 1rem; border-radius: 8px; background: #d69b3718; }
+.notice { border-inline-start: 3px solid var(--primary); padding: .8rem 1rem; background: var(--primary-soft); border-radius: var(--control-radius); line-height: 1.65; }
+.warning { border-inline-start: 3px solid var(--warning); padding: .8rem 1rem; border-radius: var(--control-radius); background: var(--warning-soft); color: var(--warning-strong); }
 .progress { height: .55rem; background: var(--border); border-radius: 99px; overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--primary); transition: width .2s; }
 .details { border-top: 1px solid var(--border); padding-top: 1rem; }

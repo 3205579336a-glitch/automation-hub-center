@@ -18,23 +18,30 @@ const copy = {
       steps: ['Download the template and fill materials, project and supplier details', 'Upload and review the groups; each RFQ contains up to 50 materials', 'Confirm the SAP environment, start the batch and check RFQ numbers in the result file']
     },
     'me12-lead-time': {
-      title: 'Automatically Update Supplier Lead Times (SLT) in Batch',
-      shortTitle: 'Batch Update Supplier Lead Times',
+      title: 'Batch Update Purchasing Info Records (IR)',
+      shortTitle: 'Batch Update Info Records',
       permissionNotice: 'Permission required: SAP ME12 purchasing Info Record change authorization. If unavailable, contact your key user or IT.',
-      description: 'Upload your Info Records, set the target lead time in days and update them in batch. Supports standard and consignment purchasing, with a result for each record.',
-      steps: ['Download the template and fill Info Records and Plants', 'Upload, select standard or consignment, enter the target lead time and review', 'Confirm the update, start the batch and check each record in the result file']
+      description: 'Update SLT, PDT and confirmation control independently by Info Record. Standard and consignment are selected by default. Excel reports both outcomes separately.',
+      steps: ['Fill the Info Record number and at least one change per row', 'Review the upload and confirm Plant, purchasing organization and types', 'Choose your certificate if prompted, then review the results in Excel']
     },
     'apqp-plan-closure': {
       title: 'APQP Date Management',
       shortTitle: 'APQP Date Management',
-      description: 'Find APQPs by NPL and User ID, edit four dates and preview SAP differences. The existing batch plan-closure query remains available. Date writes require QA acceptance before release.',
-      steps: ['Choose Find APQPs & Edit Dates or the existing Query Plan Closure Date workflow', 'Find by NPL and User ID, or upload the existing Excel template for the plan-closure query', 'Review date differences without SAP writes; actual date updates remain gated until QA acceptance']
+      description: 'Find APQPs by project and owner, then update four planned dates in Production 949. The separate Excel workflow looks up plan closure dates without changing SAP.',
+      steps: ['Choose Find APQPs & Edit Dates or Query Plan Closure Date', 'Check the project and owner User ID, or upload the Excel query template', 'Save only the planned dates you intend to change, or review the read-only query results in Excel']
     },
     'me01-source-list': {
       title: 'Automatically Maintain Source Lists in Batch',
       shortTitle: 'Batch Source List Maintenance',
       description: 'Upload materials, Supplier Parma and Dual Sourcing (Yes/No). Existing target suppliers are skipped without changes. Missing suppliers are added with Fix and MRP 1; Yes keeps other Fix/MRP, No clears them. No records are deleted.',
       steps: ['Fill material, Parma and required Dual Sourcing Yes/No in the template', 'Existing target Parma is skipped; for a new supplier, Yes retains other Fix/MRP and No clears them', 'Confirm and run with Excel open or closed; review results in Excel. Errors are shown directly in a popup']
+    },
+    'mm02-sub-commodity': {
+      title: 'Automatically Update Material Sub-commodity in Batch',
+      shortTitle: 'Batch Update Sub-commodity',
+      description: 'Upload Material and the new six-digit Sub-commodity. The Hub updates only that classification value in SAP and gives you a separate Excel result.',
+      permissionNotice: 'Requires SAP GUI Scripting and permission to change material classification (MM02).',
+      steps: ['Download the template and fill Material and the six-digit Sub-commodity', 'Save and upload the file, then review the materials and codes', 'Leave an idle window open at SAP Easy Access in Production 949, confirm the update, then open the result']
     }
   },
   'zh-CN': {
@@ -45,23 +52,30 @@ const copy = {
       steps: ['下载模板，填写物料、项目及供应商等信息', '上传并核对自动分组，每份 RFQ 最多包含 50 个物料', '确认 SAP 系统后开始批量创建，在结果文件中查看 RFQ 编号']
     },
     'me12-lead-time': {
-      title: '自动批量更新供应商交货时间（SLT）',
-      shortTitle: '批量更新供应商交货时间',
+      title: '批量维护采购信息记录（IR）',
+      shortTitle: '批量维护采购信息记录',
       permissionNotice: '需要权限：请确认已开通 SAP ME12 采购信息记录修改权限；如无权限，请联系 Key User 或 IT。',
-      description: '上传采购信息记录，设置目标交货天数，系统自动逐条更新。支持标准和寄售采购，完成后可在 Excel 中查看每条记录的结果。',
-      steps: ['下载模板，填写采购信息记录和工厂', '上传后选择标准或寄售采购，填写目标交货天数并核对预览', '确认更新后开始批量处理，在结果文件中查看每条记录的结果']
+      description: '按采购信息记录分别更新 SLT、PDT 和确认控制码。默认处理标准和寄售两种类型，分别将结果写回 Excel。',
+      steps: ['填写信息记录号，每行至少填写一项修改', '上传并核对预览、工厂、采购组织和采购类型', '如有提示，选择证书；执行后在 Excel 中查看两种采购类型的结果']
     },
     'apqp-plan-closure': {
       title: 'APQP 日期管理',
       shortTitle: 'APQP 日期管理',
-      description: '按 NPL 和 User ID 查找 APQP、编辑四个日期并核对 SAP 差异；也可沿用 Excel 自动批量查询计划关闭日期。日期写入需通过 QA 验证后开放。',
-      steps: ['选择查找 APQP 并编辑日期，或原有批量查询计划关闭日期', '按 NPL 和 User ID 查找，或上传原有查询模板', '核对日期差异或打开查询结果；新日期写入需先通过 QA 验证']
+      description: '按项目和负责人查找 APQP，在正式 949 更新四个计划日期。也可用 Excel 批量查询计划关闭日期，此查询不修改 SAP。',
+      steps: ['选择查找 APQP 并编辑日期，或批量查询计划关闭日期', '核对项目和负责人 User ID，或上传 Excel 查询模板', '仅保存需要修改的计划日期，或在 Excel 查看只读查询结果']
     },
     'me01-source-list': {
       title: '自动批量 Source List 维护',
       shortTitle: '自动批量 Source List 维护',
       description: '上传物料、Supplier Parma 和是否双供（Yes/No）。目标供应商已存在则跳过且不修改；不存在则新增并勾选 Fix、MRP 填 1。Yes 保留其他 Fix/MRP，No 清空其他标识，不删除记录。',
       steps: ['填写模板中的物料、Parma 和必填的是否双供 Yes/No', '目标 Parma 已存在则跳过；新增供应商时，Yes 保留其他 Fix/MRP，No 清空其他标识', 'Excel 可以保持打开；确认执行后查看结果，遇到无法继续的错误会直接弹窗提示']
+    },
+    'mm02-sub-commodity': {
+      title: '自动批量修改物料 Sub-commodity',
+      shortTitle: '批量修改 Sub-commodity',
+      description: '上传物料号和新的 6 位 Sub-commodity，Hub 只更新对应的 SAP 分类字段，并单独生成 Excel 结果。',
+      permissionNotice: '需要 SAP GUI Scripting 和 MM02 物料分类修改权限。',
+      steps: ['下载模板，填写物料号和 6 位 Sub-commodity', '保存并上传 Excel，核对物料和目标代码', '在正式 949 保留一个停在 SAP 首页的空闲窗口，确认执行后打开结果']
     }
   }
 }

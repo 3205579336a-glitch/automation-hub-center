@@ -240,6 +240,7 @@ def run_hub(engine, args):
     source_writer = None
     source_closed = False
     last_source_notice = None
+    startup_started = time.monotonic()
 
     def event(kind, **data):
         emit(args, kind, **{**context, **data})
@@ -267,15 +268,20 @@ def run_hub(engine, args):
     try:
         if not args.excel_path:
             raise ValueError("Select an RFQ workbook first.")
+        stage_started = time.monotonic()
         preview = validate_workbook(engine, Path(args.excel_path))
+        event('STARTUP_TIMING', step='workbook_validation', seconds=round(time.monotonic() - stage_started, 3))
         event("VALIDATION_COMPLETED", preview=preview)
         if args.validate_only:
             return 0
+        stage_started = time.monotonic()
         wait_for_hub_ready(args)
+        event('STARTUP_TIMING', step='recovery_handshake', seconds=round(time.monotonic() - stage_started, 3))
         if preview["invalidRows"] or not preview["validRows"]:
             raise ValueError("Correct all invalid rows and provide at least one ready material before starting.")
         if args.target_env == "PROD" and not args.production_confirmed:
             raise ValueError("Production execution requires confirmation.")
+        stage_started = time.monotonic()
         if getattr(args, 'source_excel_path', ''):
             from rfq_source_writeback import SourceWorkbookWriteback, path_key
             if path_key(args.source_excel_path) == path_key(args.excel_path):
@@ -284,9 +290,12 @@ def run_hub(engine, args):
                 raise ValueError('Source writeback requires the validated input snapshot.')
             source_writer = SourceWorkbookWriteback(engine, args.source_excel_path,
                                                     args.source_baseline_path, preview['sheetName'])
+        event('STARTUP_TIMING', step='source_writeback_setup', seconds=round(time.monotonic() - stage_started, 3))
         engine.STOP_REQUESTED = False
         context["total"] = preview["groupCount"]
         event("RUN_STARTED", materials=preview["validRows"], message="Connecting to SAP. Complete SAP sign-in if requested.")
+
+        sap_phase_started = time.monotonic()
 
         old_init = engine.ExcelStore.__init__
         def init_store(self, *a, **kw):
@@ -477,6 +486,10 @@ def run_hub(engine, args):
         old_process = engine.process_group
         def process(sap, excel, group):
             nonlocal current_group
+            if context['current'] == 0:
+                event('STARTUP_TIMING', step='workbook_setup_and_sap_connection',
+                      seconds=round(time.monotonic() - sap_phase_started, 3),
+                      engineElapsed=round(time.monotonic() - startup_started, 3))
             current_group = group
             row_materials.clear()
             row_materials.update({t.excel_row: t.material for t in group.tasks})
@@ -487,6 +500,15 @@ def run_hub(engine, args):
             try:
                 return old_process(sap, excel, group)
             except Exception as exc:
+                if isinstance(exc, engine.SapRpaError) and exc.stage == 'NPL_NO_DATA':
+                    # NPL is read-only and no Buyer Receipt/RFQ was started.
+                    # Save the result before moving on; never mark it successful.
+                    excel.write_status([task.excel_row for task in group.tasks],
+                                       batch_key=group.key, buyer_status='NPL_NO_DATA',
+                                       rfq_status='SKIPPED_NPL_NO_DATA', error_stage='NPL_NO_DATA',
+                                       error_message='SAP NPL returned No data for this plant/project/material group.')
+                    excel.save()
+                    return 'SKIPPED_NPL_NO_DATA', ''
                 if controller is None:
                     raise
                 if (isinstance(exc, engine.SapRpaError) and exc.stage == 'CREATE_BUYER_RECEIPT'

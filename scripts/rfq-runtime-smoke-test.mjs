@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile, readFile, stat, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { _electron as electron } from 'playwright-core'
 
 const directory = await mkdtemp(join(tmpdir(), 'hub-rfq-runtime-smoke-'))
@@ -25,6 +26,12 @@ try {
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.getByRole('heading', { name: 'Welcome back', exact: true }).waitFor()
+  // Startup maintenance is intentionally deferred 30 seconds so log scans do
+  // not delay the first usable window. Wait for the real idle retention pass.
+  const retentionDeadline = Date.now() + 45_000
+  while (JSON.parse(await readFile(join(seedData, 'execution-history.json'), 'utf8')).length && Date.now() < retentionDeadline) {
+    await delay(500)
+  }
   assert.deepEqual(JSON.parse(await readFile(join(seedData, 'execution-history.json'), 'utf8')), [])
   await assert.rejects(stat(join(oldRun, 'logs', 'engine.log')))
   await assert.rejects(stat(join(seedLogs, 'sap-toolbox-2000-01-01.jsonl')))
@@ -179,7 +186,8 @@ try {
   await writeFile(logPath, Array.from({ length: 41 }, (_, index) => JSON.stringify({ id: `log-${index}`, timestamp: new Date().toISOString(),
     level: 'info', category: 'application', event: `mock.log.${index}`, message: 'offline diagnostic' })).join('\n') + '\n')
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
-  await page.getByText('Advanced / Key User Settings', { exact: true }).click()
+  assert.equal(await page.getByText('Advanced / Key User Settings', { exact: true }).count(), 0)
+  await page.getByText('Support & logs', { exact: true }).click()
   await page.getByText('mock.log.40', { exact: true }).waitFor()
   assert.equal(await page.locator('article').filter({ hasText: 'offline diagnostic' }).count(), 20)
   await page.getByRole('button', { name: 'Next page', exact: true }).click()

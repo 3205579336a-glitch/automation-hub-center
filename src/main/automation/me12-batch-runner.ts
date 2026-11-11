@@ -1,10 +1,12 @@
 import { join } from 'node:path'
-import type { BrowserContext, Frame, Locator, Page } from 'playwright-core'
+import type { BrowserContext, ElementHandle, Frame, Locator, Page } from 'playwright-core'
 import type {
   Me12BatchConfig,
   Me12BatchProgress,
-  Me12BatchResult
+  Me12BatchResult,
+  Me12InfoCategory
 } from '../../shared/me12-types'
+import { me12Categories } from '../../shared/me12-types'
 import { resolveSapUrl } from '../../shared/settings-types'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
 import {
@@ -16,10 +18,10 @@ import type { SettingsService } from '../services/settings-service'
 import type { BrowserSlotManager } from './browser-slot-manager'
 import type { GuidanceContext } from './native-interaction-bridge'
 import { GuidedCancelled } from '../services/guided-automation-service'
-import { verifyMe12Startup } from './me12-startup'
+import { Me12StartupPending, verifyMe12Startup, waitForMe12Startup } from './me12-startup'
 
-const LOGIN_TIMEOUT_MS = 180_000
 const NAVIGATION_TIMEOUT_MS = 30_000
+const AUTO_SIGN_IN_WAIT_MS = 60_000
 
 interface TaskOutcome {
   kind: 'success' | 'skipped' | 'failed'
@@ -36,6 +38,16 @@ interface BrowserWorker {
 
 class SapRecordLockedError extends Error {}
 class BatchCancelledError extends Error {}
+class SapSaveBoundaryError extends Error {}
+class SapRecordNotMaintainedError extends Error {}
+
+const INFO_RECORD_NAMES = ['Info Record', 'Purchasing Info Record']
+const ORG_NAMES = ['Purchasing Org.', 'Purchasing Organization', 'Purch. Org.']
+const SLT_NAMES = ['SLT', 'Supplier Lead Time', 'Supp. Lead Time']
+const PDT_NAMES = ['PDT', 'Pl. Deliv. Time', 'Pl. Deliv. Time.', 'Planned Delivery Time']
+const CONFIRMATION_NAMES = ['Conf. Ctrl.', 'Conf. Ctrl', 'Conf.Ctrl.', 'Conf.Ctrl', 'Confirmation Control', 'Confirmation Control Key']
+const IR_DETAIL_NAMES = [...SLT_NAMES, ...PDT_NAMES, ...CONFIRMATION_NAMES]
+const normalizeDays = (value: string): string => /^\d+$/.test(value) ? String(Number(value)) : value
 
 export class Me12BatchRunner {
   private running = false
@@ -156,7 +168,6 @@ export class Me12BatchRunner {
           this.contexts.add(context)
           const page = context.pages()[0] ?? (await context.newPage())
           setMe12PageUrl(page, resolvedUrl.url.toString())
-          page.on('dialog', (dialog) => void dialog.accept().catch(() => undefined))
           return { worker, slot, context, page }
         })
       )
@@ -178,6 +189,10 @@ export class Me12BatchRunner {
       }
       browserCount = workers.length
 
+      reportProgress({
+        stage: 'waiting-for-login',
+        message: `Waiting for ${browserCount} ME12 window(s). If prompted, select your certificate and sign in. The batch will start automatically when SAP is ready.`
+      })
       if (guidance) {
         // No worker may change a record until all opened windows are signed in.
         await Promise.all(workers.map(async ({ page }) => {
@@ -185,25 +200,31 @@ export class Me12BatchRunner {
           catch (error) { if (!/timeout/i.test(errorMessage(error))) throw error }
         }))
         const startupNavigated = new WeakSet<Page>()
-        const verify = async (): Promise<void> => {
-          for (const { page } of workers) {
-            await verifyMe12Startup(page, resolvedUrl.url, startupNavigated,
-              async () => Boolean(await findTextboxAcrossFrames(page, ['Info Record', 'Purchasing Info Record'], 1_200)),
-              async () => Boolean(await findTextboxAcrossFrames(page, ['Transaction Code', 'Command Field', 'OK Code'], 600)),
-              () => this.assertNotCancelled())
-          }
-        }
-        try { await verify() } catch {
+        const stopped = (): void => this.assertNotCancelled()
+        const checks = workers.map(({ page }) => () => verifyMe12Startup(page, resolvedUrl.url, startupNavigated,
+          async () => {
+            const found = await findTextboxAcrossFrames(page, INFO_RECORD_NAMES, 1_200)
+            if (!found || !await found.locator.isEditable({ timeout: 500 }).catch(() => false)) return false
+            const [plant, organization] = await Promise.all([
+              findExactTextbox(found.frame, ['Plant']),
+              findExactTextbox(found.frame, ORG_NAMES)
+            ])
+            return Boolean(plant && organization)
+          },
+          async () => Boolean(await findTextboxAcrossFrames(page, ['Transaction Code', 'Command Field', 'OK Code'], 600)),
+          stopped))
+        try {
+          await waitForMe12Startup(checks, stopped, AUTO_SIGN_IN_WAIT_MS)
+        } catch (error) {
+          if (!(error instanceof Me12StartupPending)) throw error
+          stopped()
           await guidance.service.wait('Info Record', guidance.runId,
-            'Complete certificate selection and SAP sign-in in every browser window; check SAP prompts if ME12 has not opened.',
-            '请在每个浏览器窗口完成证书选择和 SAP 登录；若尚未进入 ME12，请检查 SAP 提示及事务权限。', verify, () => this.cancelRequested)
+            `${error.message} Complete certificate selection and SAP sign-in, or check SAP prompts and transaction permissions.`,
+            '等待 SAP 登录超时。请确认所有工作窗口均已完成证书选择、登录并进入 ME12；如有 SAP 提示，请处理后点击继续。',
+            () => waitForMe12Startup(checks, stopped, 0), () => this.cancelRequested)
         }
       }
 
-      reportProgress({
-        stage: 'waiting-for-login',
-        message: `User confirmation required: select the Windows certificate in all ${browserCount} browser window(s).`
-      })
       let nextTaskIndex = 0
       let unsafeRecord = false
       let nextCheckpoint = config.saveEvery
@@ -214,7 +235,7 @@ export class Me12BatchRunner {
       }
 
       const runWorker = async (browserWorker: BrowserWorker): Promise<void> => {
-        let firstRecord = !guidance
+        let reuseReadyPage = Boolean(guidance)
         while (true) {
           this.assertNotCancelled()
           if (unsafeRecord) return
@@ -239,10 +260,10 @@ export class Me12BatchRunner {
             browserWorker.page,
             task,
             config,
-            firstRecord,
+            reuseReadyPage,
             browserWorker.worker
           )
-          firstRecord = false
+          reuseReadyPage = false
           processed += 1
           if (taskResult.kind === 'success') {
             succeeded += 1
@@ -250,7 +271,7 @@ export class Me12BatchRunner {
             skipped += 1
           } else {
             failed += 1
-            if (guidance) unsafeRecord = true
+            unsafeRecord = true
           }
           this.excelService.writeTaskResult(
             workbookSession,
@@ -388,17 +409,42 @@ export class Me12BatchRunner {
     page: Page,
     task: Me12ExcelTask,
     config: Me12BatchConfig,
-    firstRecord: boolean,
+    reuseReadyPage: boolean,
     worker: number
+  ): Promise<TaskOutcome> {
+    const results: Array<{ category: Me12InfoCategory; outcome: TaskOutcome }> = []
+    const categories = me12Categories(config.infoCategory)
+    // Process both views of the same IR in one worker, never concurrently.
+    for (const category of categories) {
+      if (results.length && (this.cancelRequested || results.some(({ outcome }) => outcome.kind === 'failed'))) break
+      const outcome = await this.runCategoryWithRetries(page, task, config, category, reuseReadyPage, worker)
+      results.push({ category, outcome })
+      reuseReadyPage = false
+    }
+    const label = (category: Me12InfoCategory): string => category === 'standard' ? 'Standard' : 'Consignment'
+    const status = categories.map(category => {
+      const outcome = results.find(result => result.category === category)?.outcome
+      return `${label(category)}: ${outcome?.status ?? 'Not attempted'}`
+    }).join(' | ')
+    return {
+      kind: results.some(({ outcome }) => outcome.kind === 'failed') ? 'failed'
+        : results.some(({ outcome }) => outcome.kind === 'success') ? 'success' : 'skipped',
+      oldValue: results.filter(({ outcome }) => outcome.oldValue !== '').map(({ category, outcome }) => `${label(category)}: ${outcome.oldValue}`).join(' | '),
+      status
+    }
+  }
+
+  private async runCategoryWithRetries(
+    page: Page, task: Me12ExcelTask, config: Me12BatchConfig, category: Me12InfoCategory,
+    reuseReadyPage: boolean, worker: number
   ): Promise<TaskOutcome> {
     let lastError = ''
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
       this.assertNotCancelled()
       try {
-        return await updateOneInfoRecord(page, task.infoRecord, config, firstRecord && attempt === 0)
+        return await updateOneInfoRecord(page, task, config, category, reuseReadyPage && attempt === 0, () => this.assertNotCancelled())
       } catch (error) {
-        if (error instanceof SapRecordLockedError) {
-          await leaveCurrentRecord(page)
+        if (error instanceof SapRecordLockedError || error instanceof SapRecordNotMaintainedError) {
           return { kind: 'skipped', oldValue: '', status: `Skipped: ${error.message}` }
         }
         if (error instanceof BatchCancelledError) {
@@ -407,13 +453,13 @@ export class Me12BatchRunner {
         lastError = errorMessage(error)
         const screenshotPath = join(
           this.artifactDirectory || this.screenshotDirectory,
-          `ME12_${safeFilename(task.infoRecord)}_${timestampForFile()}_attempt-${attempt + 1}.png`
+          `ME12_${safeFilename(task.infoRecord)}_${category}_${timestampForFile()}_attempt-${attempt + 1}.png`
         )
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => undefined)
         await this.logger.error({
           category: 'automation',
           event: 'me12.record.attempt-failed',
-          message: `${task.infoRecord} attempt ${attempt + 1} failed: ${lastError}`,
+          message: `${task.infoRecord} (${category}) attempt ${attempt + 1} failed: ${lastError}`,
           errorCode: 'ME12_RECORD_FAILED',
           tcode: 'ME12',
           details: {
@@ -424,6 +470,9 @@ export class Me12BatchRunner {
             screenshotPath
           }
         })
+        if (error instanceof SapSaveBoundaryError) {
+          return { kind: 'failed', oldValue: '', status: lastError }
+        }
         if (attempt < config.maxRetries) {
           await delay(800)
         }
@@ -445,149 +494,154 @@ export class Me12BatchRunner {
 
 async function updateOneInfoRecord(
   page: Page,
+  task: Me12ExcelTask,
+  config: Me12BatchConfig,
+  category: Me12InfoCategory,
+  reuseReadyPage: boolean,
+  stopped: () => void
+): Promise<TaskOutcome> {
+  const { infoRecord } = task
+  const settingsUrl = await getCurrentMe12Url(page)
+  const origin = new URL(settingsUrl).origin
+  const detail = await openInfoRecordDetail(page, settingsUrl, infoRecord, config, category, reuseReadyPage, stopped)
+  const controls = [
+    { label: 'SLT', names: SLT_NAMES, target: task.targetLeadTime, normalize: normalizeDays },
+    { label: 'PDT', names: PDT_NAMES, target: task.plannedDeliveryTime, normalize: normalizeDays },
+    { label: 'Confirmation control', names: CONFIRMATION_NAMES, target: task.confirmationControl, normalize: (value: string) => value.toUpperCase() }
+  ].map(control => ({ ...control, locator: exactUpdateTextbox(detail, control.names) }))
+  const fields: Array<(typeof controls)[number] & { before: string; changed: boolean }> = []
+  const untouched: Array<(typeof controls)[number] & { before: string }> = []
+  for (const control of controls) {
+    const { label, locator, target, normalize } = control
+    const count = await locator.count()
+    if (target === '') {
+      if (count === 1) untouched.push({ ...control, before: (await locator.inputValue({ timeout: 1_000 })).trim() })
+      continue
+    }
+    if (count !== 1) throw new Error(`${label} field is missing or ambiguous on Purch. Org. Data 1. No save was sent.`)
+    for (const other of controls) {
+      if (other !== control && await locator.and(other.locator).count()) {
+        throw new Error(`${label} and ${other.label} point to the same SAP control. No save was sent.`)
+      }
+    }
+    const before = (await locator.inputValue({ timeout: 1_000 })).trim()
+    const changed = normalize(before) !== target
+    if (changed && !await locator.isEditable({ timeout: 500 })) throw new Error(`${label} is read-only. No save was sent.`)
+    fields.push({ ...control, before, changed })
+  }
+  const changes = fields.filter(field => field.changed)
+  const oldValue = fields.find(field => field.label === 'SLT')?.before ?? ''
+  const summary = fields.map(field => `${field.label}: ${field.before || '(blank)'} → ${field.target}`).join('; ')
+  if (!changes.length || config.dryRun) {
+    return { kind: 'skipped', oldValue, status: changes.length ? `DRY RUN: ${summary}; not saved` : `No change. ${summary}` }
+  }
+  stopped()
+  for (const field of changes) await fillSapInput(field.locator, field.target)
+  for (const field of fields) {
+    if (field.normalize((await field.locator.inputValue({ timeout: 1_000 })).trim()) !== field.target) {
+      throw new Error(`${field.label} failed SAP readback. No save was sent.`)
+    }
+  }
+  for (const field of untouched) {
+    if (field.normalize((await field.locator.inputValue({ timeout: 1_000 })).trim()) !== field.normalize(field.before)) {
+      throw new Error(`SAP changed unrequested ${field.label}. No save was sent.`)
+    }
+  }
+  await verifyPurchasingScope(detail, config)
+  await verifyDetailCategory(detail, category)
+  if (new URL(page.url()).origin !== origin) throw new Error('ME12 left the SAP origin before Save.')
+  await saveRecord(page, detail, infoRecord, origin, async () => {
+    // A numberless SAP notice is a hint, not proof. Reopen a fresh ME12
+    // transaction and compare saved values, not the inputs we just filled.
+    // Stop takes effect at the record boundary, after this read-only check.
+    const reopened = await openInfoRecordDetail(page, settingsUrl, infoRecord, config, category, false, () => {}, true)
+      .catch(error => {
+        throw new Error(`Post-save readback could not reopen the record: ${errorMessage(error).replace(/ No save was sent\./g, '')}`)
+      })
+    const record = exactUpdateTextbox(reopened, INFO_RECORD_NAMES)
+    if (await record.count() !== 1 || !sameInfoRecord(await inputValue(record), infoRecord)) {
+      throw new Error('The reopened SAP detail did not confirm the same Info Record.')
+    }
+    const expected = [...fields.map(field => ({ ...field, value: field.target })),
+      ...untouched.map(field => ({ ...field, value: field.normalize(field.before) }))]
+    for (const field of expected) {
+      const control = exactUpdateTextbox(reopened, field.names)
+      if (await control.count() !== 1 || field.normalize(await inputValue(control)) !== field.value) {
+        throw new Error(`Reopened SAP ${field.label} does not match the expected saved value.`)
+      }
+    }
+  })
+  return {
+    kind: 'success',
+    oldValue,
+    status: `Saved. ${summary}`
+  }
+}
+
+function sameInfoRecord(actual: string, expected: string): boolean {
+  return /^\d{1,10}$/.test(actual) && Number(actual) === Number(expected)
+}
+
+async function openInfoRecordDetail(
+  page: Page,
+  settingsUrl: string,
   infoRecord: string,
   config: Me12BatchConfig,
-  firstRecord: boolean
-): Promise<TaskOutcome> {
-  await gotoTcode(page, infoRecord, firstRecord)
-  const found = await findTextboxAcrossFrames(
-    page,
-    ['Info Record', 'Purchasing Info Record'],
-    firstRecord ? LOGIN_TIMEOUT_MS : 25_000
-  )
-  if (!found) {
-    throw new Error(
-      firstRecord
-        ? 'ME12 did not become ready within 3 minutes. Complete certificate selection and SAP sign-in, then retry.'
-        : 'Info Record input was not found after opening ME12.'
-    )
+  category: Me12InfoCategory,
+  reuseReadyPage: boolean,
+  stopped: () => void,
+  freshReadback = false
+): Promise<Frame> {
+  const origin = new URL(settingsUrl).origin
+  if (freshReadback) {
+    // Hash-only navigation can keep the edited DOM. Force a new document
+    // before entering the record again in that case.
+    const response = await page.goto(settingsUrl, { waitUntil: 'commit', timeout: NAVIGATION_TIMEOUT_MS })
+    if (!response) await page.reload({ waitUntil: 'commit', timeout: NAVIGATION_TIMEOUT_MS })
+  } else if (!reuseReadyPage || new URL(page.url()).origin !== origin) {
+    await gotoTcode(page, settingsUrl)
+  }
+  const found = await findTextboxAcrossFrames(page, INFO_RECORD_NAMES, reuseReadyPage ? 1_200 : 25_000,
+    freshReadback ? origin : undefined)
+  if (!found || new URL(page.url()).origin !== origin || !await found.locator.isEditable({ timeout: 500 }) ||
+      (freshReadback && await exactUpdateTextbox(found.frame, IR_DETAIL_NAMES).count())) {
+    throw new Error('An editable ME12 Info Record selection input was not found on the SAP origin.')
+  }
+  if (freshReadback && await hasSapModal(sapFrames(page, origin))) {
+    throw new Error('A SAP dialog blocked the readback. No option was selected.')
   }
 
+  stopped()
   const { frame, locator: infoRecordBox } = found
   await clearEditableInput(frame, ['Supplier', 'Vendor'])
   await clearEditableInput(frame, ['Material'])
   await fillEditableInput(frame, ['Plant'], config.targetPlant)
-  if (config.purchasingOrganization) {
-    await fillEditableInput(
-      frame,
-      ['Purchasing Org.', 'Purchasing Organization', 'Purch. Org.'],
-      config.purchasingOrganization
-    )
-  }
-
-  await selectInfoCategory(page, frame, config.infoCategory)
-
+  await fillEditableInput(frame, ORG_NAMES, config.purchasingOrganization)
   await fillSapInput(infoRecordBox, infoRecord, false)
+  await selectInfoCategory(page, frame, category, freshReadback ? origin : undefined)
+  await verifyPurchasingScope(frame, config)
+  if (!sameInfoRecord(await inputValue(infoRecordBox), infoRecord)) {
+    throw new Error('ME12 did not retain the intended Info Record number.')
+  }
+  stopped()
   await infoRecordBox.press('Enter')
-  await delay(800)
-  await dismissSapPopups(page)
-
-  const mismatch = await findVisiblePageMessage(
-    page,
-    /Material\s+differs\s+from\s+material.*from\s+the\s+info\s+record/i,
-    1_200
-  )
-  if (mismatch) {
-    throw new Error(`${mismatch} (SAP did not accept clearing the remembered Material.)`)
-  }
-
-  const escapedRecord = escapeRegExp(infoRecord)
-  const lockMessage = await findVisiblePageMessage(
-    page,
-    new RegExp(`Info\\s+record\\s+${escapedRecord}\\s+already\\s+being\\s+processed`, 'i'),
-    2_500
-  )
-  if (lockMessage) {
-    throw new SapRecordLockedError(
-      `${lockMessage} (close other ME12/SAP sessions or ask an administrator to check SM12 locks)`
-    )
-  }
-
-  const tabClicked = await clickFirstVisibleText(
-    page,
-    [/Purch\.?\s*Org\.?\s*Data\s*1/i, /Purchasing\s*Org.*Data\s*1/i],
-    25_000
-  )
-  if (!tabClicked) {
-    const status = await readStatusMessage(page)
-    throw new Error(
-      `Purch. Org. Data 1 tab was not found${status ? `; SAP status: ${status}` : ''}`
-    )
-  }
-
-  await delay(700)
-  const leadTime = await findTextboxAcrossFrames(
-    page,
-    ['Supplier Lead Time', 'Supp. Lead Time'],
-    25_000
-  )
-  if (!leadTime) {
-    throw new Error('Supplier Lead Time field was not found on Purch. Org. Data 1.')
-  }
-
-  const plantBox = await findTextboxInFrame(leadTime.frame, ['Plant'])
-  if (plantBox) {
-    const actualPlant = (await inputValue(plantBox)).toUpperCase()
-    if (actualPlant && actualPlant !== config.targetPlant.toUpperCase()) {
-      throw new Error(
-        `SAP currently shows Plant ${actualPlant}, not ${config.targetPlant}; update refused.`
-      )
-    }
-  }
-
-  const oldValue = await inputValue(leadTime.locator)
-  if (oldValue === config.targetLeadTime) {
-    await leaveCurrentRecord(page)
-    return {
-      kind: 'skipped',
-      oldValue,
-      status: `No change: Supplier Lead Time is already ${config.targetLeadTime}`
-    }
-  }
-
-  if (config.dryRun) {
-    await leaveCurrentRecord(page)
-    return {
-      kind: 'skipped',
-      oldValue,
-      status: `DRY RUN: current=${oldValue || '<blank>'}, target=${config.targetLeadTime}; not saved`
-    }
-  }
-
-  await fillSapInput(leadTime.locator, config.targetLeadTime)
-  const newValue = await inputValue(leadTime.locator)
-  if (newValue !== config.targetLeadTime) {
-    throw new Error(
-      `Supplier Lead Time readback failed: expected ${config.targetLeadTime}, actual ${newValue || '<blank>'}.`
-    )
-  }
-
-  await saveRecord(page, leadTime.frame)
-  await delay(1_200)
-  const sapMessage = await readStatusMessage(page)
-  return {
-    kind: 'success',
-    oldValue,
-    status: `Success: Supplier Lead Time ${oldValue || '<blank>'} -> ${config.targetLeadTime}${sapMessage ? `; SAP: ${sapMessage}` : ''}`
-  }
+  const detail = await waitForPurchasingData(page, origin, stopped, freshReadback)
+  await verifyPurchasingScope(detail, config)
+  await verifyDetailCategory(detail, category)
+  return detail
 }
 
-async function gotoTcode(page: Page, _infoRecord: string, firstRecord: boolean): Promise<void> {
-  const settingsUrl = await getCurrentMe12Url(page)
+async function gotoTcode(page: Page, settingsUrl: string): Promise<void> {
   try {
     await page.goto(settingsUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: firstRecord ? LOGIN_TIMEOUT_MS : NAVIGATION_TIMEOUT_MS
+      waitUntil: 'commit',
+      timeout: NAVIGATION_TIMEOUT_MS
     })
   } catch (error) {
     if (!/timeout/i.test(errorMessage(error))) {
       throw error
     }
-    if (firstRecord) {
-      throw new Error('SAP sign-in was not completed within 3 minutes.')
-    }
-    await page.reload({ timeout: NAVIGATION_TIMEOUT_MS, waitUntil: 'commit' }).catch(() => undefined)
-    await page.goto(settingsUrl, { timeout: NAVIGATION_TIMEOUT_MS, waitUntil: 'commit' })
+    // The transaction may still load after a timeout. Inspect it instead of replaying navigation.
   }
 }
 
@@ -645,15 +699,100 @@ async function findTextboxInFrame(frame: Frame, names: string[]): Promise<Locato
   return null
 }
 
+/** SAP detail values are writable only through explicitly labelled controls. */
+async function findExactTextbox(frame: Frame, names: string[]): Promise<Locator | null> {
+  for (const name of names) {
+    const pattern = new RegExp(`^\\s*${escapeRegExp(name)}\\s*:?\\s*$`, 'i')
+    const labelled = await firstVisible(frame.getByRole('textbox', { name: pattern })) ??
+      await firstVisible(frame.getByLabel(pattern))
+    if (labelled) return labelled
+    for (const attribute of ['title', 'aria-label']) {
+      const selector = [name, `${name}:`].map(value => `input[${attribute}="${cssAttributeValue(value)}" i]`).join(',')
+      const control = await firstVisible(frame.locator(selector))
+      if (control) return control
+    }
+  }
+  return null
+}
+
+/** Never pick the first match for a writable field. A misleading or duplicate
+ * label must fail closed, including overlap with an unrequested field. */
+function exactUpdateTextbox(frame: Frame, names: string[]): Locator {
+  const pattern = new RegExp(`^\\s*(?:${names.map(escapeRegExp).join('|')})\\s*:?\\s*$`, 'i')
+  const selectors = names.flatMap(name => ['title', 'aria-label'].flatMap(attribute =>
+    [name, `${name}:`].map(value => `input[${attribute}="${cssAttributeValue(value)}" i]`)
+  ))
+  return frame.getByRole('textbox', { name: pattern })
+    .or(frame.getByLabel(pattern))
+    .or(frame.locator(selectors.join(',')))
+    .and(frame.locator('input:visible, textarea:visible'))
+}
+
+async function verifyPurchasingScope(frame: Frame, config: Me12BatchConfig): Promise<void> {
+  for (const [names, target] of [[['Plant'], config.targetPlant], [ORG_NAMES, config.purchasingOrganization]] as const) {
+    const control = await findExactTextbox(frame, [...names])
+    if (!control || (await inputValue(control)).toUpperCase() !== target.toUpperCase()) {
+      throw new Error(`SAP ${names[0]} could not be verified as ${target}. No save was sent.`)
+    }
+  }
+}
+
+async function verifyDetailCategory(frame: Frame, category: Me12InfoCategory): Promise<void> {
+  const visible = async (label: string): Promise<boolean> =>
+    Boolean(await firstVisible(frame.getByText(new RegExp(`^\\s*${label}\\s*$`, 'i'))) ??
+      await firstVisible(frame.locator(`input[value="${label}" i]`)))
+  const expected = category === 'standard' ? 'Standard' : 'Consignment'
+  const other = category === 'standard' ? 'Consignment' : 'Standard'
+  if (!await visible(expected) || await visible(other)) {
+    throw new Error(`SAP detail does not confirm the ${expected} purchasing type. No save was sent.`)
+  }
+}
+
+async function waitForPurchasingData(page: Page, origin: string, stopped: () => void, sameOriginOnly = false): Promise<Frame> {
+  const deadline = Date.now() + 25_000
+  let tabOpened = false
+  while (Date.now() < deadline) {
+    stopped()
+    if (new URL(page.url()).origin !== origin) throw new Error('ME12 left the SAP origin.')
+    if (sameOriginOnly && await hasSapModal(sapFrames(page, origin))) {
+      throw new Error('A SAP dialog blocked the readback. No option was selected.')
+    }
+    for (const frame of page.frames()) {
+      if (sameOriginOnly && new URL(frame.url()).origin !== origin) continue
+      // If SAP opens this view directly, don't click the tab again.
+      if (await findExactTextbox(frame, IR_DETAIL_NAMES)) return frame
+    }
+    const message = await readStatusMessage(page)
+    if (/material\s+differs\s+from\s+material/i.test(message)) throw new Error(message)
+    if (/info\s+record\s+\d+\s+already\s+being\s+processed/i.test(message)) throw new SapRecordLockedError(message)
+    if (/\b(?:purchasing (?:organization )?data|(?:purchasing )?info record \d+)\s+(?:does not exist|(?:is )?not maintained)\b/i.test(message)) {
+      throw new SapRecordNotMaintainedError(message)
+    }
+    if (!tabOpened) {
+      const tab = await findPurchasingTab(page, sameOriginOnly ? origin : undefined)
+      if (tab) {
+        tabOpened = true
+        await tab.click({ timeout: 2_000 })
+      }
+    }
+    await delay(200)
+  }
+  const message = await readStatusMessage(page)
+  throw new Error(`Purch. Org. Data 1 was not verified. No save was sent.${message ? ` SAP: ${message}` : ''}`)
+}
+
 async function findTextboxAcrossFrames(
   page: Page,
   names: string[],
-  timeoutMs: number
+  timeoutMs: number,
+  origin?: string
 ): Promise<{ frame: Frame; locator: Locator } | null> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     for (const frame of page.frames()) {
-      const locator = await findTextboxInFrame(frame, names).catch(() => null)
+      if (origin && new URL(frame.url()).origin !== origin) continue
+      const locator = origin ? exactUpdateTextbox(frame, names) : await findTextboxInFrame(frame, names).catch(() => null)
+      if (origin && await locator?.count() !== 1) continue
       if (locator) {
         return { frame, locator }
       }
@@ -664,8 +803,9 @@ async function findTextboxAcrossFrames(
 }
 
 async function fillEditableInput(frame: Frame, names: string[], value: string): Promise<void> {
-  const locator = await findTextboxInFrame(frame, names)
-  if (locator && (await locator.isEditable().catch(() => false))) {
+  const locator = await findExactTextbox(frame, names)
+  if (locator && (await inputValue(locator)).toUpperCase() !== value.toUpperCase() &&
+      await locator.isEditable({ timeout: 500 }).catch(() => false)) {
     await fillSapInput(locator, value)
   }
 }
@@ -673,11 +813,13 @@ async function fillEditableInput(frame: Frame, names: string[], value: string): 
 async function selectInfoCategory(
   page: Page,
   preferredFrame: Frame,
-  category: Me12BatchConfig['infoCategory']
+  category: Me12InfoCategory,
+  origin?: string
 ): Promise<void> {
   const label = category === 'consignment' ? 'Consignment' : 'Standard'
   const pattern = new RegExp(`^${label}$`, 'i')
-  const frames = [preferredFrame, ...page.frames().filter((frame) => frame !== preferredFrame)]
+  const frames = [preferredFrame, ...page.frames().filter(frame =>
+    frame !== preferredFrame && (!origin || new URL(frame.url()).origin === origin))]
 
   for (const frame of frames) {
     const radio = await firstVisible(frame.getByRole('radio', { name: pattern }))
@@ -687,7 +829,6 @@ async function selectInfoCategory(
       )
       if (!selected) {
         await radio.check().catch(async () => radio.click())
-        await delay(250)
       }
       const verified = await radio.isChecked().catch(async () =>
         (await radio.getAttribute('aria-checked')) === 'true'
@@ -697,10 +838,8 @@ async function selectInfoCategory(
 
     const labelText = await firstVisible(frame.getByText(pattern, { exact: true }))
     if (labelText && (await labelText.click().then(() => true).catch(() => false))) {
-      await delay(250)
       const selectedRadio = await firstVisible(frame.getByRole('radio', { name: pattern }))
-      if (!selectedRadio) return
-      const verified = await selectedRadio.isChecked().catch(async () =>
+      const verified = selectedRadio && await selectedRadio.isChecked().catch(async () =>
         (await selectedRadio.getAttribute('aria-checked')) === 'true'
       )
       if (verified) return
@@ -715,6 +854,7 @@ async function clearEditableInput(frame: Frame, names: string[]): Promise<void> 
   if (!locator || !(await locator.isEditable().catch(() => false))) {
     return
   }
+  if (!(await inputValue(locator))) return
   await locator.click()
   await locator.fill('').catch(async () => {
     await locator.press('Control+A')
@@ -729,12 +869,11 @@ async function clearEditableInput(frame: Frame, names: string[]): Promise<void> 
     await locator.dispatchEvent('change')
   }
   await locator.press('Tab')
-  await delay(250)
 }
 
 async function fillSapInput(locator: Locator, value: string, pressTab = true): Promise<void> {
-  await locator.click()
-  await locator.fill(value).catch(async () => {
+  await locator.fill(value, { timeout: 2_000 }).catch(async () => {
+    await locator.click({ timeout: 2_000 })
     await locator.press('Control+A')
     await locator.pressSequentially(value, { delay: 30 })
   })
@@ -743,146 +882,202 @@ async function fillSapInput(locator: Locator, value: string, pressTab = true): P
   if (pressTab) {
     await locator.press('Tab')
   }
-  await delay(250)
 }
 
 async function inputValue(locator: Locator): Promise<string> {
   return (await locator.inputValue().catch(async () => (await locator.getAttribute('value')) ?? '')).trim()
 }
 
-async function clickFirstVisibleText(
-  page: Page,
-  patterns: RegExp[],
-  timeoutMs: number
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    for (const frame of page.frames()) {
-      for (const pattern of patterns) {
-        const candidates = [
-          frame.getByRole('tab', { name: pattern }),
-          frame.getByRole('button', { name: pattern }),
-          frame.getByText(pattern)
-        ]
-        for (const candidate of candidates) {
-          const locator = await firstVisible(candidate)
-          if (locator && (await locator.click().then(() => true).catch(() => false))) {
-            return true
-          }
-        }
+async function findPurchasingTab(page: Page, origin?: string): Promise<Locator | null> {
+  for (const frame of page.frames()) {
+    if (origin && new URL(frame.url()).origin !== origin) continue
+    for (const pattern of [/^Purch\.?\s*Org\.?\s*Data\s*1$/i, /^Purchasing\s*Org.*Data\s*1$/i]) {
+      const candidates = [
+        frame.getByRole('tab', { name: pattern }),
+        frame.getByRole('button', { name: pattern }),
+        frame.getByText(pattern)
+      ]
+      for (const candidate of candidates) {
+        const locator = await firstVisible(candidate)
+        if (locator) return locator
       }
     }
-    await delay(350)
   }
-  return false
+  return null
 }
 
-async function dismissSapPopups(page: Page): Promise<void> {
-  const patterns = [/^(Continue|Yes|OK|Enter)$/i, /Continue/i]
-  for (let round = 0; round < 4; round += 1) {
-    let clicked = false
-    for (const frame of page.frames()) {
-      for (const pattern of patterns) {
-        const button = await firstVisible(frame.getByRole('button', { name: pattern }))
-        if (button && (await button.click().then(() => true).catch(() => false))) {
-          clicked = true
-          await delay(400)
+const SAVE_NAME = /^\s*Save(?:\s*\(\s*(?:(?:Ctrl|Control)\s*\+\s*S|F11)\s*\))?\s*$/i
+const CLICKABLE_SAVE_CONTROL = 'button, input[type=button], input[type=submit], a[href], [role=button], [role=link], [onclick], [onmousedown], [onmouseup]'
+const SAP_MODAL = '[role=dialog], [role=alertdialog], [aria-modal=true], dialog[open]'
+const SAP_STATUS = [
+  '[role=status]', '[role=alert]', '[aria-live=polite]', '[aria-live=assertive]',
+  '.urMsgBar', '[class*="messagebar" i]', '[class*="messagearea" i]', '[class*="statusbar" i]',
+  '[class*="toast" i]', '[id*="msg" i]', '[id*="statusbar" i]', '[id*="toast" i]'
+].join(', ')
+const SAVE_CONFIRMATION = /^(?:purchasing\s+info(?:rmation)?\s+record|purchase\s+info(?:r(?:mation)?)?(?:\s+record)?|info\s+record)(?:\s+(\d{1,10}))?\s+(?:has been\s+)?(?:changed|saved|updated)[.!]?$/i
+
+function sapFrames(page: Page, origin: string): Frame[] {
+  return page.frames().filter(frame => new URL(frame.url()).origin === origin)
+}
+
+async function hasSapModal(frames: Frame[]): Promise<boolean> {
+  return (await Promise.all(frames.map(frame => frame.locator(SAP_MODAL).and(frame.locator(':visible')).count()))).some(Boolean)
+}
+
+async function findSaveControl(page: Page, detail: Frame): Promise<ElementHandle> {
+  const origins = new Set([new URL(page.url()).origin, new URL(detail.url()).origin])
+  const frames = [detail, ...page.frames().filter(frame => frame !== detail && origins.has(new URL(frame.url()).origin))]
+  const matches: ElementHandle[] = []
+  for (const frame of frames) {
+    if (await frame.locator(SAP_MODAL).and(frame.locator(':visible')).count()) {
+      throw new Error('A SAP dialog is open. Handle it before saving.')
+    }
+    const clickable = frame.locator(CLICKABLE_SAVE_CONTROL)
+    const candidates = await frame.getByRole('button', { name: SAVE_NAME })
+      .or(frame.getByRole('link', { name: SAVE_NAME }))
+      .or(frame.getByTitle(SAVE_NAME).and(clickable))
+      .or(frame.getByLabel(SAVE_NAME).and(clickable))
+      .or(frame.getByText(SAVE_NAME))
+      .and(frame.locator(':visible')).elementHandles()
+    const distinct: ElementHandle[] = []
+    for (const control of candidates) {
+      const verified = await control.evaluate((element, { clickableSelector, modalSelector }) => {
+        if (!(element instanceof Element) || !element.isConnected || element.closest(modalSelector)) return false
+        if (element.matches(clickableSelector)) return true
+        // The WebGUI footer can expose only a text span, with no button role.
+        // Require its exact Save text and the adjacent Cancel in a compact
+        // bottom action row. Never click an isolated "Save" text match.
+        const rect = element.getBoundingClientRect()
+        if (rect.bottom < window.innerHeight - 120 || rect.top < 0 ||
+            rect.bottom > window.innerHeight + 2 || rect.width > 240 || rect.height > 70) return false
+        for (let parent = element.parentElement, depth = 0; parent && depth < 5; parent = parent.parentElement, depth++) {
+          if (parent.getBoundingClientRect().height > 96) break
+          for (const sibling of parent.querySelectorAll<HTMLElement>('*')) {
+            if ((sibling.innerText ?? '').trim().toLowerCase() !== 'cancel' ||
+                sibling.contains(element) || getComputedStyle(sibling).visibility !== 'visible') continue
+            const cancel = sibling.getBoundingClientRect()
+            if (cancel.width > 0 && cancel.height > 0 && cancel.left >= rect.right - 2 &&
+                cancel.left - rect.right <= 180 &&
+                Math.abs(cancel.top + cancel.height / 2 - rect.top - rect.height / 2) <= 18) return true
+          }
+        }
+        return false
+      }, { clickableSelector: CLICKABLE_SAVE_CONTROL, modalSelector: SAP_MODAL })
+      if (!verified) continue
+      // Playwright returns these in document order. A label inside a matched
+      // button is the same control, not a second Save.
+      let nested = false
+      for (const earlier of distinct) {
+        if (await control.evaluate((element, outer) => outer.contains(element), earlier)) {
+          nested = true
           break
         }
       }
-      if (clicked) {
-        break
+      if (!nested) distinct.push(control)
+    }
+    matches.push(...distinct)
+  }
+  if (matches.length !== 1) {
+    throw new Error(matches.length ? 'Multiple visible SAP Save controls matched.' : 'The SAP Save button could not be verified.')
+  }
+  const [button] = matches
+  if (!await button.isEnabled() || !await button.isVisible()) throw new Error('The SAP Save control is disabled or hidden.')
+  return button
+}
+
+async function watchSaveStatus(frame: Frame) {
+  return await frame.evaluateHandle(selector => {
+    const collect = (): Set<string> => {
+      const lines = new Set<string>()
+      for (const item of document.querySelectorAll<HTMLElement>(selector)) {
+        if (!item.getClientRects().length || getComputedStyle(item).visibility !== 'visible') continue
+        const line = (item.innerText ?? '').replace(/\s+/g, ' ').trim()
+        if (line && line.length <= 300) lines.add(line)
+      }
+      return lines
+    }
+    const baseline = collect()
+    const fresh = new Set<string>()
+    const scan = (): void => {
+      for (const line of collect()) {
+        if (!baseline.has(line) && fresh.size < 64) fresh.add(line)
       }
     }
-    if (!clicked) {
-      return
+    // WebGUI can clear the message before Playwright's click promise resolves.
+    const observer = new MutationObserver(scan)
+    observer.observe(document, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'aria-hidden', 'role', 'aria-live', 'id']
+    })
+    return { baseline: [...baseline], read: () => { scan(); return [...fresh] }, disconnect: () => observer.disconnect() }
+  }, SAP_STATUS)
+}
+
+async function saveRecord(
+  page: Page, frame: Frame, infoRecord: string, origin: string, verifyPersisted: () => Promise<void>
+): Promise<void> {
+  const watches = new Map<Frame, Awaited<ReturnType<typeof watchSaveStatus>>>()
+  let dispatched = false
+  try {
+    const button = await findSaveControl(page, frame)
+    const previous = new Set((await Promise.all(sapFrames(page, origin).map(async candidate => {
+      try {
+        const watch = await watchSaveStatus(candidate)
+        watches.set(candidate, watch)
+        return await watch.evaluate(state => state.baseline)
+      } catch {
+        return await readStatusLines(candidate)
+      }
+    }))).flat())
+    // A click error does not prove SAP never received the action.
+    dispatched = true
+    await button.click({ timeout: 2_000 })
+    const deadline = Date.now() + 8_000
+    while (Date.now() < deadline) {
+      if (new URL(page.url()).origin !== origin) throw new Error('ME12 left the SAP origin after Save.')
+      const frames = sapFrames(page, origin)
+      if (await hasSapModal(frames)) {
+        throw new Error('A SAP dialog opened after Save. No option was selected.')
+      }
+      const lines = (await Promise.all(frames.map(async candidate => {
+        const captured = await watches.get(candidate)?.evaluate(state => state.read()).catch(() => null)
+        return captured ?? await readStatusLines(candidate)
+      }))).flat().filter(line => !previous.has(line))
+      const failure = lines.find(line => /\b(?:error|not saved|save rejected)\b/i.test(line))
+      if (failure) throw new Error(failure)
+      const confirmations = lines.map(line => SAVE_CONFIRMATION.exec(line)).filter(match => match !== null)
+      if (confirmations.some(match => match[1] && !sameInfoRecord(match[1], infoRecord))) {
+        throw new Error('SAP confirmed a different Info Record after Save.')
+      }
+      if (confirmations.some(match => match[1])) return
+      if (confirmations.length) {
+        await verifyPersisted()
+        return
+      }
+      await delay(250)
     }
+    throw new Error('SAP did not return a fresh save confirmation for this Info Record.')
+  } catch (error) {
+    throw new SapSaveBoundaryError(dispatched
+      ? `Save outcome unverified. Check SAP before retrying. ${errorMessage(error)}`
+      : `${errorMessage(error)} No save was sent.`)
+  } finally {
+    await Promise.all([...watches.values()].map(async watch => {
+      await watch.evaluate(state => state.disconnect()).catch(() => {})
+      await watch.dispose().catch(() => {})
+    }))
   }
 }
 
-async function saveRecord(page: Page, frame: Frame): Promise<void> {
-  for (const pattern of [/^Save/i, /Save.*Ctrl\+S/i]) {
-    const button = await firstVisible(frame.getByRole('button', { name: pattern }))
-    if (button && (await button.click().then(() => true).catch(() => false))) {
-      await delay(800)
-      await dismissSapPopups(page)
-      return
-    }
-  }
-  await page.keyboard.press('Control+S')
-  await delay(800)
-  await dismissSapPopups(page)
+async function readStatusLines(frame: Frame): Promise<string[]> {
+  return await frame.locator(SAP_STATUS).and(frame.locator(':visible')).evaluateAll(items =>
+    [...new Set(items.map(item => (item as HTMLElement).innerText?.replace(/\s+/g, ' ').trim()).filter(Boolean))]
+      .filter(line => line.length <= 300)
+  ).catch(() => [])
 }
 
 async function readStatusMessage(page: Page): Promise<string> {
-  const selectors = [
-    "[role='status']",
-    "[aria-live='polite']",
-    "[aria-live='assertive']",
-    '.urMsgBar',
-    "[class*='MessageBar']",
-    "[id*='msg']",
-    "[id*='Msg']"
-  ]
-  const messages: string[] = []
-  for (const frame of page.frames()) {
-    for (const selector of selectors) {
-      const locator = frame.locator(selector)
-      const count = Math.min(await locator.count().catch(() => 0), 8)
-      for (let index = 0; index < count; index += 1) {
-        const item = locator.nth(index)
-        if (!(await item.isVisible().catch(() => false))) {
-          continue
-        }
-        const message = (await item.innerText().catch(() => '')).replace(/\s+/g, ' ').trim()
-        if (message && !messages.includes(message)) {
-          messages.push(message)
-        }
-      }
-    }
-  }
-  return messages.slice(-3).join(' | ')
-}
-
-async function findVisiblePageMessage(
-  page: Page,
-  pattern: RegExp,
-  timeoutMs: number
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    for (const frame of page.frames()) {
-      const body = frame.locator('body')
-      if ((await body.count().catch(() => 0)) === 0) {
-        continue
-      }
-      const text = (await body.innerText({ timeout: 800 }).catch(() => ''))
-        .replace(/\s+/g, ' ')
-        .trim()
-      const match = text.match(pattern)
-      if (match) {
-        return match[0]
-      }
-    }
-    await delay(250)
-  }
-  return ''
-}
-
-async function leaveCurrentRecord(page: Page): Promise<void> {
-  for (const frame of page.frames()) {
-    for (const pattern of [/^Back/i, /Back.*F3/i]) {
-      const button = await firstVisible(frame.getByRole('button', { name: pattern }))
-      if (button && (await button.click().then(() => true).catch(() => false))) {
-        await delay(700)
-        await dismissSapPopups(page)
-        return
-      }
-    }
-  }
-  await page.keyboard.press('F3').catch(() => undefined)
-  await delay(700)
-  await dismissSapPopups(page)
+  return [...new Set((await Promise.all(page.frames().map(readStatusLines))).flat())].slice(-3).join(' | ')
 }
 
 function safeFilename(value: string): string {

@@ -10,7 +10,7 @@ export type ExecutionHistoryStatus =
 
 export interface ExecutionHistoryEntry {
   id: string
-  operation: 'open-sap' | 'create-rfq' | 'me12-batch' | 'me01-source-list' | 'me52n-project-ref' | 'apqp-plan-closure' | 'apqp-date-management'
+  operation: 'open-sap' | 'create-rfq' | 'me12-batch' | 'me01-source-list' | 'me52n-project-ref' | 'apqp-plan-closure' | 'apqp-date-management' | 'mm02-sub-commodity'
   label: string
   startedAt: string
   completedAt?: string
@@ -80,7 +80,7 @@ export function isExecutionHistoryQuery(value: unknown): value is ExecutionHisto
     (Array.isArray(statuses) && statuses.every(isExecutionHistoryStatus))
   const validOffset = candidate.offset === undefined || Number.isInteger(candidate.offset) && Number(candidate.offset) >= 0 && Number(candidate.offset) <= 100_000
   const validOperations = candidate.operations === undefined || Array.isArray(candidate.operations) && candidate.operations.every(operation =>
-    ['open-sap', 'create-rfq', 'me12-batch', 'me01-source-list', 'me52n-project-ref', 'apqp-plan-closure', 'apqp-date-management'].includes(operation))
+    ['open-sap', 'create-rfq', 'me12-batch', 'me01-source-list', 'me52n-project-ref', 'apqp-plan-closure', 'apqp-date-management', 'mm02-sub-commodity'].includes(operation))
   return validSearch && validLimit && validStatuses && validOffset && validOperations
 }
 

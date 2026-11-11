@@ -14,6 +14,7 @@ const MAX_STORED_ENTRIES = 500
 
 export class ExecutionHistoryService {
   private writeQueue: Promise<void> = Promise.resolve()
+  private readInFlight: { after: Promise<void>; entries: Promise<ExecutionHistoryEntry[]> } | null = null
   private cleaning = false
   isCleaning(): boolean { return this.cleaning }
 
@@ -77,8 +78,7 @@ export class ExecutionHistoryService {
   }
 
   async getPage(query: ExecutionHistoryQuery): Promise<ExecutionHistoryResult> {
-    await this.writeQueue.catch(() => undefined)
-    const entries = await this.readOrMigrate()
+    const entries = await this.getRetainedEntries()
     const search = query.search?.trim().toLowerCase()
     const matching = entries
       .filter(entry => !query.operations?.length || query.operations.includes(entry.operation))
@@ -97,6 +97,16 @@ export class ExecutionHistoryService {
       })
     const offset = query.offset ?? 0
     return { entries: matching.slice(offset, offset + (query.limit ?? 100)), total: matching.length }
+  }
+
+  /** Share only overlapping reads on the same write boundary. No stale cache after a write or cleanup. */
+  async getRetainedEntries(): Promise<ExecutionHistoryEntry[]> {
+    const after = this.writeQueue
+    if (this.readInFlight?.after === after) return this.readInFlight.entries
+    const entries = after.catch(() => undefined).then(() => this.readOrMigrate())
+    this.readInFlight = { after, entries }
+    try { return await entries }
+    finally { if (this.readInFlight?.entries === entries) this.readInFlight = null }
   }
 
   /** App-owned logs/history only. The same queue protects writes and cleanup. */
@@ -280,6 +290,7 @@ function isHistoryEntry(value: unknown): value is ExecutionHistoryEntry {
       candidate.operation === 'create-rfq' ||
       candidate.operation === 'me12-batch' ||
       candidate.operation === 'me01-source-list' ||
+      candidate.operation === 'mm02-sub-commodity' ||
       candidate.operation === 'me52n-project-ref' ||
       candidate.operation === 'apqp-plan-closure' ||
       candidate.operation === 'apqp-date-management') &&

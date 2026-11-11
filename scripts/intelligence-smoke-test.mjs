@@ -10,9 +10,10 @@ const artifacts = resolve('artifacts')
 await mkdir(artifacts, { recursive: true })
 const titles = [
   'Automatically Create Buyer Receipts and RFQs in Batch from NPL',
-  'Automatically Update Supplier Lead Times (SLT) in Batch',
+  'Batch Update Purchasing Info Records (IR)',
   'APQP Date Management',
-  'Automatically Maintain Source Lists in Batch'
+  'Automatically Maintain Source Lists in Batch',
+  'Automatically Update Material Sub-commodity in Batch'
 ]
 let app
 try {
@@ -48,7 +49,7 @@ try {
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler('intelligence:get')
     ipcMain.handle('intelligence:get', () => new Promise(resolve => {
-      globalThis.__lateRanking = () => resolve({ ranking: { order: ['me01-source-list', 'create-rfq', 'me12-batch', 'apqp-plan-closure'], personalized: true, frequentlyUsed: [] }, eta: null })
+      globalThis.__lateRanking = () => resolve({ ranking: { order: ['me01-source-list', 'create-rfq', 'me12-batch', 'apqp-plan-closure', 'mm02-sub-commodity'], personalized: true, frequentlyUsed: [] }, eta: null })
     }))
   })
   await page.getByRole('button', { name: 'Dashboard', exact: true }).click(); await operations()
@@ -59,7 +60,7 @@ try {
   // Replace *all* preview/start boundaries before uploading or confirming any RFQ.
   await app.evaluate(({ ipcMain, dialog, BrowserWindow }) => {
     ipcMain.removeHandler('intelligence:get')
-    ipcMain.handle('intelligence:get', () => ({ ranking: { order: ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list'], personalized: false, frequentlyUsed: [] }, eta: null }))
+    ipcMain.handle('intelligence:get', () => ({ ranking: { order: ['create-rfq', 'me12-batch', 'apqp-plan-closure', 'me01-source-list', 'mm02-sub-commodity'], personalized: false, frequentlyUsed: [] }, eta: null }))
     ipcMain.removeHandler('rfq:preview')
     ipcMain.handle('rfq:preview', () => ({ success: true, preview: { sheetName: 'UI-MOCK', totalRows: 10, validRows: 10, invalidRows: 0,
       skippedBlankRows: 0, sample: [], groupCount: 10, groups: [], plants: ['C100'], warnings: [], skippedRows: 0, fingerprint: 'UI-MOCK' } }))

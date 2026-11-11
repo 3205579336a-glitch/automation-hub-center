@@ -87,7 +87,7 @@ test('ME12 keeps backup/temp/locked-file fallback under logs, never beside user 
   try {
     const archive = unzipSync(await readFile('resources/templates/ME12_Supplier_Lead_Time_Template.xlsx')), key = 'xl/worksheets/sheet1.xml'
     archive[key] = strToU8(strFromU8(archive[key]).replace(/<x:c r="A2"[^>]*\/>/, '<x:c r="A2" t="inlineStr"><x:is><x:t>0012345678</x:t></x:is></x:c>')
-      .replace(/<x:c r="B2"[^>]*\/>/, '<x:c r="B2" t="inlineStr"><x:is><x:t>C100</x:t></x:is></x:c>'))
+      .replace(/<x:c r="C2"[^>]*\/>/, '<x:c r="C2"><x:v>10</x:v></x:c>'))
     const input = join(f.inputs, 'source.xlsx'); await writeFile(input, zipSync(archive)); const original = await readFile(input)
     const service = new Me12ExcelService(f.store), id = randomUUID()
     const session = await service.prepareRun({ excelPath: input, sheetName: '', infoRecordColumn: 1, plantColumn: 2, dataStartRow: 2, targetPlant: 'C100', infoRecordWidth: 10, maxItems: 0 }, id)

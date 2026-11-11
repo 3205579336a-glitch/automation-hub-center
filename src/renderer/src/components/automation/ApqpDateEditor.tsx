@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { APQP_DATE_KEYS, APQP_DATE_LABELS, type ApqpDateKey,
   type ApqpDateQuery, type ApqpDateSnapshot, type ApqpDates, type ApqpDateError, type ApqpQueryMismatch, type ApqpDateUpdateSummary } from '../../../../shared/apqp-date-types'
 import { useLocalization } from '../../i18n/use-localization'
+import { getWindowsUsername } from '../../services/windows-account'
 import type { Notify } from '../../types/notifications'
 import { AutomationTaskToolbar } from './AutomationTaskToolbar'
+import { useTaskRun } from './task-run-context'
 import { NoticeConfirmationModal, PreviewSummary } from './AutomationPageLayout'
 import { useAdaptiveEta } from '../../hooks/use-adaptive-eta'
 import { prepareNotificationAudio } from '../../hooks/notification-sound'
@@ -13,15 +15,17 @@ import { readApqpProjects, rememberApqpProject, visibleApqpRecords, type ApqpRec
 import styles from '../../pages/ApqpDateManagement.module.css'
 
 const PAGE_SIZE = 20
-const rememberedUser = (): string => { try { return localStorage.getItem('apqp-last-business-user')?.slice(0, 32) ?? '' } catch { return '' } }
+const validCriteria = /^[A-Za-z0-9_/-]{1,32}$/
 
 export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBusyChange: (value: boolean) => void }): React.JSX.Element {
   const { language } = useLocalization(), zh = language === 'zh-CN'
+  const { tryStart, activeTask } = useTaskRun()
   const t = (en: string, cn: string): string => zh ? cn : en
   const label = (key: ApqpDateKey): string => APQP_DATE_LABELS[key][zh ? 'zh' : 'en']
   const api = window.sapAutomation
   const [projects, setProjects] = useState(() => readApqpProjects())
-  const [query, setQuery] = useState<ApqpDateQuery>(() => ({ project: projects[0], userId: rememberedUser(), environment: 'PROD' }))
+  const [query, setQuery] = useState<ApqpDateQuery>(() => ({ project: projects[0], userId: '', environment: 'PROD' }))
+  const editedUserId = useRef(false)
   const [snapshot, setSnapshot] = useState<ApqpDateSnapshot | null>(null)
   const [edits, setEdits] = useState(new Map<string, ApqpDates>())
   const [outcome, setOutcome] = useState<{ update: ApqpDateUpdateSummary; resultPath: string } | null>(null)
@@ -42,6 +46,16 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   const inFlight = useRef(false)
   const activePhase = useRef<'query' | 'update'>('query')
   const editorSection = useRef<HTMLElement>(null), runPanel = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    let mounted = true
+    void getWindowsUsername().then(username => {
+      const id = username?.trim().toUpperCase()
+      if (!mounted || editedUserId.current || inFlight.current || !id || !validCriteria.test(id)) return
+      setQuery(current => ({ ...current, userId: id }))
+    })
+    return () => { mounted = false }
+  }, [])
 
   useEffect(() => { onBusyChange(running || stagedPending) }, [running, stagedPending, onBusyChange])
   useEffect(() => { if (snapshot) editorSection.current?.scrollIntoView({ block: 'start' }) }, [snapshot])
@@ -72,13 +86,16 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   }
   const work = async (task: () => Promise<void>, action: 'query' | 'update' = 'query'): Promise<void> => {
     if (inFlight.current) return
-    prepareNotificationAudio()
-    inFlight.current = true; activePhase.current = action; setPhase(action); setRunning(true); setStopping(false); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setNotice(null)
-    setProgress({ ...emptyProgress, message: action === 'query' ? t('Reading SAP. No dates will be changed.', '正在读取 SAP，不会修改日期。') : t('Checking the edited dates before updating SAP.', '正在检查待修改日期。'), step: 'PREPARING' })
-    window.dispatchEvent(new CustomEvent('guided-running', { detail: true }))
-    runPanel.current?.scrollIntoView({ block: 'center' })
-    try { await task() } catch (reason) { showError({ success: false, message: 'The request could not finish. Review details before trying again.', messageZh: '请求未能完成，请查看详情后再试。', details: String(reason) }) }
-    finally { inFlight.current = false; setRunning(false); setStopping(false); window.dispatchEvent(new CustomEvent('guided-running', { detail: false })) }
+    const release = tryStart('apqp-plan-closure')
+    if (!release) return
+    try {
+      inFlight.current = true; activePhase.current = action; setPhase(action); setRunning(true); setStopping(false); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setNotice(null)
+      prepareNotificationAudio()
+      setProgress({ ...emptyProgress, message: action === 'query' ? t('Reading SAP. No dates will be changed.', '正在读取 SAP，不会修改日期。') : t('Checking the edited dates before updating SAP.', '正在检查待修改日期。'), step: 'PREPARING' })
+      runPanel.current?.scrollIntoView({ block: 'center' })
+      await task()
+    } catch (reason) { showError({ success: false, message: 'The request could not finish. Review details before trying again.', messageZh: '请求未能完成，请查看详情后再试。', details: String(reason) }) }
+    finally { inFlight.current = false; setRunning(false); setStopping(false); release() }
   }
   const find = (): void => { void work(async () => {
     const remembered = rememberApqpProject(projects, query.project)
@@ -89,7 +106,6 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     setStagedPending(false); setNeedsSapReview(false); setOutcome(null); setPage(0); setSearch(''); setOrder('original')
     setSnapshot(result.snapshot)
     setEdits(new Map(result.snapshot.records.map(row => [row.apqp, { ...row.dates }])))
-    try { localStorage.setItem('apqp-last-business-user', query.userId) } catch { /* No password is stored. */ }
     const message = t(`${result.snapshot.records.length} APQPs found. No SAP dates changed.`, `找到 ${result.snapshot.records.length} 条 APQP，未修改 SAP 日期。`)
     notify({ kind: result.snapshot.records.length ? 'success' : 'warning', title: t('APQP dates loaded', '已读取 APQP 日期'), message })
     if (!result.snapshot.records.length) setNotice({ title: t('No matching APQPs', '未找到匹配 APQP'), message: t('Check NPL and business User ID, then find again.', '请核对 NPL 和业务 User ID 后重新查询。') })
@@ -121,8 +137,8 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
   const execute = (): void => {
     if (!snapshot) return
     const request = { snapshotId: snapshot.id, edits: snapshot.records.map(row => ({ apqp: row.apqp, dates: edits.get(row.apqp)! })), confirmed: true as const }
-    setOutcome(null)
     void work(async () => {
+      setOutcome(null)
       const result = await api.executeApqpDateChanges(request)
       if (result.success) {
         if (result.update.stageOnly) {
@@ -134,10 +150,12 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
           if (failures) setNotice({ title: t('Some records were skipped', '部分记录已跳过'), message })
           return
         }
+        const beforeById = new Map(snapshot.records.map(row => [row.apqp, row]))
         setSnapshot(result.snapshot)
         setEdits(new Map(result.snapshot.records.map(row => {
-          const before = snapshot.records.find(item => item.apqp === row.apqp)!
-          const desired = edits.get(row.apqp)!
+          const before = beforeById.get(row.apqp)
+          const desired = edits.get(row.apqp)
+          if (!before || !desired) return [row.apqp, { ...row.dates }]
           const processed = APQP_DATE_KEYS.every(key => desired[key] === before.dates[key] || desired[key] === row.dates[key])
           return [row.apqp, { ...(processed ? row.dates : desired) }]
         })))
@@ -158,10 +176,11 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     setError(''); setDetails(''); setComparison(null); setErrorLog(''); setProgress(emptyProgress); setPage(0); setNotice(null); setSearch(''); setOrder('original')
   }
   const criteria = (key: keyof ApqpDateQuery, value: string): void => {
+    if (key === 'userId') editedUserId.current = true
     setQuery(current => ({ ...current, [key]: value })); setSnapshot(null); setOutcome(null); setEdits(new Map()); setError(''); setDetails(''); setComparison(null); setErrorLog(''); setPage(0); setSearch(''); setOrder('original')
   }
   const changed = snapshot?.records.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== edits.get(row.apqp)?.[key])).length ?? 0
-  const validInput = /^[A-Za-z0-9_/-]{1,32}$/.test(query.project) && /^[A-Za-z0-9_/-]{1,32}$/.test(query.userId)
+  const validInput = validCriteria.test(query.project) && validCriteria.test(query.userId)
   const visible = useMemo(() => visibleApqpRecords(snapshot?.records ?? [], search, order), [snapshot, search, order])
   const pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE))
   const hiddenEdits = changed - visible.filter(row => APQP_DATE_KEYS.some(key => row.dates[key] !== edits.get(row.apqp)?.[key])).length
@@ -180,15 +199,15 @@ export function ApqpDateEditor({ notify, onBusyChange }: { notify: Notify; onBus
     <div className={styles.queryGrid}>
     <section className={`card ${styles.section}`} aria-label={t('Find APQPs', '查找 APQP')}>
       <h3>{t('1. Find APQPs', '1. 查找 APQP')}</h3>
-      <p className={styles.copy}>{t('Enter the project and responsible User ID. Uses SAP 949, Plant C100.', '填写项目编号和负责人的 User ID。系统固定使用 SAP 949，工厂 C100。')}</p>
+      <p className={styles.copy}>{t('Enter the project. User ID defaults to your Windows login; change it if the APQP owner is different. Uses SAP 949, Plant C100.', '输入项目编号。User ID 默认取 Windows 登录名；如果 APQP 负责人不同，可以手动修改。使用 SAP 949、工厂 C100。')}</p>
       <div className={styles.fields}>
         <ApqpProjectInput value={query.project} projects={projects} disabled={running || cacheLoading || stagedPending} onChange={value => criteria('project', value)} />
         <label className="field"><span>User ID *</span><input className="input" value={query.userId} maxLength={32} disabled={running || cacheLoading || stagedPending} onChange={event => criteria('userId', event.target.value.trim().toUpperCase())} /></label>
       </div>
       <p className={styles.copy}>{t('Save any unfinished SAP work before starting. If SAP asks you to sign in or handle a message, follow its prompt.', '开始前请保存 SAP 中未完成的工作。如 SAP 要求登录或确认消息，请先按提示处理。')}</p>
       <div className={styles.actions}>
-        <button className="button" disabled={running || cacheLoading || !validInput || changed > 0 && !stagedPending} onClick={() => { void loadCached() }}>{cacheLoading ? t('Loading…', '正在载入…') : t('Use previous results', '使用上次结果')}</button>
-        {snapshot && <button className="button" disabled={running || cacheLoading || !validInput} onClick={find}>{t('Refresh from SAP', '重新查询 SAP')}</button>}
+        <button className="button" disabled={activeTask !== null || running || cacheLoading || !validInput || changed > 0 && !stagedPending} onClick={() => { void loadCached() }}>{cacheLoading ? t('Loading…', '正在载入…') : t('Use previous results', '使用上次结果')}</button>
+        {snapshot && <button className="button" disabled={activeTask !== null || running || cacheLoading || !validInput} onClick={find}>{t('Refresh from SAP', '重新查询 SAP')}</button>}
       </div>
       {snapshot?.cached && <p className={`${styles.notice} ${styles.warning}`} role="note">{t(`Results from ${new Date(snapshot.createdAt).toLocaleString()}. For the latest dates, refresh from SAP.`, `这是 ${new Date(snapshot.createdAt).toLocaleString()} 的查询结果。如需最新日期，请重新查询 SAP。`)}</p>}
       {needsSapReview && <p className={`${styles.notice} ${styles.warning}`} role="status">{t('SAP may contain unsaved changes. Check them in SAP before continuing.', 'SAP 中可能有未保存的修改。请先到 SAP 检查后再继续。')}</p>}
