@@ -31,6 +31,7 @@ import { GuidedAutomationService } from './services/guided-automation-service'
 import { ApqpRunner } from './automation/apqp-runner'
 import { registerApqpHandlers } from './ipc/apqp-handlers'
 import { ApqpDateService } from './services/apqp-date-service'
+import { ApqpDateQueryOperation } from './services/apqp-date-query-operation'
 import { ApqpDateCache } from './services/apqp-date-cache'
 import { registerApqpDateHandlers } from './ipc/apqp-date-handlers'
 import { RfqSafeRecoveryService } from './services/rfq-safe-recovery-service'
@@ -208,7 +209,9 @@ app.whenReady().then(async () => {
     preferScript: !app.isPackaged
   }, artifacts)
   registerApqpHandlers(apqpRunner, logger, history, settingsService, join(resourceRoot, 'templates', 'APQP_Plan_Closure_Template.xlsx'), guided, intelligence)
-  registerApqpDateHandlers(new ApqpDateService(apqpRunner, Date.now, new ApqpDateCache(artifacts.directory, history)), guided, history, logger, intelligence)
+  const apqpDates = new ApqpDateService(apqpRunner, Date.now, new ApqpDateCache(artifacts.directory, history))
+  const apqpDateQuery = new ApqpDateQueryOperation(apqpDates, guided, history, logger, intelligence)
+  registerApqpDateHandlers(apqpDates, guided, history, logger, intelligence, apqpDateQuery)
   registerHistoryHandlers(history, intelligence, () => guided.isRunning() || rfqRunner.isRunning() || artifactCleanupActive)
   registerSafeRecoveryHandlers(recovery, history, settingsService, () => guided.isRunning() || rfqRunner.isRunning() || artifactCleanupActive)
   // Run locally at startup and daily while idle; no external scheduler needed.

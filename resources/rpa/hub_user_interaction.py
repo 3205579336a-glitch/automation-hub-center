@@ -20,8 +20,15 @@ class HubUserInteraction:
         self.responses = queue.Queue()
         self.active_request_id = ""
 
-    def start_listener(self):
-        threading.Thread(target=self.listen, daemon=True).start()
+    def start_listener(self, *, stop_on_eof=False):
+        def listen():
+            try:
+                self.listen()
+            finally:
+                if stop_on_eof:
+                    self.stop_event.set()
+
+        threading.Thread(target=listen, daemon=True).start()
 
     def listen(self):
         for line in sys.stdin:

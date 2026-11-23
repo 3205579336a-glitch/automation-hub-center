@@ -21,7 +21,7 @@ if request['action'] == 'execute':
     fake_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fake_module)
     session_type = fake_module.WritableSession
-session = session_type(count=25, state='home' if request['action'] == 'query' else 'grid',
+session = session_type(count=25, state='home' if request['action'] in {'query', 'agent-query'} else 'grid',
                       system='CEQ' if request['query']['environment'] == 'QA' else 'VCE')
 # Different suppliers exercise display sorting without changing original SAP row order.
 for index, row in enumerate(session.grid.rows):
@@ -41,10 +41,11 @@ if request['query']['userId'] in {'PREINPUT_ERRORS', 'ALL_READONLY', 'DYNAMIC_LO
 if request['action'] == 'execute':
     session.save_question = 'Do you want to save the APQP data?'
     enable_bulk_dates(session)
-if request['action'] == 'query':
+if request['action'] in {'query', 'agent-query'}:
     # Exercise automatic same-window navigation and the batched date path through
     # renderer -> IPC -> runner -> native protocol, not just unit tests.
-    session.state, session.Info.Transaction = 'other', 'ME11'
+    if request['action'] == 'query':
+        session.state, session.Info.Transaction = 'other', 'ME11'
     enable_bulk_dates(session)
     # The recorded example has grey RTS Confirmation. Other fields remain editable.
     session.dates[apqp_date_update.DATE_FIELDS[0].control_id].Changeable = False

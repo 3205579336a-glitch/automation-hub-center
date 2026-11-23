@@ -2,6 +2,7 @@ import { ipcMain } from 'electron'
 import { IPC_CHANNELS } from '../../shared/ipc-channels'
 import { isApqpDateExecuteRequest, isApqpDatePreviewRequest, isApqpDateQuery, type ApqpDateError } from '../../shared/apqp-date-types'
 import type { ApqpDateService } from '../services/apqp-date-service'
+import { ApqpDateQueryOperation } from '../services/apqp-date-query-operation'
 import type { GuidedAutomationService } from '../services/guided-automation-service'
 import type { ExecutionHistoryService } from '../services/execution-history-service'
 import type { DiagnosticLogger } from '../services/diagnostic-logger'
@@ -9,7 +10,8 @@ import type { LocalIntelligenceService } from '../services/local-intelligence-se
 import { isTrustedRenderer } from './ipc-security'
 
 export function registerApqpDateHandlers(service: ApqpDateService, guided: GuidedAutomationService,
-  history: ExecutionHistoryService, logger: DiagnosticLogger, intelligence?: LocalIntelligenceService): void {
+  history: ExecutionHistoryService, logger: DiagnosticLogger, intelligence?: LocalIntelligenceService,
+  query = new ApqpDateQueryOperation(service, guided, history, logger, intelligence)): void {
   const invalid = (): ApqpDateError => ({ success: false, message: 'Invalid APQP date request.', messageZh: '无效的 APQP 日期请求。', errorCode: 'APQP_DATE_INVALID_REQUEST' })
   ipcMain.handle(IPC_CHANNELS.apqpDateCapabilities, event => isTrustedRenderer(event) ? service.capabilities() : null)
   ipcMain.handle(IPC_CHANNELS.loadCachedApqpDates, async (event, input: unknown) => {
@@ -23,30 +25,9 @@ export function registerApqpDateHandlers(service: ApqpDateService, guided: Guide
   })
   ipcMain.handle(IPC_CHANNELS.queryApqpDates, async (event, input: unknown) => {
     if (!isTrustedRenderer(event) || !isApqpDateQuery(input)) return invalid()
-    let runId = '', entryId = ''
-    try {
-      runId = guided.begin()
-      const entry = await history.start({ operation: 'apqp-date-management', diagnosticRunId: runId,
-        apqpDateAction: 'query', label: 'APQP date discovery (read-only)', summary: `Finding APQPs for NPL ${input.project}.`, tcode: 'ZMFM050035' })
-      entryId = entry.id
-      intelligence?.begin(entryId, 'apqp-date-management', runId)
-      await logger.info({ category: 'automation', event: 'apqp.dates.query-started', message: 'APQP date discovery started (read-only).', tcode: 'ZMFM050035', details: { runId, project: input.project, environment: input.environment } })
-      const result = await service.query(input, progress => { intelligence?.observe(entryId, progress); if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress) }, { service: guided, runId })
-      const performance = intelligence?.finish(entryId, result.success ? 'Success' : result.cancelled ? 'Cancelled' : 'Failed')
-      await history.finish(entry.id, result.success ? { status: 'Success', summary: `Read ${result.snapshot.records.length} APQPs. No SAP dates changed.`,
-        total: result.snapshot.records.length, processed: result.snapshot.records.length, succeeded: result.snapshot.records.length,
-        failed: 0, sessionCount: 1, resultPath: result.snapshot.resultPath, performance }
-        : { status: result.cancelled ? 'Cancelled' : 'Failed', summary: result.message, logPath: result.logPath, performance })
-      if (result.success) guided.registerArtifacts(result.snapshot.resultPath)
-      else if (result.logPath) guided.registerArtifacts(result.logPath)
-      await logger.info({ category: 'automation', event: 'apqp.dates.query-finished', message: result.success ? 'APQP date discovery finished; no SAP dates changed.' : result.message, tcode: 'ZMFM050035', details: { runId } })
-      return result
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (entryId) await history.finish(entryId, { status: 'Failed', summary: message, performance: intelligence?.finish(entryId, 'Failed') }).catch(() => undefined)
-      await logger.error({ category: 'automation', event: 'apqp.dates.query-failed', message, tcode: 'ZMFM050035' })
-      return { success: false, message, errorCode: 'APQP_DATE_QUERY_FAILED' }
-    } finally { if (entryId) intelligence?.finish(entryId, 'Cancelled'); if (runId) guided.end(runId) }
+    return query.query(input, progress => {
+      if (!event.sender.isDestroyed()) event.sender.send(IPC_CHANNELS.apqpProgress, progress)
+    })
   })
   ipcMain.handle(IPC_CHANNELS.previewApqpDateChanges, async (event, input: unknown) => {
     if (!isTrustedRenderer(event) || !isApqpDatePreviewRequest(input)) return invalid()
