@@ -2,6 +2,21 @@
 
 Phase 1 accepts one action, `QUERY_APQP_PLANNED_DATES`. The checked-in implementation runs offline with an in-memory queue and fake SAP. The standard Hub starts with polling disabled. Production enablement requires the Graph adapter and the Windows operator verifier described below.
 
+## Run the offline demo on Windows
+
+From a new PowerShell window, use the feature worktree or replace the path with your checkout of `codex/copilot-agent-bridge`.
+
+```powershell
+Set-Location -LiteralPath "$env:USERPROFILE\Desktop\automation-hub-copilot-bridge"
+npm.cmd ci
+py -3 -c "import pythoncom, win32com.client, win32con, win32gui"
+npm.cmd run demo:pah-agent
+```
+
+If the Python import check reports missing modules, run `py -3 -m pip install pywin32` before starting the demo. Dependency installation may download packages. With dependencies installed, the demo runs without network access, SAP GUI, Microsoft Graph, SharePoint or tenant credentials.
+
+The console shows submission, request and operator validation, a queue claim, the native APQP query against Fake SAP, result writeback and the persisted Hub history entry. It prints one sample record and the paths to `queue-result.json` and `execution-history.json` in a new temporary folder. The demo checks that all 25 fixture records were returned, the job/run/history IDs agree and the native trace records one query with zero write events. The desktop approval is synthetic and lives only in the demo process.
+
 ## Existing architecture and bridge changes
 
 | Area | Existing safeguard | Bridge integration |
@@ -63,6 +78,12 @@ The successful result has this shape. A `null` field means SAP returned a verifi
 5. Allow only `Queued → Running → Succeeded | Failed | Review Required`. One worker owns a partition. On an approved restart, the worker resends persisted completions first. A remaining `Running` record has no recoverable outcome and becomes `Review Required`. Never reset or reassign a claimed item. If authorized staff decide to request another read after review, enqueue a new job with a new invocation key.
 
 Microsoft documents conditional updates and list-scoped permissions. Verify both on the exact endpoints using the tenant's approved identities before deployment. [Graph list-item update](https://learn.microsoft.com/en-us/graph/api/listitem-update?view=graph-rest-1.0) · [Selected permissions](https://learn.microsoft.com/en-us/graph/permissions-selected-overview)
+
+### Smallest next implementation
+
+Implement only the worker-facing `PahJobQueue` methods in a new adapter, using an injected Entra-authenticated Graph client and one approved list. Keep the worker dormant in the normal Hub. Exercise the adapter with an HTTP stub for wrong-list or malformed rows, stale ETags, throttling, interrupted requests and a lost completion acknowledgment. Constrain pagination links to the configured Graph origin and list before attaching authorization, and use request timeouts and the worker's abort signal. [Graph throttling](https://learn.microsoft.com/en-us/graph/throttling)
+
+For the first staging run, use one private test list, one IT-approved identity with an explicit list grant, one worker partition, one authorized operator and Fake SAP. Use verified Entra requester claims from trusted ingress and a positive Windows console/session and operator check before any polling. Keep tokens in the approved provider and protect the local outbox, which can hold business results while writeback is pending. Require a successful staging run with both gates exercised before wiring into a production deployment.
 
 ## Copilot Studio workflow configuration
 

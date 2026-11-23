@@ -1,30 +1,11 @@
 /* global AbortController, structuredClone */
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { test } from 'node:test'
-import ts from 'typescript'
-
-const require = createRequire(import.meta.url)
-const modules = new Map()
-function load(path) {
-  const file = resolve(path)
-  if (modules.has(file)) return modules.get(file).exports
-  const module = { exports: {} }
-  modules.set(file, module)
-  const code = ts.transpileModule(readFileSync(file, 'utf8'), {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
-  }).outputText
-  new Function('require', 'module', 'exports', code)(name => {
-    if (name === 'electron') return { BrowserWindow: { getAllWindows: () => [] } }
-    return name.startsWith('.') ? load(join(dirname(file), name + '.ts')) : require(name)
-  }, module, module.exports)
-  return module.exports
-}
+import { loadPahModule as load } from './fixtures/load-pah-module.mjs'
 const get = name => load(`src/main/services/${name}.ts`)
 const { ApqpDateService } = get('apqp-date-service')
 const { ApqpDateQueryOperation } = get('apqp-date-query-operation')
