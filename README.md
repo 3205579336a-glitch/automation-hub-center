@@ -19,6 +19,8 @@ Download the Windows ZIP from [v0.3.0 Releases](https://github.com/3205579336a-g
 
 The earlier [English manual](docs/USER_MANUAL.md), [中文手册](docs/USER_MANUAL_ZH.md), and printable PDFs in `output/pdf/` are archived **0.2.4** references, not current workflow instructions.
 
+For the optional Copilot Studio APQP read bridge, see the [queue schema, offline tests and IT deployment guide](docs/PAH_AGENT_BRIDGE.md).
+
 ## Operations
 
 | Task | Business inputs | SAP access |

@@ -70,15 +70,16 @@ export class ApqpRunner {
   }
 
   /** Shares process exclusion, Stop, progress and the native interaction bridge with the old query. */
-  async dates(request: Record<string, unknown>, report: (event: ApqpProgress) => void, guidance: GuidanceContext): Promise<ApqpNativeDateResult> {
+  async dates(request: Record<string, unknown>, report: (event: ApqpProgress) => void, guidance: GuidanceContext, signal?: AbortSignal): Promise<ApqpNativeDateResult> {
     try {
       const event = await this.execute({ excelPath: '', sheetName: '', plant: 'C100', system: '', client: '',
-        maxWorkers: 1, createSessions: false, maxItems: 0, overwriteExisting: false, confirmed: false }, false, report, guidance, request)
+        maxWorkers: 1, createSessions: false, maxItems: 0, overwriteExisting: false, confirmed: false }, false, report, guidance, request, signal)
       return event.dateResult ?? { success: false, message: 'The APQP date engine did not return a supported result.', errorCode: 'APQP_DATE_ENGINE_UNAVAILABLE' }
     } catch (error) { return { success: false, message: messageOf(error), errorCode: 'APQP_DATE_ENGINE_FAILED' } }
   }
 
-  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void, guidance?: GuidanceContext, dates?: Record<string, unknown>): Promise<EngineEvent> {
+  private async execute(config: ApqpConfig, preview: boolean, report: (event: ApqpProgress) => void, guidance?: GuidanceContext,
+    dates?: Record<string, unknown>, signal?: AbortSignal): Promise<EngineEvent> {
     if (this.busy) throw new Error('An APQP preview or run is already active.')
     this.busy = true
     this.previewing = preview
@@ -92,6 +93,7 @@ export class ApqpRunner {
         if (!dateRequestPath) throw new Error('An owned log directory is required for APQP date requests.')
         await writeFile(dateRequestPath, JSON.stringify(dates), { encoding: 'utf8', flag: 'wx' })
       }
+      signal?.throwIfAborted()
       return await new Promise<EngineEvent>((resolve, reject) => {
         let final: EngineEvent | undefined
         const errors: string[] = []
@@ -109,6 +111,8 @@ export class ApqpRunner {
             OVERWRITE_EXISTING_DATE: String(config.overwriteExisting) }
         })
         this.child = child
+        const stop = (): void => { this.cancel() }
+        signal?.addEventListener('abort', stop, { once: true })
         const interactions = guidance ? new NativeInteractionBridge(guidance, child) : null
         const stdout = createInterface({ input: child.stdout })
         const stderr = createInterface({ input: child.stderr })
@@ -124,8 +128,9 @@ export class ApqpRunner {
         })
         stderr.on('line', (line) => { errors.push(line); if (errors.length > 10) errors.shift() })
         child.stdin.on('error', () => undefined)
-        child.once('error', reject)
+        child.once('error', error => { signal?.removeEventListener('abort', stop); reject(error) })
         child.once('close', (code) => {
+          signal?.removeEventListener('abort', stop)
           stdout.close(); stderr.close()
           if (code !== 0 || !final) reject(new Error(errors.at(-1) || 'APQP stopped without a result. Check Excel, SAP GUI and SAP GUI Scripting.'))
           else resolve(final)

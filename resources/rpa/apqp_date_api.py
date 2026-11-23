@@ -118,8 +118,15 @@ def read_records(reader, grid, wanted, emit, persist):
 
 def run(request, legacy, app, stop, emit, persist, checkpoint=None):
     action = request.get('action')
-    if action not in {'query', 'preview', 'execute'}:
+    if action not in {'query', 'agent-query', 'preview', 'execute'}:
         raise ValueError('Unsupported APQP date action.')
+    agent_sap_user = request.get('agentSapUser')
+    if action == 'agent-query':
+        if not isinstance(agent_sap_user, str) or not re.fullmatch(r'[A-Za-z0-9_/-]{1,32}', agent_sap_user):
+            fail('APQP_DATE_INVALID_AGENT_READ', 'Invalid agent read context.', '无效的代理查询上下文。')
+        action = 'query'
+    elif 'agentSapUser' in request:
+        fail('APQP_DATE_INVALID_AGENT_READ', 'Invalid agent read context.', '无效的代理查询上下文。')
     query = request.get('query', {})
     if (query.get('environment') not in {'QA', 'PROD'} or any(not isinstance(query.get(key), str)
             or not re.fullmatch(r'[A-Za-z0-9_/-]{1,32}', query[key]) for key in ('project', 'userId'))):
@@ -136,9 +143,10 @@ def run(request, legacy, app, stop, emit, persist, checkpoint=None):
             return run_updates(request, legacy, app, stop, emit, persist, checkpoint)
         if action == 'query':
             started = time.monotonic()
-            reader = select_reader(legacy, app, SimpleNamespace(mode='discover', session_id='', allow_navigation=True), stop)
+            reader = select_reader(legacy, app, SimpleNamespace(mode='discover', session_id='', allow_navigation=True,
+                                                               agent_sap_user=agent_sap_user), stop)
             grid = reader.discover(query['project'], query['userId'], scroll=True, required_columns=IDENTITY_COLUMNS,
-                                   allow_navigation=True, batch_rows=True)
+                                   allow_navigation=agent_sap_user is None, batch_rows=True)
             reader.metrics['selectionAndListMs'] = round((time.monotonic() - started) * 1000)
             queue = identities(grid, query['project'], query['userId'])
             records = read_records(reader, grid, list(queue.values()), emit, persist)
@@ -366,7 +374,6 @@ def main():
 
     stop = threading.Event()
     hub = HubUserInteraction('APQP', emit, stop)
-    hub.start_listener()
     directory = Path(os.environ['HUB_ARTIFACT_DIR']).resolve()
     target = directory / 'apqp-dates-result.json'
     state = dict(readOnly=True, writesEnabled=False, records=[], writePolicy=date_update.write_policy())
@@ -403,8 +410,9 @@ def main():
         if request_path.parent != directory or request_path.stat().st_size > 16_000_000:
             raise ValueError('Invalid owned APQP request file.')
         request = json.loads(request_path.read_text(encoding='utf-8'))
-        if request.get('action') not in {'query', 'preview', 'execute'}:
+        if request.get('action') not in {'query', 'agent-query', 'preview', 'execute'}:
             fail(WRITE_GATE, 'Date writes are not enabled. No SAP action was sent.', '日期写入尚未开放，未向 SAP 发送操作。')
+        hub.start_listener(stop_on_eof=request['action'] == 'agent-query')
         import pythoncom
         import apqp_plan_closure as legacy
         pythoncom.CoInitialize()

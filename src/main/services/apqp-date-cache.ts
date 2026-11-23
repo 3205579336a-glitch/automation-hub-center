@@ -22,13 +22,13 @@ export class ApqpDateCache {
       .filter(entry => entry.completedAt && Number.isFinite(Date.parse(entry.completedAt))
         && Date.parse(entry.completedAt) <= this.now() && this.now() - Date.parse(entry.completedAt) < RETENTION)
       .sort((a, b) => Date.parse(b.completedAt!) - Date.parse(a.completedAt!))
-    for (const entry of entries.filter(entry => entry.apqpDateAction === 'query' && entry.status === 'Success')) {
+    for (const entry of entries.filter(entry => entry.apqpDateAction === 'query' && !entry.agentJobId && entry.status === 'Success')) {
       try {
         const id = entry.diagnosticRunId
         if (!id) continue
         await this.owned(id)
         const request = await this.json(id, 'apqp-date-request.json')
-        if (request.action !== 'query' || !sameQuery(request.query, query)) continue
+        if (request.action !== 'query' || 'agentSapUser' in request || !sameQuery(request.query, query)) continue
         const data = await this.json(id, 'apqp-dates-result.json')
         if (data.fieldSchema !== APQP_DATE_SCHEMA || data.readOnly !== true || data.error || data.errorCode || !Array.isArray(data.records)
           || !data.session || typeof data.session !== 'object') continue

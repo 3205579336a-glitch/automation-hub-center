@@ -9,6 +9,7 @@ import { APQP_DATE_CAPABILITIES, APQP_DATE_KEYS, APQP_DATE_SCHEMA, isApqpDates, 
   type ApqpNativeDateData, type ApqpDateRecord } from '../../shared/apqp-date-types'
 
 interface StoredSnapshot { snapshot: ApqpDateSnapshot; session: ApqpNativeDateData['session']; expires: number }
+export interface ApqpAgentRead { sapUser: string; signal: AbortSignal }
 const HOUR = 3_600_000
 const rejected = (message: string, messageZh: string, errorCode: string): ApqpDateError => ({ success: false, message, messageZh, errorCode })
 
@@ -40,21 +41,26 @@ export class ApqpDateService {
     return { success: true, snapshot: structuredClone(snapshot) }
   }
 
-  async query(query: ApqpDateQuery, report: (event: ApqpProgress) => void, context: GuidanceContext): Promise<ApqpDateQueryResult> {
+  async query(query: ApqpDateQuery, report: (event: ApqpProgress) => void, context: GuidanceContext, agent?: ApqpAgentRead): Promise<ApqpDateQueryResult> {
     this.prune()
     if (query.environment !== 'PROD') return rejected('APQP date management uses SAP 949.', 'APQP 日期管理固定使用 SAP 949。', 'APQP_DATE_PRODUCTION_ONLY')
-    const result = await this.runner.dates({ action: 'query', query }, report, context)
+    // Older engines reject agent-query before touching SAP, rather than silently ignoring the account binding.
+    const request = agent ? { action: 'agent-query', query, agentSapUser: agent.sapUser } : { action: 'query', query }
+    const result = await this.runner.dates(request, report, context, agent?.signal)
     if (!result.success) return result
     if (!result.data || result.data.fieldSchema !== APQP_DATE_SCHEMA || !validRecords(result.data.records) || !validSession(result.data.session)
       || result.data.session.system !== (query.environment === 'PROD' ? 'VCE' : 'CEQ') || result.data.session.client !== '100') {
       return rejected('The native date snapshot is incomplete. Query again.', '原生日期快照不完整，请重新查询。', 'APQP_DATE_INVALID_SNAPSHOT')
+    }
+    if (agent && result.data.session.sapUser.toUpperCase() !== agent.sapUser.toUpperCase()) {
+      return rejected('SAP session identity did not match the authorized operator.', 'SAP 会话身份与授权操作员不符。', 'SAP_AGENT_SESSION_MISMATCH')
     }
     if (result.data.records.some(row => !['C100', '0000'].includes(row.plant) || row.project !== query.project)) {
       return rejected('The returned records do not match the query.', '返回记录与查询条件不一致。', 'APQP_DATE_INVALID_SNAPSHOT')
     }
     const snapshot: ApqpDateSnapshot = { ...query, id: context.runId, createdAt: new Date(this.now()).toISOString(),
       records: structuredClone(result.data.records), resultPath: result.resultPath }
-    this.snapshots.set(snapshot.id, { snapshot, session: structuredClone(result.data.session), expires: this.now() + HOUR })
+    if (!agent) this.snapshots.set(snapshot.id, { snapshot, session: structuredClone(result.data.session), expires: this.now() + HOUR })
     return { success: true, snapshot: structuredClone(snapshot) }
   }
 

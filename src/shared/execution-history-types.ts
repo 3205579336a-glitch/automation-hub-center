@@ -18,6 +18,7 @@ export interface ExecutionHistoryEntry {
   /** Advisory active timings only; old wall-clock durations are not ETA samples. */
   performance?: PerformanceSample
   apqpDateAction?: 'query' | 'preview' | 'update'
+  agentJobId?: string
   apqpStaged?: number
   /** Number of changed APQP date fields saved and verified, never inferred from rows. */
   apqpDateFieldsSaved?: number

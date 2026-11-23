@@ -13,6 +13,7 @@ from apqp_date_api import run, save_summary, WRITE_GATE, IDENTITY_COLUMNS, locat
 from apqp_dates import ApqpDateIssue, DATE_FIELDS
 from apqp_date_fakes import DateSession, application, legacy, enable_bulk_dates
 from apqp_date_discovery import ApqpDiscovery
+from apqp_plan_closure import SapSessionCheckError
 
 
 class ApiTests(unittest.TestCase):
@@ -59,6 +60,35 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.session.state, 'grid')
         self.assertEqual(result['session']['client'], '100')
         self.assertEqual(len(self.saved), 3)
+
+    def test_agent_query_binds_the_signed_in_account_before_navigation(self):
+        with self.assertRaises(ApqpDateIssue) as issue:
+            self.call(dict(action='agent-query', query=self.query, agentSapUser='WRONG'))
+        self.assertEqual(issue.exception.code, 'SAP_AGENT_SESSION_MISMATCH')
+        self.assertEqual(self.session.calls, [])
+        result = self.call(dict(action='agent-query', query=self.query, agentSapUser=self.session.Info.User.lower()))
+        self.assertEqual(len(result['records']), 3)
+        self.assertFalse(result['findings']['writesEnabled'])
+
+    def test_agent_query_rejects_existing_detail_work_and_other_transactions(self):
+        for state, transaction in [('detail', legacy.TCODE), ('other', 'ME11')]:
+            with self.subTest(transaction=transaction):
+                self.session.state, self.session.Info.Transaction = state, transaction
+                with self.assertRaises((ApqpDateIssue, SapSessionCheckError)) as issue:
+                    self.call(dict(action='agent-query', query=self.query, agentSapUser=self.session.Info.User))
+                self.assertIn(issue.exception.code, ('SAP_SESSION_UNAVAILABLE', 'SAP_NO_IDLE_SESSION'))
+                self.assertEqual(self.session.calls, [])
+
+    def test_agent_context_cannot_enable_preview_or_writes(self):
+        for action in ('query', 'preview', 'execute'):
+            with self.subTest(action=action), self.assertRaises(ApqpDateIssue) as issue:
+                self.call(dict(action=action, query=self.query, agentSapUser=self.session.Info.User))
+            self.assertEqual(issue.exception.code, 'APQP_DATE_INVALID_AGENT_READ')
+            self.assertEqual(self.session.calls, [])
+        with self.assertRaises(ApqpDateIssue) as issue:
+            self.call(dict(action='agent-query', query=self.query))
+        self.assertEqual(issue.exception.code, 'APQP_DATE_INVALID_AGENT_READ')
+        self.assertEqual(self.session.calls, [])
 
     def test_48_record_query_reuses_one_bound_reader_and_limits_session_roundtrips(self):
         self.session = DateSession(count=48)
